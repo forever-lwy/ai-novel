@@ -1,0 +1,43 @@
+import { afterEach, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildApp } from '../server/app.js';
+
+const contexts: Awaited<ReturnType<typeof buildApp>>[] = [];
+afterEach(async () => { for (const ctx of contexts.splice(0)) await ctx.app.close(); });
+
+it('keeps imported responses and failed manual edits private, then applies an exact citation without calling a model', async () => {
+  const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-output-api-')), startEngine: false }); contexts.push(ctx);
+  const setup = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'test-output-password' } });
+  const session = setup.cookies.find(c => c.name === 'session')!.value;
+  const project = ctx.store.createProject({ title: '中性引用修复测试' });
+  const text = '“回来了。”旅人走进古城。';
+  const view = ctx.store.saveChapter(project.mainBranchId, { baseRevisionId: ctx.store.getBranch(project.mainBranchId).revisionId, title: '第一章', text });
+  const job = ctx.engine.enqueue(project.mainBranchId, 'extract', { baseRevisionId: view.branch.revisionId }); ctx.engine.action(job.id, 'pause');
+  const result = { summary: '旅人回到古城。', entities: [{ kind: 'character', name: '旅人', aliases: [], description: '归来的旅人', visibility: 'public', facts: [{ text: '旅人来到古城', temporal: 'current', certainty: 'fact', visibility: 'public', paragraph: 1, quote: '回来了。旅人走进山谷。' }] }], relations: [], foreshadows: [] };
+  const raw = JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(result) }] }, finishReason: 'STOP' }] });
+  const url = `/api/jobs/${job.id}/outputs`;
+  expect((await ctx.app.inject({ url, cookies: { session } })).statusCode).toBe(403);
+  expect((await ctx.app.inject({ method: 'POST', url, cookies: { session }, payload: { text: raw } })).statusCode).toBe(403);
+  const imported = await ctx.app.inject({ method: 'POST', url: `${url}?view=author`, cookies: { session }, payload: { text: raw } });
+  expect(imported.statusCode).toBe(200); const output = imported.json();
+  const outputUrl = `${url}/${output.id}`;
+  expect((await ctx.app.inject({ url: outputUrl, cookies: { session } })).statusCode).toBe(403);
+  const invalid = await ctx.app.inject({ method: 'POST', url: `${outputUrl}/apply?view=author`, cookies: { session }, payload: { text: JSON.stringify(result), baseRevisionId: output.baseRevisionId } });
+  expect(invalid.statusCode).toBe(422);
+  const detail = (await ctx.app.inject({ url: `${outputUrl}?view=author`, cookies: { session } })).json();
+  expect(detail.output.rawResponse).toBe(raw); expect(detail.output.editedText).toBe(JSON.stringify(result));
+  expect(detail.output.issues[0].path).toContain('facts'); expect(detail.output.issues[0].sourceText).toBe(text);
+  expect(ctx.store.state(project.mainBranchId).entities).toHaveLength(0);
+  result.entities[0].facts[0].quote = text;
+  const applied = await ctx.app.inject({ method: 'POST', url: `${outputUrl}/apply?view=author`, cookies: { session }, payload: { text: JSON.stringify(result), baseRevisionId: output.baseRevisionId } });
+  expect(applied.statusCode).toBe(200); expect(applied.json().status).toBe('completed');
+  expect(ctx.store.state(project.mainBranchId).entities[0].facts[0].citation?.quote).toBe(text);
+  const latest = (await ctx.app.inject({ url: `${outputUrl}?view=author`, cookies: { session } })).json();
+  expect(latest.output.status).toBe('applied'); expect(latest.output.rawResponse).toBe(raw); expect(latest.canApply).toBe(false);
+  const summaries = (await ctx.app.inject({ url: `${url}?view=author`, cookies: { session } })).json();
+  expect(summaries[0].normalizedText).toBeUndefined(); expect(summaries[0].adjustments).toBeUndefined();
+  expect((await ctx.app.inject({ method: 'POST', url: `${outputUrl}/apply?view=author`, cookies: { session }, payload: { text: JSON.stringify(result), baseRevisionId: output.baseRevisionId } })).statusCode).toBe(409);
+  expect((await ctx.app.inject({ url: `/api/jobs?projectId=${project.id}`, cookies: { session } })).body).not.toContain('旅人');
+});

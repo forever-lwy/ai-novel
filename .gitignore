@@ -1,0 +1,36 @@
+# 本地配置与凭据
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+
+# 日志与临时文件
+*.log
+*.tmp
+*.swp
+*~
+.cache/
+tmp/
+
+# 依赖与构建产物（按后续技术选型调整）
+node_modules/
+dist/
+build/
+coverage/
+.venv/
+__pycache__/
+*.pyc
+
+# 系统文件
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 小说、数据库、凭据和浏览器测试产物
+data/
+.runtime/
+test-results/
+playwright-report/
+*.tsbuildinfo
