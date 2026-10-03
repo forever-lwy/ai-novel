@@ -3,7 +3,8 @@ import { promisify } from 'node:util';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import type { Settings, ProviderConfig } from '../shared/types.js';
+import type { Settings, ProviderConnection } from '../shared/types.js';
+import { connectionOnly, normalizeModelSettings } from '../shared/model-settings.js';
 
 const scrypt = promisify(scryptCallback);
 export async function hashPassword(password: string) {
@@ -19,7 +20,10 @@ export async function verifyPassword(password: string, stored: string) {
   return hash.length === expected.length && timingSafeEqual(hash, expected);
 }
 export const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
-export const defaultSettings = (): Settings => ({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '', taskTokenLimit: 100000 });
+export const defaultSettings = (): Settings => ({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '', writingModel: '', planningModel: '', extractionModel: '', modelParameters: [] });
+export function normalizeSettings(settings: Settings): Settings {
+  return normalizeModelSettings(settings);
+}
 
 export class SettingsStore {
   private key: Buffer;
@@ -48,7 +52,7 @@ export class SettingsStore {
     const raw = this.meta('settings');
     if (!raw) return defaultSettings();
     const saved = JSON.parse(raw) as Settings;
-    return { ...saved, providers: saved.providers.map(p => ({ ...p, apiKey: p.apiKey ? this.decrypt(p.apiKey) : '' })) };
+    return normalizeSettings({ ...saved, providers: saved.providers.map(p => ({ ...p, apiKey: p.apiKey ? this.decrypt(p.apiKey) : '' })) });
   }
   public(): Settings {
     return this.redact(this.get());
@@ -56,18 +60,22 @@ export class SettingsStore {
   private redact(settings: Settings): Settings {
     return { ...settings, providers: settings.providers.map(({ apiKey, ...p }) => ({ ...p, hasKey: Boolean(apiKey) })) };
   }
+  resolveProvider(provider: ProviderConnection): ProviderConnection {
+    const { hasKey: _hasKey, clearApiKey: _clearApiKey, ...clean } = connectionOnly(provider);
+    const previous = this.get().providers.find(saved => saved.id === provider.id);
+    // Reuse a saved key only for the same origin, including when looking up an unsaved draft's models.
+    const sameOrigin = previous && new URL(previous.baseUrl).origin === new URL(provider.baseUrl).origin;
+    const apiKey = provider.clearApiKey ? '' : provider.apiKey || (sameOrigin ? previous.apiKey : '') || '';
+    return { ...clean, apiKey };
+  }
   save(settings: Settings) {
-    const old = this.get();
-    const providers = settings.providers.map(p => {
-      const { hasKey: _hasKey, clearApiKey: _clearApiKey, ...clean } = p;
-      const previous = old.providers.find(oldP => oldP.id === p.id);
-      // A saved key is not silently forwarded when a connection is moved to another service.
-      const sameOrigin = previous && new URL(previous.baseUrl).origin === new URL(p.baseUrl).origin;
-      const apiKey = p.clearApiKey ? '' : p.apiKey || (sameOrigin ? previous.apiKey : '') || '';
-      return { ...clean, apiKey: apiKey ? this.encrypt(apiKey) : '' };
+    const normalized = normalizeSettings(settings);
+    const providers = normalized.providers.map(provider => {
+      const resolved = this.resolveProvider(provider);
+      return { ...resolved, apiKey: resolved.apiKey ? this.encrypt(resolved.apiKey) : '' };
     });
-    this.setMeta('settings', JSON.stringify({ ...settings, providers }));
+    this.setMeta('settings', JSON.stringify({ ...normalized, providers }));
     return this.public();
   }
-  provider(id: string): ProviderConfig | undefined { return this.get().providers.find(p => p.id === id); }
+  provider(id: string): ProviderConnection | undefined { return this.get().providers.find(p => p.id === id); }
 }

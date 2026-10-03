@@ -33,7 +33,7 @@ describe('HTTP boundaries and persistence', () => {
   });
   it('persists encrypted keys, masks them in responses and keeps them out of backups', async () => {
     const ctx = await make(), session = await login(ctx);
-    const input: Settings = { providers: [{ id: 'test', name: '测试', protocol: 'openai-chat', baseUrl: 'https://example.com/v1', model: 'example', apiKey: 'private-test-secret', maxOutputTokens: 2048, contextTokens: 32000 }], writingProviderId: 'test', planningProviderId: 'test', extractionProviderId: 'test', taskTokenLimit: 10000 };
+    const input: Settings = { providers: [{ id: 'test', name: '测试', protocol: 'openai-chat', baseUrl: 'https://example.com/v1', model: 'example', apiKey: 'private-test-secret', maxOutputTokens: 2048, contextTokens: 32000 }], writingProviderId: 'test', planningProviderId: 'test', extractionProviderId: 'test' };
     const response = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: { session }, payload: input });
     expect(response.statusCode).toBe(200); expect(response.body).not.toContain('private-test-secret');
     expect(response.json().providers[0]).toMatchObject({ hasKey: true });

@@ -11,7 +11,7 @@ const cleanup: { store: Store; engine: StoryEngine }[] = [];
 afterEach(async () => { for (const context of cleanup.splice(0)) { await context.engine.close(); context.store.close(); } });
 const extraction = (): ExtractionResult => ({ summary: '记录员完成检查。', entities: [], relations: [], foreshadows: [] });
 const planning = (): PlanningResult => ({ coarse: '记录员调查沿岸灯塔。', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第${chapter}章`, goal: '检查设备并记录线索。' })), foreshadows: [] });
-const settings = (): Settings => ({ providers: [{ id: 'fixture', name: '中性模拟服务', protocol: 'gemini', baseUrl: 'http://unused.invalid', model: 'fixture', apiKey: 'test-configured-key-DO-NOT-PERSIST', maxOutputTokens: 4096, contextTokens: 64000 }], planningProviderId: 'fixture', writingProviderId: 'fixture', extractionProviderId: 'fixture', taskTokenLimit: 1000000 });
+const settings = (): Settings => ({ providers: [{ id: 'fixture', name: '中性模拟服务', protocol: 'gemini', baseUrl: 'http://unused.invalid', model: 'fixture', apiKey: 'test-configured-key-DO-NOT-PERSIST', maxOutputTokens: 4096, contextTokens: 64000 }], planningProviderId: 'fixture', writingProviderId: 'fixture', extractionProviderId: 'fixture' });
 function provider(response: (request: ModelRequest, writing: boolean) => Promise<string> | string): TextModels {
   const text = async (request: ModelRequest, writing: boolean) => { const body = await response(request, writing); request.onResponse?.({ rawResponse: JSON.stringify({ candidates: [{ content: { parts: [{ text: body }] } }] }), text: body, inputTokens: 13, outputTokens: 21, httpStatus: 200 }); return body; };
   return {

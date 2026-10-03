@@ -42,7 +42,7 @@ export default function App() {
 
   return <div className="app-shell">
     {current ? <Workspace projectId={current} onBack={() => { setCurrent(null); loadProjects().catch(e => setError(e.message)); }} onSettings={() => setSettings(true)} /> : <>
-      <header className="site-header"><Brand /><div className="header-actions"><button className="text-button" onClick={() => setSettings(true)}><SettingsIcon size={17} /><span>模型设置</span></button><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={async () => { try { await post('/auth/logout'); setAuth({ initialized: true, authenticated: false }); } catch (e) { setError((e as Error).message); } }}><LogOut size={18} /></button></div></header>
+      <header className="site-header"><Brand /><div className="header-actions"><button className="text-button" onClick={() => setSettings(true)}><SettingsIcon size={17} /><span>供应商设置</span></button><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={async () => { try { await post('/auth/logout'); setAuth({ initialized: true, authenticated: false }); } catch (e) { setError((e as Error).message); } }}><LogOut size={18} /></button></div></header>
       <main className="shelf-page">
         <section className="shelf-intro"><div><span className="eyebrow"><span className="tiny-dot" /> 私人创作空间</span><h1>每一个故事，<br /><em>都值得成为一个世界。</em></h1><p>从一段灵感开始，或走进一本熟悉的小说。<br />让人物、地点与埋下的伏笔，陪故事一起生长。</p></div><div className="intro-art" aria-hidden="true"><div className="art-orbit orbit-one" /><div className="art-orbit orbit-two" /><div className="art-book"><Feather size={56} strokeWidth={1} /><span>故事未完</span><small>THE WORLD CONTINUES</small></div><span className="art-star star-one">✧</span><span className="art-star star-two">✧</span></div></section>
         {error && <Notice error={error} onClose={() => setError('')} />}
@@ -52,7 +52,7 @@ export default function App() {
         <footer className="shelf-footer"><span><FolderOpen size={14} />作品保存在你的私人服务器</span><span>文字 · 世界 · 无限可能</span></footer>
       </main>
     </>}
-    {settings && <Modal title="模型与生成设置" wide onClose={() => setSettings(false)}><SettingsPanel /></Modal>}
+    {settings && <Modal title="供应商与任务模型设置" wide onClose={() => setSettings(false)}><SettingsPanel /></Modal>}
     {create && <Modal title="开启一部新作品" onClose={() => !busy && setCreate(false)}><form onSubmit={createProject} className="form-stack"><label>作品名称<input autoFocus required maxLength={120} placeholder="给这个世界起个名字" value={title} onChange={e => setTitle(e.target.value)} /></label><label>创作方式<select value={mode} onChange={e => setMode(e.target.value as Mode)}>{Object.entries(modeNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>最初的设定<textarea rows={5} placeholder="世界是什么样的？谁会走进这个故事？也可以先留白，进入后导入原作。" value={premise} onChange={e => setPremise(e.target.value)} /></label><p className="hint">原作与新创作的正文分别保存。你可以随时从某一章建立新的故事线。</p>{error && <Notice error={error} />}<button className="button primary" type="submit" disabled={busy || !title.trim()}><Sparkles size={17} />{busy ? '正在创建…' : '创建作品'}</button></form></Modal>}
   </div>;
 }

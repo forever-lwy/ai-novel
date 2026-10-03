@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
 // These tests exercise the real UI/server against a local HTTP model fixture.
@@ -37,6 +37,11 @@ async function tab(page: Page, title: string) {
   await page.locator('.workspace-tabs').getByRole('button', { name: new RegExp(`^${title}`) }).click();
 }
 
+async function openModelParameters(role: Locator) {
+  const details = role.locator('.provider-parameters');
+  if (await details.getAttribute('open') === null) await details.locator('summary').click();
+}
+
 async function completedJobs(page: Page, count: number) {
   await tab(page, '任务');
   await expect(page.locator('.job-card .status-pill.failed')).toHaveCount(0);
@@ -54,31 +59,50 @@ async function importNovel(page: Page) {
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
 }
 
-test('首次设置密码、通过界面配置模型，并验证保存后的密钥不回显', async ({ page }) => {
+test('首次设置密码，一个供应商自动获取模型，三个任务各自选择或自定义且密钥不回显', async ({ page }, testInfo) => {
   await page.goto('/');
   await page.getByLabel('登录密码', { exact: true }).fill(password);
   await page.getByLabel('确认密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '创建私人工作台', exact: true }).click();
   await expect(page.getByRole('heading', { name: /我的作品/ })).toBeVisible();
-  await page.getByRole('button', { name: '模型设置', exact: true }).click();
+  await page.getByRole('button', { name: '供应商设置', exact: true }).click();
   const modal = page.getByRole('dialog');
-  await modal.getByRole('button', { name: '添加模型连接', exact: true }).click();
-  await modal.getByLabel('连接名称', { exact: true }).fill('本地浏览器验收模型');
+  await modal.getByRole('button', { name: '添加供应商连接', exact: true }).click();
+  await modal.getByLabel('供应商名称', { exact: true }).fill('本地浏览器验收模型');
   await modal.getByLabel('服务地址', { exact: true }).fill(mockUrl);
-  await modal.getByLabel('模型名称', { exact: true }).fill('e2e-fixture');
   await modal.getByLabel(/API 密钥/).fill('e2e-not-a-real-api-key');
-  await modal.getByRole('combobox', { name: '正文写作', exact: true }).selectOption({ index: 1 });
-  await modal.getByRole('combobox', { name: '大纲规划', exact: true }).selectOption({ index: 1 });
-  await modal.getByRole('combobox', { name: '资料提取', exact: true }).selectOption({ index: 1 });
-  await modal.getByRole('button', { name: '保存并测试连接', exact: true }).click();
+  let listRequests = 0;
+  page.on('request', request => { if (new URL(request.url()).pathname === '/api/settings/models') listRequests++; });
+  await modal.getByRole('combobox', { name: '正文写作供应商', exact: true }).selectOption({ index: 1 });
+  await expect(modal.getByRole('combobox', { name: '正文写作上游模型', exact: true })).toBeEnabled();
+  await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('');
+  await modal.getByRole('combobox', { name: '大纲规划供应商', exact: true }).selectOption({ index: 1 });
+  await modal.getByRole('combobox', { name: '资料提取供应商', exact: true }).selectOption({ index: 1 });
+  await modal.getByRole('combobox', { name: '正文写作上游模型', exact: true }).selectOption('e2e-fixture');
+  await modal.getByRole('combobox', { name: '大纲规划上游模型', exact: true }).selectOption('e2e-planning');
+  await modal.getByLabel('资料提取模型名称', { exact: true }).fill('e2e-custom-extraction');
+  expect(listRequests).toBe(1);
+  await modal.locator('.settings-role-card').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('supplier-task-models-desktop.png'), animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await modal.locator('.settings-task-card').first().scrollIntoViewIfNeeded();
+  expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath('supplier-task-models-mobile.png'), animations: 'disabled' });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await modal.getByRole('button', { name: '正文写作保存并测试连接', exact: true }).click();
   await expect(modal.getByRole('status')).toContainText('服务已返回有效文字');
   await expect(modal.getByLabel(/API 密钥/)).toHaveValue('');
   const response = await page.request.get('/api/settings');
-  expect(await response.text()).not.toContain('e2e-not-a-real-api-key');
+  const saved = await response.json();
+  expect(JSON.stringify(saved)).not.toContain('e2e-not-a-real-api-key');
+  expect(saved.providers).toHaveLength(1);
+  expect(saved.providers[0].model).toBeUndefined();
+  expect(saved).toMatchObject({ writingModel: 'e2e-fixture', planningModel: 'e2e-planning', extractionModel: 'e2e-custom-extraction' });
   await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
 });
 
 test('原创生成保存正文、四章细纲及隐藏伏笔，阅读接口不返回作者秘密', async ({ page }, testInfo) => {
+  const modelBefore = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
   await createProject(page, 'E2E 原创世界');
   await page.getByRole('button', { name: '开始创作', exact: true }).click();
   const modal = page.getByRole('dialog');
@@ -86,6 +110,8 @@ test('原创生成保存正文、四章细纲及隐藏伏笔，阅读接口不�
   await modal.getByLabel('这一次，你想写什么？', { exact: true }).fill('让林舟发现白石城城门下的旧钥匙。');
   await modal.getByRole('button', { name: '开始生成', exact: true }).click();
   await completedJobs(page, 1);
+  const modelAfter = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+  for (const model of ['e2e-fixture', 'e2e-planning', 'e2e-custom-extraction']) expect((modelAfter.modelRequestsByModel[model] || 0) - (modelBefore.modelRequestsByModel[model] || 0)).toBeGreaterThan(0);
   await tab(page, '正文');
   await page.locator('.chapter-list').getByRole('button', { name: /第一章 城门的钥匙/ }).click();
   await expect(page.locator('.prose')).toContainText('林舟来到白石城');
@@ -267,7 +293,7 @@ test('任务操作回归：上游 HTTP500 后可重试、取消并退出登录�
   const providerId = 'e2e-http500-provider';
   const configured = await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '本地故障模拟', protocol: 'openai-chat', baseUrl: mockUrl, model: 'e2e-http500', apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 }],
-    writingProviderId: providerId, planningProviderId: providerId, extractionProviderId: providerId, taskTokenLimit: 100000,
+    writingProviderId: providerId, planningProviderId: providerId, extractionProviderId: providerId,
   } });
   expect(configured.ok()).toBeTruthy();
   const created = await page.request.post('/api/projects', { data: { title: 'E2E 失败任务操作', mode: 'original', premise: '' } });
@@ -322,7 +348,7 @@ test('模型输出修复：保留错误引文及原响应，手工修改后完�
   const providerId = 'e2e-repair-provider';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '本地引用修复模拟', protocol: 'openai-chat', baseUrl: mockUrl, model: 'e2e-quote-mismatch', apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 }],
-    writingProviderId: providerId, planningProviderId: providerId, extractionProviderId: providerId, taskTokenLimit: 100000,
+    writingProviderId: providerId, planningProviderId: providerId, extractionProviderId: providerId,
   } })).ok()).toBeTruthy();
   await createProject(page, 'E2E 手工修正模型输出');
   await page.getByRole('button', { name: '导入小说', exact: true }).click();
@@ -407,7 +433,7 @@ test('简化提取：只返回段落编号与必要字段，单次响应即可�
   const providerId = 'e2e-compact-provider';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '简化提取模拟', protocol: 'openai-chat', baseUrl: mockUrl, model: 'e2e-compact-extraction', apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 }],
-    writingProviderId: providerId, planningProviderId: providerId, extractionProviderId: providerId, taskTokenLimit: 100000,
+    writingProviderId: providerId, planningProviderId: providerId, extractionProviderId: providerId,
   } })).ok()).toBeTruthy();
   await createProject(page, 'E2E 段落证据回填');
   const before = await (await page.request.get(mockUrl.replace('/v1', '') + '/__e2e/stats')).json();
@@ -438,27 +464,29 @@ test('模型参数与诊断：保留零值、协议专属思考设置，流式�
   const providerId = 'e2e-parameters';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '参数诊断模拟', protocol: 'openai-chat', baseUrl: mockUrl, model: 'e2e-fixture', apiKey: 'e2e-private-parameter-key', maxOutputTokens: 8192, contextTokens: 64000 }],
-    writingProviderId: providerId, planningProviderId: providerId, extractionProviderId: providerId, taskTokenLimit: 100000,
+    writingProviderId: providerId, planningProviderId: providerId, extractionProviderId: providerId,
   } })).ok()).toBeTruthy();
-  await page.goto('/'); await page.getByRole('button', { name: '模型设置', exact: true }).click();
+  await page.goto('/'); await page.getByRole('button', { name: '供应商设置', exact: true }).click();
   const modal = page.getByRole('dialog');
-  await modal.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
-  await modal.getByLabel(/^温度（temperature）/).fill('0'); await modal.getByLabel(/^Top P/).fill('0.8');
-  await modal.getByLabel(/^随机种子（seed）/).fill('0'); await modal.getByLabel(/^请求超时（秒）/).fill('240');
-  await modal.getByLabel(/^返回方式/).selectOption('true');
+  const writing = modal.getByRole('region', { name: '正文写作模型设置', exact: true });
+  await writing.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
+  await writing.getByLabel(/^温度（temperature）/).fill('0'); await writing.getByLabel(/^Top P/).fill('0.8');
+  await writing.getByLabel(/^随机种子（seed）/).fill('0'); await writing.getByLabel(/^请求超时（秒）/).fill('240');
+  await writing.getByLabel(/^返回方式/).selectOption('true');
   await modal.getByLabel('接口协议', { exact: true }).selectOption('gemini');
   await expect(modal.getByLabel('服务地址', { exact: true })).toHaveValue(mockUrl);
-  await modal.getByLabel(/^Gemini 思考方式/).selectOption('level'); await modal.getByLabel(/^Gemini 思考等级/).selectOption('low');
-  await modal.getByLabel('Gemini 返回思考摘要', { exact: true }).selectOption('true');
+  await writing.getByLabel(/^Gemini 思考方式/).selectOption('level'); await writing.getByLabel(/^Gemini 思考等级/).selectOption('low');
+  await writing.getByLabel('Gemini 返回思考摘要', { exact: true }).selectOption('true');
   await modal.getByRole('button', { name: '保存设置', exact: true }).click();
   await expect(modal.getByRole('status')).toContainText('设置已保存');
   const geminiSaved = await (await page.request.get('/api/settings')).json();
-  expect(geminiSaved.providers[0]).toMatchObject({ temperature: 0, seed: 0, stream: true, timeoutMs: 240000, geminiThinking: { mode: 'level', level: 'low' }, geminiIncludeThoughts: true });
+  expect(geminiSaved.modelParameters.find((value: any) => value.role === 'writing' && value.providerId === providerId && value.model === 'e2e-fixture')).toMatchObject({ temperature: 0, seed: 0, stream: true, timeoutMs: 240000, geminiThinking: { mode: 'level', level: 'low' }, geminiIncludeThoughts: true });
+  expect(geminiSaved.providers[0]).not.toHaveProperty('temperature');
   await modal.getByLabel('接口协议', { exact: true }).selectOption('openai-chat');
-  await modal.getByLabel(/^思考等级（OpenAI）/).selectOption('low');
-  await modal.getByLabel(/^输出上限字段（Chat）/).selectOption('max_completion_tokens');
+  await writing.getByLabel(/^思考等级（OpenAI）/).selectOption('low');
+  await writing.getByLabel(/^输出上限字段（Chat）/).selectOption('max_completion_tokens');
   const tested = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/settings/test');
-  await modal.getByRole('button', { name: '保存并测试连接', exact: true }).click();
+  await modal.getByRole('button', { name: '正文写作保存并测试连接', exact: true }).click();
   const success = await (await tested).json(); expect(success.ok).toBe(true);
   await expect(modal.getByRole('status')).toContainText('有效文字');
   const wire = JSON.parse(success.capture.request.body);
@@ -472,11 +500,11 @@ test('模型参数与诊断：保留零值、协议专属思考设置，流式�
   await expect(modal.getByLabel('模型响应反馈', { exact: true })).toContainText('stop');
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
-  await modal.getByLabel(/^温度（temperature）/).scrollIntoViewIfNeeded();
+  await writing.getByLabel(/^温度（temperature）/).scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('model-parameters-mobile.png'), animations: 'disabled' });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await modal.getByLabel('模型名称', { exact: true }).fill('e2e-http500');
-  await modal.getByRole('button', { name: '保存并测试连接', exact: true }).click();
+  await modal.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-http500');
+  await modal.getByRole('button', { name: '正文写作保存并测试连接', exact: true }).click();
   await expect(modal.getByRole('alert')).toContainText('500');
   await modal.locator('summary').filter({ hasText: '实际请求与连接诊断' }).click();
   await expect(modal.locator('.request-diagnostics')).toContainText('HTTP 500');
@@ -488,10 +516,16 @@ test('模型参数与诊断：保留零值、协议专属思考设置，流式�
   await modal.locator('.request-diagnostics .transport-metadata').scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('model-request-error.png'), animations: 'disabled' });
   await modal.getByLabel('接口协议', { exact: true }).selectOption('gemini');
-  await expect(modal.getByLabel('Gemini 返回思考摘要', { exact: true })).toHaveValue('true');
-  await modal.getByLabel('模型名称', { exact: true }).fill('e2e-gemini-blocked');
+  await modal.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-fixture');
+  await expect(writing.getByLabel('Gemini 返回思考摘要', { exact: true })).toHaveValue('true');
+  await modal.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-gemini-blocked');
+  await openModelParameters(writing);
+  await writing.getByLabel(/^返回方式/).selectOption('true');
+  await writing.getByLabel(/^Gemini 思考方式/).selectOption('level');
+  await writing.getByLabel(/^Gemini 思考等级/).selectOption('low');
+  await writing.getByLabel('Gemini 返回思考摘要', { exact: true }).selectOption('true');
   const blockResponse = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/settings/test');
-  await modal.getByRole('button', { name: '保存并测试连接', exact: true }).click();
+  await modal.getByRole('button', { name: '正文写作保存并测试连接', exact: true }).click();
   const blocked = await (await blockResponse).json();
   expect(blocked.ok).toBe(false); expect(blocked.capture.httpStatus).toBe(200);
   expect(JSON.parse(blocked.capture.request.body).generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'low', includeThoughts: true });
@@ -503,4 +537,227 @@ test('模型参数与诊断：保留零值、协议专属思考设置，流式�
   await modal.getByLabel('模型响应反馈', { exact: true }).scrollIntoViewIfNeeded();
   await expect(modal.getByLabel('模型响应反馈', { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('model-block-feedback.png'), animations: 'disabled' });
+});
+
+test('模型列表失败仍可自定义，刷新后保留自定义名并使用任务模型测试', async ({ page }) => {
+  const auth = await (await page.request.get('/api/auth/status')).json();
+  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  const providerId = 'e2e-model-list-error';
+  expect((await page.request.put('/api/settings', { data: {
+    providers: [{ id: providerId, name: '目录故障模拟', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 }],
+    writingProviderId: providerId, writingModel: 'before-custom', planningProviderId: '', extractionProviderId: '',
+  } })).ok()).toBeTruthy();
+  const route = '**/api/settings/models';
+  await page.route(route, intercepted => intercepted.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: '供应商模型目录暂不可用' }) }));
+  await page.goto('/'); await page.getByRole('button', { name: '供应商设置', exact: true }).click();
+  const modal = page.getByRole('dialog');
+  await expect(modal.locator('.model-list-error')).toContainText('供应商模型目录暂不可用');
+  await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('before-custom');
+  await modal.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-private-custom-model');
+  // Looking up a draft connection must not silently persist a task or provider edit.
+  expect((await (await page.request.get('/api/settings')).json()).writingModel).toBe('before-custom');
+  await page.unroute(route);
+  await modal.getByRole('button', { name: '正文写作刷新模型列表', exact: true }).click();
+  await expect(modal.getByRole('combobox', { name: '正文写作上游模型', exact: true })).toBeEnabled();
+  await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('e2e-private-custom-model');
+  const tested = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/settings/test');
+  await modal.getByRole('button', { name: '正文写作保存并测试连接', exact: true }).click();
+  const result = await (await tested).json(); expect(result.ok).toBe(true);
+  expect(JSON.parse(result.capture.request.body).model).toBe('e2e-private-custom-model');
+  const saved = await (await page.request.get('/api/settings')).json();
+  expect(saved).toMatchObject({ writingModel: 'e2e-private-custom-model', planningProviderId: '', planningModel: '', extractionProviderId: '', extractionModel: '' });
+});
+
+test('切换供应商清空任务模型，迟到的列表和改地址前的列表不会混入新连接', async ({ page }) => {
+  const auth = await (await page.request.get('/api/auth/status')).json();
+  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  const oldId = 'e2e-list-old'; const newId = 'e2e-list-new';
+  expect((await page.request.put('/api/settings', { data: {
+    providers: [oldId, newId].map((id, index) => ({ id, name: index ? '新供应商' : '旧供应商', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 })),
+    writingProviderId: oldId, writingModel: 'old-selected-model', planningProviderId: '', extractionProviderId: '',
+  } })).ok()).toBeTruthy();
+  let release!: () => void; let reached!: () => void; let fulfilled!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const entered = new Promise<void>(resolve => { reached = resolve; });
+  const delivered = new Promise<void>(resolve => { fulfilled = resolve; });
+  const route = '**/api/settings/models';
+  await page.route(route, async intercepted => {
+    const provider = intercepted.request().postDataJSON().provider;
+    if (provider.id === oldId) {
+      reached(); await gate;
+      try { await intercepted.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ models: [{ id: 'stale-old-model' }] }) }); } finally { fulfilled(); }
+    } else {
+      const id = provider.baseUrl.endsWith('/changed') ? 'changed-address-model' : 'new-provider-model';
+      await intercepted.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ models: [{ id }] }) });
+    }
+  });
+  try {
+    await page.goto('/'); await page.getByRole('button', { name: '供应商设置', exact: true }).click();
+    const modal = page.getByRole('dialog');
+    await entered;
+    await modal.getByRole('combobox', { name: '正文写作供应商', exact: true }).selectOption(newId);
+    await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('');
+    const models = modal.getByRole('combobox', { name: '正文写作上游模型', exact: true });
+    await expect(models).toBeEnabled();
+    await models.selectOption('new-provider-model');
+    release(); await delivered;
+    await expect(models.locator('option')).toHaveText(['选择上游模型', 'new-provider-model']);
+    await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('new-provider-model');
+    await modal.getByLabel('服务地址', { exact: true }).nth(1).fill(mockUrl + '/changed');
+    await expect(models.locator('option')).toHaveText(['选择上游模型', 'changed-address-model']);
+    await modal.getByLabel('正文写作模型名称', { exact: true }).fill('changed-custom-model');
+    await modal.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(modal.getByRole('status')).toContainText('设置已保存');
+    const saved = await (await page.request.get('/api/settings')).json();
+    expect(saved).toMatchObject({ writingProviderId: newId, writingModel: 'changed-custom-model' });
+  } finally { release(); await page.unroute(route); }
+});
+
+test('三任务使用同一模型时参数互不影响，切换恢复且清空与重置均独立持久化', async ({ page }, testInfo) => {
+  const auth = await (await page.request.get('/api/auth/status')).json();
+  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  const providerId = 'e2e-model-defaults'; const otherId = 'e2e-model-defaults-other';
+  expect((await page.request.put('/api/settings', { data: {
+    providers: [providerId, otherId].map((id, index) => ({ id, name: index ? '另一个供应商' : '模型参数模拟', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' })),
+    writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-fixture', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
+  } })).ok()).toBeTruthy();
+  await page.goto('/'); await page.getByRole('button', { name: '供应商设置', exact: true }).click();
+  let modal = page.getByRole('dialog');
+  const writing = modal.getByRole('region', { name: '正文写作模型设置', exact: true });
+  const planning = modal.getByRole('region', { name: '大纲规划模型设置', exact: true });
+  const extraction = modal.getByRole('region', { name: '资料提取模型设置', exact: true });
+  await expect(modal.locator('.provider-card .provider-parameters')).toHaveCount(0);
+  for (const role of [writing, planning, extraction]) await role.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
+  await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('4096');
+  await expect(writing.getByLabel('上下文上限 tokens', { exact: true })).toHaveValue('64000');
+  await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('1');
+  await expect(writing.getByLabel(/^Top P/)).toHaveValue('1');
+  await expect(writing.getByLabel(/^存在惩罚/)).toHaveValue('0');
+  await expect(writing.getByLabel(/^请求超时（秒）/)).toHaveValue('180');
+  await expect(writing.getByLabel(/^返回方式/)).toHaveValue('false');
+  await writing.getByLabel(/^温度（temperature）/).fill('0.6');
+  await writing.getByLabel('单次最大输出 tokens', { exact: true }).fill('8192');
+  await expect(planning.getByLabel(/^温度（temperature）/)).toHaveValue('1');
+  await expect(planning.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('4096');
+  await expect(extraction.getByLabel(/^温度（temperature）/)).toHaveValue('1');
+  await planning.getByLabel(/^温度（temperature）/).fill('0.3');
+  await planning.getByLabel('单次最大输出 tokens', { exact: true }).fill('2048');
+  await planning.getByLabel(/^思考等级（OpenAI）/).selectOption('low');
+  await expect(extraction.getByLabel(/^温度（temperature）/)).toHaveValue('1');
+  await expect(extraction.getByLabel(/^思考等级（OpenAI）/)).toHaveValue('');
+  await extraction.getByLabel(/^温度（temperature）/).fill('0.2');
+  await extraction.getByLabel('单次最大输出 tokens', { exact: true }).fill('16384');
+  await extraction.getByLabel(/^思考等级（OpenAI）/).selectOption('high');
+  await expect(planning.getByLabel(/^温度（temperature）/)).toHaveValue('0.3');
+  await expect(planning.getByLabel(/^思考等级（OpenAI）/)).toHaveValue('low');
+  await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('0.6');
+  await writing.getByLabel('正文写作模型名称', { exact: true }).fill('custom-new-model');
+  await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('1');
+  await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('4096');
+  await openModelParameters(writing);
+  await writing.getByLabel(/^温度（temperature）/).fill('0.2');
+  await writing.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-fixture');
+  await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('0.6');
+  await writing.getByLabel('正文写作供应商', { exact: true }).selectOption(otherId);
+  await writing.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-fixture');
+  await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('1');
+  await writing.getByLabel('正文写作供应商', { exact: true }).selectOption(providerId);
+  await writing.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-fixture');
+  await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('0.6');
+  await openModelParameters(writing);
+  await writing.getByLabel(/^Top P/).fill('');
+  await modal.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(modal.getByRole('status')).toContainText('设置已保存');
+  let saved = await (await page.request.get('/api/settings')).json();
+  const profile = saved.modelParameters.find((value: any) => value.role === 'writing' && value.providerId === providerId && value.model === 'e2e-fixture');
+  expect(profile).toMatchObject({ temperature: 0.6, maxOutputTokens: 8192 }); expect(profile).not.toHaveProperty('topP');
+  expect(saved.modelParameters.find((value: any) => value.role === 'writing' && value.providerId === providerId && value.model === 'custom-new-model').temperature).toBe(0.2);
+  expect(saved.modelParameters.find((value: any) => value.role === 'planning' && value.model === 'e2e-fixture')).toMatchObject({ temperature: 0.3, maxOutputTokens: 2048, reasoningEffort: 'low' });
+  expect(saved.modelParameters.find((value: any) => value.role === 'extraction' && value.model === 'e2e-fixture')).toMatchObject({ temperature: 0.2, maxOutputTokens: 16384, reasoningEffort: 'high' });
+  const tested = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/settings/test');
+  await writing.getByRole('button', { name: '正文写作保存并测试连接', exact: true }).click();
+  const result = await (await tested).json();
+  expect((await tested).request().postDataJSON().role).toBe('writing');
+  expect(JSON.parse(result.capture.request.body)).toMatchObject({ model: 'e2e-fixture', temperature: 0.6, max_tokens: 8192 });
+  expect(JSON.parse(result.capture.request.body)).not.toHaveProperty('top_p');
+  await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+  await page.getByRole('button', { name: '供应商设置', exact: true }).click();
+  modal = page.getByRole('dialog');
+  await writing.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
+  await expect(writing.getByLabel(/^Top P/)).toHaveValue('');
+  await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('0.6');
+  await expect(planning.getByLabel(/^温度（temperature）/)).toHaveValue('0.3');
+  await expect(extraction.getByLabel(/^温度（temperature）/)).toHaveValue('0.2');
+  for (const [task, role, temperature, maxTokens, effort] of [[planning, 'planning', 0.3, 2048, 'low'], [extraction, 'extraction', 0.2, 16384, 'high']] as const) {
+    const testing = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/settings/test');
+    await task.getByRole('button', { name: role === 'planning' ? '大纲规划保存并测试连接' : '资料提取保存并测试连接', exact: true }).click();
+    const response = await testing; const captured = await response.json();
+    expect(response.request().postDataJSON().role).toBe(role);
+    expect(captured.ok).toBe(true);
+    expect(JSON.parse(captured.capture.request.body)).toMatchObject({ model: 'e2e-fixture', temperature, max_tokens: maxTokens, reasoning_effort: effort });
+  }
+  await planning.getByRole('button', { name: '恢复通用默认值', exact: true }).click();
+  await expect(planning.getByLabel(/^温度（temperature）/)).toHaveValue('1');
+  await expect(planning.getByLabel(/^思考等级（OpenAI）/)).toHaveValue('');
+  await expect(extraction.getByLabel(/^温度（temperature）/)).toHaveValue('0.2');
+  await expect(extraction.getByLabel(/^思考等级（OpenAI）/)).toHaveValue('high');
+  await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('0.6');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await writing.getByLabel(/^温度（temperature）/).scrollIntoViewIfNeeded();
+  expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath('per-model-defaults-mobile.png'), animations: 'disabled' });
+  await writing.getByRole('button', { name: '恢复通用默认值', exact: true }).click();
+  await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('1');
+  await expect(writing.getByLabel(/^Top P/)).toHaveValue('1');
+  await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('4096');
+  await modal.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(modal.getByRole('status')).toContainText('设置已保存');
+  saved = await (await page.request.get('/api/settings')).json();
+  expect(saved.modelParameters.find((value: any) => value.role === 'writing' && value.providerId === providerId && value.model === 'e2e-fixture')).toMatchObject({ temperature: 1, topP: 1, maxOutputTokens: 4096, timeoutMs: 180000, stream: false });
+  expect(saved.modelParameters.find((value: any) => value.role === 'planning' && value.providerId === providerId && value.model === 'e2e-fixture')).toMatchObject({ temperature: 1, maxOutputTokens: 4096 });
+  expect(saved.modelParameters.find((value: any) => value.role === 'extraction' && value.providerId === providerId && value.model === 'e2e-fixture')).toMatchObject({ temperature: 0.2, maxOutputTokens: 16384, reasoningEffort: 'high' });
+});
+
+test('统一上下文限制保留 64000 输出，不再显示或发送任务累计用量上限', async ({ page }) => {
+  const auth = await (await page.request.get('/api/auth/status')).json();
+  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  const providerId = 'e2e-full-output';
+  expect((await page.request.put('/api/settings', { data: {
+    providers: [{ id: providerId, name: '完整输出模拟', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 }],
+    writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
+  } })).ok()).toBeTruthy();
+  await page.goto('/');
+  await page.getByRole('button', { name: '供应商设置', exact: true }).click();
+  const modal = page.getByRole('dialog');
+  await expect(modal.getByLabel('每项任务用量上限（tokens）', { exact: true })).toHaveCount(0);
+  const extraction = modal.getByRole('region', { name: '资料提取模型设置', exact: true });
+  await extraction.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
+  await extraction.getByLabel('单次最大输出 tokens', { exact: true }).fill('64000');
+  await extraction.getByLabel('上下文上限 tokens', { exact: true }).fill('512000');
+  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname === '/api/settings');
+  await modal.getByRole('button', { name: '保存设置', exact: true }).click();
+  expect((await saving).postDataJSON()).not.toHaveProperty('taskTokenLimit');
+  await expect(modal.getByRole('status')).toContainText('设置已保存');
+  const saved = await (await page.request.get('/api/settings')).json();
+  expect(saved).not.toHaveProperty('taskTokenLimit');
+  expect(saved.modelParameters.find((value: any) => value.role === 'extraction' && value.providerId === providerId && value.model === 'e2e-fixture')).toMatchObject({ maxOutputTokens: 64000, contextTokens: 512000 });
+  expect(saved.modelParameters.find((value: any) => value.role === 'writing' && value.providerId === providerId && value.model === 'e2e-fixture')).toMatchObject({ maxOutputTokens: 4096, contextTokens: 64000 });
+  expect(saved.providers[0]).not.toHaveProperty('maxOutputTokens');
+  await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+
+  await createProject(page, 'E2E 完整单次输出');
+  const before = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+  await page.getByRole('button', { name: '导入小说', exact: true }).click();
+  await page.getByRole('dialog').locator('input[type=file]').setInputFiles({ name: 'full-output.txt', mimeType: 'text/plain', buffer: Buffer.from('第一章 城门\n林舟走进白石城。') });
+  const confirming = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/confirm'));
+  await page.getByRole('dialog').getByRole('button', { name: '确认目录并整理', exact: true }).click();
+  const job = await (await confirming).json();
+  await completedJobs(page, 1);
+  const after = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+  expect(after.modelRequests - before.modelRequests).toBe(1);
+  expect(after.lastModelParameters.max_tokens).toBe(64000);
+  const outputs = await (await page.request.get(`/api/jobs/${job.id}/outputs?view=author`)).json();
+  expect(outputs).toHaveLength(1);
+  const { output } = await (await page.request.get(`/api/jobs/${job.id}/outputs/${outputs[0].id}?view=author`)).json();
+  expect(JSON.parse(output.request.body).max_tokens).toBe(64000);
 });

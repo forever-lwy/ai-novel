@@ -20,7 +20,7 @@ it('imports over one million Chinese characters through 200 durable chapter jobs
   expect(characterCount).toBeGreaterThanOrEqual(1_000_000);
   const config: Settings = {
     providers: [{ id: 'local-fixture', name: '本地模拟模型（不联网）', protocol: 'openai-chat', baseUrl: 'http://unused.invalid/v1', model: 'fixture', maxOutputTokens: 2048, contextTokens: 128000 }],
-    writingProviderId: 'local-fixture', planningProviderId: 'local-fixture', extractionProviderId: 'local-fixture', taskTokenLimit: 50_000_000,
+    writingProviderId: 'local-fixture', planningProviderId: 'local-fixture', extractionProviderId: 'local-fixture',
   };
   let requestCount = 0;
   const blocksPerChapter = new Map<number, number>();

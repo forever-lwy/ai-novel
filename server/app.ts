@@ -10,15 +10,19 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { Store } from './store.js';
 import { StoryEngine } from './engine.js';
 import { parseNovel } from './importer.js';
-import { generateText, validateProviderOptions } from './providers.js';
-import { SettingsStore, hashPassword, verifyPassword, tokenHash } from './security.js';
+import { generateText, redactModelPayload, validateProviderOptions } from './providers.js';
+import { listProviderModels } from './model-catalog.js';
+import { SettingsStore, hashPassword, verifyPassword, tokenHash, normalizeSettings } from './security.js';
 import type { Source, SourcePreview, Settings, Entity, Foreshadow, Job, CapturedModelResponse, ModelRequestSnapshot } from '../shared/types.js';
+import { modelRoles, resolveModelConfig } from '../shared/model-settings.js';
 
 const revision = z.string().min(1).max(100);
 const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite']);
 const passwordBody = z.object({ password: z.string().min(8, '密码至少 8 位').max(256) });
 const outlineSchema = z.object({ coarse: z.string().max(100000), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000) });
-const providerSchema = z.object({ id: z.string().min(1).max(100), name: z.string().min(1).max(100), protocol: z.enum(['openai-chat', 'openai-responses', 'gemini', 'claude']), baseUrl: z.string().url().max(2000).refine(v => { const u = new URL(v); return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password; }, '服务地址必须是 HTTP(S)，不能包含用户名或密码'), model: z.string().min(1).max(300), apiKey: z.string().max(4096).optional(), hasKey: z.boolean().optional(), clearApiKey: z.boolean().optional(), maxOutputTokens: z.number().int().min(256).max(128000), contextTokens: z.number().int().min(2048).max(2000000) }).extend({
+const modelNameSchema = z.string().trim().max(300).refine(value => !/[\u0000-\u001f\u007f]/.test(value), '模型名称不能包含控制字符');
+const modelParametersSchema = z.object({
+  maxOutputTokens: z.number().int().min(256).max(128000), contextTokens: z.number().int().min(2048).max(2000000),
   temperature: z.number().min(0).max(2).optional(), topP: z.number().min(0).max(1).optional(), topK: z.number().int().min(0).max(1000000).optional(),
   presencePenalty: z.number().min(-2).max(2).optional(), frequencyPenalty: z.number().min(-2).max(2).optional(), seed: z.number().int().min(Number.MIN_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER).optional(),
   stopSequences: z.array(z.string().min(1).max(1000)).max(16).optional(), timeoutMs: z.number().int().min(1000).max(3600000).optional(), stream: z.boolean().optional(),
@@ -28,7 +32,10 @@ const providerSchema = z.object({ id: z.string().min(1).max(100), name: z.string
   claudeThinking: z.discriminatedUnion('type', [z.object({ type: z.literal('disabled') }).strict(), z.object({ type: z.literal('adaptive') }).strict(), z.object({ type: z.literal('enabled'), budgetTokens: z.number().int().min(1024).max(128000) }).strict()]).optional(),
   claudeEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
 });
-const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), taskTokenLimit: z.number().int().min(1000).max(100000000) });
+const providerSchema = z.object({ id: z.string().min(1).max(100), name: z.string().min(1).max(100), protocol: z.enum(['openai-chat', 'openai-responses', 'gemini', 'claude']), baseUrl: z.string().url().max(2000).refine(v => { const u = new URL(v); return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password; }, '服务地址必须是 HTTP(S)，不能包含用户名或密码'), model: modelNameSchema.optional(), apiKey: z.string().max(4096).optional(), hasKey: z.boolean().optional(), clearApiKey: z.boolean().optional() }).extend(modelParametersSchema.partial().shape);
+const modelRoleSchema = z.enum(modelRoles);
+const modelProfileSchema = modelParametersSchema.extend({ role: modelRoleSchema.optional(), providerId: z.string().min(1).max(100), model: modelNameSchema.refine(value => Boolean(value), '模型参数需要指定模型名称') }).strict();
+const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional() });
 const citationSchema = z.object({ chapterId: z.string(), paragraph: z.number().int().positive(), quote: z.string().max(10000) });
 const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(200), description: z.string().max(30000), visibility: z.enum(['public', 'secret']), locked: z.boolean(), mergedInto: z.string().optional(), facts: z.array(z.object({ id: z.string(), text: z.string().max(10000), attribute: z.string().min(1).max(100).optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() })).max(5000) });
 const foreshadowSchema = z.object({ id: z.string().min(1), title: z.string().min(1).max(300), detail: z.string().max(20000), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string().max(20000), relatedEntityIds: z.array(z.string()).max(1000) });
@@ -177,19 +184,54 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.post('/api/jobs/:id/:action', async request => jobView(engine.action(param(request), z.enum(['pause', 'resume', 'retry', 'cancel']).parse((request.params as any).action)), author(request)));
   app.get('/api/settings', async () => settings.public());
   app.put('/api/settings', async request => {
-    const b = settingsSchema.parse(request.body) as Settings;
+    const input = settingsSchema.parse(request.body) as Settings;
+    const originalProfiles = new Set<string>();
+    for (const profile of input.modelParameters ?? []) {
+      const key = JSON.stringify([profile.role ?? null, profile.providerId, profile.model]);
+      if (originalProfiles.has(key)) fail('同一任务、供应商和模型的参数不能重复。');
+      originalProfiles.add(key);
+    }
+    const b = normalizeSettings(input);
+    if ((b.modelParameters?.length ?? 0) > 3000) fail('按任务展开后的模型参数最多保存 3000 项。');
     const ids = new Set(b.providers.map(p => p.id));
-    if (ids.size !== b.providers.length) fail('模型配置的标识不能重复。');
-    for (const id of [b.writingProviderId, b.planningProviderId, b.extractionProviderId]) if (id && !ids.has(id)) fail('所选用途对应的模型配置不存在。');
-    for (const provider of b.providers) {
-      if (provider.maxOutputTokens >= provider.contextTokens) fail('输出上限必须小于上下文容量，还需为输入内容留出空间。');
-      try { validateProviderOptions(provider); } catch (error) { fail(error instanceof Error ? error.message : '模型参数组合无效。'); }
+    if (ids.size !== b.providers.length) fail('供应商连接的标识不能重复。');
+    for (const role of ['writing', 'planning', 'extraction'] as const) {
+      const id = b[`${role}ProviderId`];
+      if (id && !ids.has(id)) fail('所选任务对应的供应商连接不存在。');
+      if (id && !b[`${role}Model`]) fail(`${role === 'writing' ? '写作' : role === 'planning' ? '规划' : '资料提取'}任务需要选择或填写模型名称。`);
+    }
+    const profiles = new Set<string>();
+    for (const profile of b.modelParameters ?? []) {
+      if (!ids.has(profile.providerId)) fail('模型参数对应的供应商连接不存在。');
+      const key = JSON.stringify([profile.role, profile.providerId, profile.model]);
+      if (profiles.has(key)) fail('同一任务、供应商和模型的参数不能重复。');
+      profiles.add(key);
+      if (profile.maxOutputTokens >= profile.contextTokens) fail('输出上限必须小于上下文上限，还需为输入内容留出空间。');
+      const provider = b.providers.find(value => value.id === profile.providerId)!;
+      try { validateProviderOptions(resolveModelConfig(b, provider, profile.model, profile.role!)); } catch (error) { fail(error instanceof Error ? error.message : '模型参数组合无效。'); }
     }
     return settings.save(b);
   });
+  app.post('/api/settings/models', async request => {
+    const body = z.union([z.object({ providerId: z.string().min(1).max(100) }).strict(), z.object({ provider: providerSchema }).strict()]).parse(request.body);
+    const provider = 'provider' in body ? settings.resolveProvider(body.provider) : settings.provider(body.providerId);
+    if (!provider) fail('供应商连接不存在。', 404);
+    try { return { models: await listProviderModels(provider) }; }
+    catch (error) {
+      const message = redactModelPayload(error instanceof Error ? error.message : '获取上游模型失败，请稍后重试或自定义模型名称。', provider.apiKey ? [provider.apiKey] : []);
+      fail(message, (error as { statusCode?: number })?.statusCode === 400 ? 400 : 502);
+    }
+  });
   app.post('/api/settings/test', async request => {
-    const { providerId } = z.object({ providerId: z.string() }).parse(request.body);
-    const p = settings.provider(providerId); if (!p) fail('模型配置不存在。', 404);
+    const { providerId, model: requestedModel, role: requestedRole } = z.object({ providerId: z.string().min(1).max(100), model: modelNameSchema.refine(value => Boolean(value), '请选择或填写用于测试的模型名称').optional(), role: modelRoleSchema.optional() }).parse(request.body);
+    const current = settings.get(); const connection = current.providers.find(provider => provider.id === providerId);
+    if (!connection) fail('供应商连接不存在。', 404);
+    const candidateRoles = requestedRole ? [requestedRole] : modelRoles;
+    const assignedModel = candidateRoles.map(role => current[`${role}ProviderId`] === providerId ? current[`${role}Model`] : '').find(Boolean);
+    const model = requestedModel ?? assignedModel;
+    if (!model) fail('请选择或填写用于测试的模型名称。');
+    const role = requestedRole ?? modelRoles.find(value => current[`${value}ProviderId`] === providerId && current[`${value}Model`] === model) ?? 'writing';
+    const p = resolveModelConfig(current, connection, model, role);
     let snapshot: ModelRequestSnapshot | undefined; let capture: CapturedModelResponse | undefined;
     try {
       const result = await generateText(p, { system: 'You are testing an API connection.', prompt: 'Reply with OK only.', maxOutputTokens: p.maxOutputTokens,
@@ -197,7 +239,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
       });
       return { ok: true, message: '服务已返回有效文字，本次使用当前保存的参数。', inputTokens: result.inputTokens, outputTokens: result.outputTokens, capture };
     } catch (error) {
-      return { ok: false, message: error instanceof Error ? error.message : '模型连接失败。', inputTokens: capture?.inputTokens ?? 0, outputTokens: capture?.outputTokens ?? 0,
+      return { ok: false, message: redactModelPayload(error instanceof Error ? error.message : '模型连接失败。', p.apiKey ? [p.apiKey] : []), inputTokens: capture?.inputTokens ?? 0, outputTokens: capture?.outputTokens ?? 0,
         capture: capture ?? (snapshot ? { request: snapshot, rawResponse: '', text: '', inputTokens: 0, outputTokens: 0 } : undefined) };
     }
   });

@@ -43,16 +43,26 @@ function fixtureReply(system, prompt) {
 }
 
 let modelRequests = 0;
+let modelListRequests = 0;
+const modelRequestsByModel = {};
 let lastModelParameters;
 const modelServer = createServer(async (req, res) => {
-  if (req.url === '/__e2e/stats' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ modelRequests, lastModelParameters })); return; }
+  if (req.url === '/__e2e/stats' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ modelRequests, modelListRequests, modelRequestsByModel, lastModelParameters })); return; }
   if (req.url === '/__e2e/shutdown' && req.method === 'POST') { res.writeHead(200); res.end('stopping test fixture'); setImmediate(() => void close()); return; }
+  if (req.method === 'GET' && new URL(req.url, 'http://fixture').pathname === '/v1/models') {
+    modelListRequests++;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    const ids = ['e2e-fixture', 'e2e-planning'];
+    res.end(JSON.stringify({ data: ids.map(id => ({ id, display_name: id })), models: ids.map(id => ({ name: `models/${id}`, displayName: id, supportedGenerationMethods: ['generateContent'] })) })); return;
+  }
   const geminiBlockFixture = req.url === '/v1/models/e2e-gemini-blocked:streamGenerateContent?alt=sse';
   if ((req.url !== '/v1/chat/completions' && !geminiBlockFixture) || req.method !== 'POST') { res.writeHead(404); res.end(); return; }
   try {
     const chunks = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     modelRequests++;
+    const modelName = body.model || (geminiBlockFixture ? 'e2e-gemini-blocked' : 'unknown');
+    modelRequestsByModel[modelName] = (modelRequestsByModel[modelName] || 0) + 1;
     if (geminiBlockFixture) {
       lastModelParameters = { generationConfig: body.generationConfig };
       res.writeHead(200, { 'content-type': 'text/event-stream' });

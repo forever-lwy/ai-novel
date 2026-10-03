@@ -17,9 +17,8 @@ export interface BranchView { branch: Branch; state: StoryState; revisions: Revi
 export interface Source { id: string; projectId: string; filename: string; format: 'txt' | 'epub'; chapterCount: number; createdAt: string; confirmed: boolean }
 export interface SourcePreview { source: Source; chapters: { title: string; text: string }[] }
 export type ProviderProtocol = 'openai-chat' | 'openai-responses' | 'gemini' | 'claude';
-export interface ProviderConfig {
-  id: string; name: string; protocol: ProviderProtocol; baseUrl: string; model: string;
-  apiKey?: string; hasKey?: boolean; clearApiKey?: boolean; maxOutputTokens: number; contextTokens: number;
+export interface ModelParameters {
+  maxOutputTokens: number; contextTokens: number;
   temperature?: number; topP?: number; topK?: number; presencePenalty?: number; frequencyPenalty?: number; seed?: number; stopSequences?: string[];
   timeoutMs?: number; stream?: boolean;
   openaiMaxTokensField?: 'max_tokens' | 'max_completion_tokens';
@@ -29,7 +28,17 @@ export interface ProviderConfig {
   claudeThinking?: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number } | { type: 'adaptive' };
   claudeEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
-export interface Settings { providers: ProviderConfig[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; taskTokenLimit: number }
+export type ModelRole = 'writing' | 'planning' | 'extraction';
+/** Missing role is accepted only when upgrading parameters shared by older settings. */
+export interface ModelParameterProfile extends ModelParameters { role?: ModelRole; providerId: string; model: string }
+export interface ProviderConfig extends ModelParameters {
+  id: string; name: string; protocol: ProviderProtocol; baseUrl: string; model: string;
+  apiKey?: string; hasKey?: boolean; clearApiKey?: boolean;
+}
+/** Generation fields and model are accepted only when upgrading older settings. */
+export type ProviderConnection = Omit<ProviderConfig, keyof ModelParameters | 'model'> & Partial<ModelParameters> & { model?: string };
+export interface ProviderModel { id: string; name?: string }
+export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[] }
 export type JobKind = 'import' | 'extract' | 'generate' | 'plan';
 export type JobStatus = 'queued' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled' | 'stale';
 export interface Job { id: string; projectId: string; branchId: string; kind: JobKind; status: JobStatus; baseRevisionId: string; progress: number; total: number; message: string; error?: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean; createdAt: string; updatedAt: string; payload: Record<string, unknown> }

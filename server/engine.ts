@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { CapturedModelResponse, ExtractionResult, GenerateInput, Job, JobKind, ModelOutputDetail, ModelOutputRecord, ModelOutputSummary, ModelRequest, OutputIssue, OutputStage, PlanningResult, ProviderConfig, Settings, StoryState } from '../shared/types.js';
+import { normalizeModelSettings, resolveModelConfig } from '../shared/model-settings.js';
 import { generateStructured, generateText, ModelOutputError, parseStructuredText, redactModelPayload, unwrapModelOutput } from './providers.js';
 import { HttpError, OutputValidationError, Store } from './store.js';
 import { extractionContext, normalizeExtraction, splitExtractionBlocks as splitBlocks } from './extraction.js';
@@ -189,15 +190,17 @@ export class StoryEngine {
   }
   private live(jobId: string): Job { const job = this.get(jobId); if (this.closed || job.status !== 'running') throw new DOMException('任务已停止', 'AbortError'); this.store.assertVersion(job.branchId, job.baseRevisionId); return job; }
   private provider(role: 'writing' | 'planning' | 'extraction'): ProviderConfig {
-    const settings = this.getSettings(); const providerId = settings[`${role}ProviderId`]; const config = settings.providers.find(p => p.id === providerId);
-    if (!config) throw new HttpError(`请先在模型配置中选择${role === 'writing' ? '写作' : role === 'planning' ? '规划' : '资料提取'}模型`);
-    return config;
+    const settings = normalizeModelSettings(this.getSettings()); const providerId = settings[`${role}ProviderId`]; const config = settings.providers.find(p => p.id === providerId);
+    const task = role === 'writing' ? '写作' : role === 'planning' ? '规划' : '资料提取';
+    if (!config) throw new HttpError(`请先在供应商配置中选择${task}供应商`);
+    const model = (settings[`${role}Model`] ?? config.model ?? '').trim();
+    if (!model) throw new HttpError(`请先为${task}任务选择或填写模型名称`);
+    return resolveModelConfig(settings, config, model, role);
   }
   private budget(job: Job, provider: ProviderConfig, request: ModelRequest): ModelRequest {
-    const inputEstimate = estimateTokens(request.system + request.prompt); const remaining = this.getSettings().taskTokenLimit - job.inputTokens - job.outputTokens;
-    const output = Math.min(request.maxOutputTokens ?? provider.maxOutputTokens, provider.maxOutputTokens, remaining - inputEstimate);
-    if (inputEstimate + output > provider.contextTokens) throw new HttpError('本次内容超过模型上下文容量，请提高模型上下文配置或缩短正文');
-    if (output < 128) throw new HttpError('任务用量上限不足，已保留进度；提高任务用量上限后可重试');
+    const inputEstimate = estimateTokens(request.system + request.prompt);
+    const output = Math.min(request.maxOutputTokens ?? provider.maxOutputTokens, provider.maxOutputTokens);
+    if (inputEstimate + output > provider.contextTokens) throw new HttpError(`本次预估输入 ${inputEstimate} tokens，加上单次输出上限 ${output} tokens，超过上下文上限 ${provider.contextTokens} tokens。请提高上下文上限或缩短输入；不会自动缩减单次输出上限。`);
     job.payload = { ...job.payload, lastRequestInputEstimate: inputEstimate, lastRequestOutputLimit: output }; this.save(job);
     return { ...request, maxOutputTokens: output };
   }
@@ -211,7 +214,7 @@ export class StoryEngine {
     const locked = state.entities.filter(e => e.locked || e.facts.some(f => f.locked));
     const next = state.chapters.length + 1;
     const mandatory = JSON.stringify({ lockedSetting: state.outline.locked, lockedEntities: locked, pendingForeshadows: state.foreshadows.filter(f => f.status === 'planted' || f.status === 'planned'), currentPlan: state.outline.fine.filter(f => f.chapter === next) });
-    if (estimateTokens(mandatory) >= remaining) throw new HttpError('锁定设定与待处理伏笔已超过上下文容量，请提高上下文配置或手动精简锁定内容');
+    if (estimateTokens(mandatory) >= remaining) throw new HttpError('锁定设定与待处理伏笔已超过可用上下文，请提高上下文上限或手动精简锁定内容');
     const recent = state.chapters.slice(-3); const terms = instruction + recent.map(c => c.summary + c.title).join('\n');
     const relevant = state.entities.filter(e => !e.mergedInto && !locked.some(l => l.id === e.id)).sort((a, b) => Number([b.name, ...b.aliases].some(n => terms.includes(n))) - Number([a.name, ...a.aliases].some(n => terms.includes(n))));
     const sections: string[] = [`必须保留的设定与任务：${mandatory}`]; let cost = estimateTokens(sections[0]);
@@ -289,7 +292,7 @@ export class StoryEngine {
     }
   }
   private async run(jobId: string, controller: AbortController) {
-    let job = this.get(jobId); job.status = 'running'; job.message = '正在处理'; this.save(job);
+    let job = this.get(jobId); const startingOutputId = job.payload.lastOutputId; job.status = 'running'; job.message = '正在处理'; this.save(job);
     try {
       this.live(jobId);
       if (job.kind === 'plan') await this.plan(jobId, controller.signal);
@@ -327,7 +330,7 @@ export class StoryEngine {
       if (this.closed) return;
       job = this.get(jobId);
       if (error instanceof ModelOutputError) { job.inputTokens += error.inputTokens || Number(job.payload.lastRequestInputEstimate ?? 0); job.outputTokens += error.outputTokens || Number(job.payload.lastRequestOutputLimit ?? 0); if (!error.inputTokens || !error.outputTokens) job.payload.usageEstimated = true; this.save(job); }
-      const lastOutput = job.payload.lastOutputId ? this.store.outputs.get(String(job.payload.lastOutputId)) : undefined;
+      const lastOutput = job.payload.lastOutputId && job.payload.lastOutputId !== startingOutputId ? this.store.outputs.get(String(job.payload.lastOutputId)) : undefined;
       if (lastOutput && lastOutput.status !== 'applied') this.failOutput(lastOutput, error);
       if (job.status !== 'running') return;
       job.status = error instanceof HttpError && error.statusCode === 409 ? 'stale' : 'failed';

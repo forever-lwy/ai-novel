@@ -83,7 +83,7 @@ describe('deterministic extraction normalization', () => {
 
 const contexts: { store: Store; engine: StoryEngine }[] = [];
 afterEach(async () => { for (const context of contexts.splice(0)) { await context.engine.close(); context.store.close(); } });
-const settings: Settings = { providers: [{ id: 'fixture', name: '模拟', protocol: 'gemini', baseUrl: 'http://unused.invalid', model: 'fixture', maxOutputTokens: 4096, contextTokens: 64000 }], writingProviderId: 'fixture', planningProviderId: 'fixture', extractionProviderId: 'fixture', taskTokenLimit: 1000000 };
+const settings: Settings = { providers: [{ id: 'fixture', name: '模拟', protocol: 'gemini', baseUrl: 'http://unused.invalid', model: 'fixture', maxOutputTokens: 4096, contextTokens: 64000 }], writingProviderId: 'fixture', planningProviderId: 'fixture', extractionProviderId: 'fixture' };
 describe('normalized extraction persistence', () => {
   it('succeeds with paragraph-only output in one request and preserves original/normalized results in backups', async () => {
     let calls = 0; const raw = JSON.stringify(minimal()); const store = new Store(mkdtempSync(join(tmpdir(), 'ai-novel-normalize-'))); const project = store.createProject({ title: '中性片段' }); const saved = store.saveChapter(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, title: '一', text: '林舟抵达灯塔。' });

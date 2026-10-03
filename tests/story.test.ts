@@ -19,7 +19,7 @@ function append(store: Store, branchId: string, text: string, result = emptyExtr
   const saved = store.saveChapter(branchId, { baseRevisionId: store.getBranch(branchId).revisionId, title, text });
   return store.applyExtraction(branchId, saved.branch.revisionId, saved.state.chapters.at(-1)!.id, result, true);
 }
-const settings = (): Settings => ({ providers: [{ id: 'fixture', name: '协议模拟模型', protocol: 'openai-chat', baseUrl: 'http://unused.invalid/v1', model: 'fixture', maxOutputTokens: 1024, contextTokens: 64000 }], writingProviderId: 'fixture', planningProviderId: 'fixture', extractionProviderId: 'fixture', taskTokenLimit: 500000 });
+const settings = (): Settings => ({ providers: [{ id: 'fixture', name: '协议模拟模型', protocol: 'openai-chat', baseUrl: 'http://unused.invalid/v1', model: 'fixture', maxOutputTokens: 1024, contextTokens: 64000 }], writingProviderId: 'fixture', planningProviderId: 'fixture', extractionProviderId: 'fixture' });
 const plan = (): PlanningResult => ({ coarse: '旅人寻找回家的路', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第 ${chapter} 章`, goal: '继续寻找线索' })), foreshadows: [] });
 function models(extract?: (request: ModelRequest) => Promise<ExtractionResult>, write?: (request: ModelRequest) => Promise<string>): TextModels {
   return {
@@ -259,11 +259,11 @@ describe('durable writing and extraction jobs (simulated models)', () => {
     expect(store.state(p.mainBranchId).chapters).toHaveLength(2); expect(jobState(replacement, job.id).status).toBe('paused');
   });
 
-  it('accounts for missing provider usage conservatively and preserves paid-for prose at the token limit', async () => {
+  it('estimates missing provider usage and continues extraction regardless of cumulative usage', async () => {
     const store = makeStore(); const p = store.createProject({ title: '限额' }); const mock = models();
     mock.generateText = vi.fn(async () => ({ text: '阿青的新正文', inputTokens: 600000, outputTokens: 0 })); const engine = engineFor(store, mock);
     const job = engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '写作' }); const done = await terminal(engine, job.id);
-    expect(done.status).toBe('failed'); expect(done.error).toContain('用量上限'); expect(done.inputTokens).toBeGreaterThanOrEqual(600000); expect(done.outputTokens).toBeGreaterThan(0); expect(rawJob(store, job.id).payload.usageEstimated).toBe(true);
-    expect(store.exportText(p.mainBranchId)).toContain('阿青的新正文'); expect(store.state(p.mainBranchId).chapters[0].status).toBe('pending');
+    expect(done.status).toBe('completed'); expect(done.inputTokens).toBeGreaterThanOrEqual(600000); expect(done.outputTokens).toBeGreaterThan(0); expect(rawJob(store, job.id).payload.usageEstimated).toBe(true);
+    expect(store.exportText(p.mainBranchId)).toContain('阿青的新正文'); expect(store.state(p.mainBranchId).chapters[0].status).toBe('ready'); expect(mock.generateStructured).toHaveBeenCalledTimes(2);
   });
 });
