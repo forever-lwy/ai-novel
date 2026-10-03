@@ -795,3 +795,88 @@ test('统一上下文限制保留 64000 输出，不再显示或发送任务累�
   const { output } = await (await page.request.get(`/api/jobs/${job.id}/outputs/${outputs[0].id}?view=author`)).json();
   expect(JSON.parse(output.request.body).max_tokens).toBe(64000);
 });
+
+test('书架删除需确认，取消和失败保留小说，处理中不能关闭，删除最后一本显示空书架', async ({ page }, testInfo) => {
+  const auth = await (await page.request.get('/api/auth/status')).json();
+  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  // This test runs last and clears only the isolated E2E server's temporary library.
+  const previous = await (await page.request.get('/api/projects')).json();
+  for (const project of previous) expect((await page.request.delete(`/api/projects/${project.id}`)).ok()).toBeTruthy();
+  const create = async (title: string) => {
+    const response = await page.request.post('/api/projects', { data: { title, mode: 'original', premise: '删除验收：保留独立作品。' } });
+    expect(response.ok()).toBeTruthy(); return response.json();
+  };
+  const target = await create('E2E 待删除的小说');
+  const survivor = await create('E2E 保留的小说');
+  const survivorBefore = await (await page.request.get(`/api/projects/${survivor.id}?view=author`)).json();
+  let deleteRequests = 0;
+  page.on('request', request => { if (request.method() === 'DELETE' && new URL(request.url()).pathname === `/api/projects/${target.id}`) deleteRequests++; });
+  await page.goto('/');
+  await expect(page.locator('.project-card')).toHaveCount(2);
+  await page.getByRole('button', { name: `删除作品 ${target.title}`, exact: true }).click();
+  const modal = page.getByRole('dialog');
+  await expect(modal).toContainText(target.title);
+  await expect(modal).toContainText('原文文件、正文、全部故事线及历史版本');
+  await expect(modal).toContainText('请先进入工作台下载备份');
+  await expect(page.locator('.workspace-project-title')).toHaveCount(0);
+  await modal.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(modal).toHaveCount(0);
+  expect(deleteRequests).toBe(0);
+  expect((await page.request.get(`/api/projects/${target.id}`)).ok()).toBeTruthy();
+
+  const route = `**/api/projects/${target.id}`;
+  await page.route(route, async intercepted => {
+    if (intercepted.request().method() === 'DELETE') await intercepted.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: '模拟删除失败，请重试。' }) });
+    else await intercepted.continue();
+  });
+  await page.getByRole('button', { name: `删除作品 ${target.title}`, exact: true }).click();
+  await modal.getByRole('button', { name: '永久删除', exact: true }).click();
+  await expect(modal.getByRole('alert')).toHaveText('模拟删除失败，请重试。');
+  await expect(modal.getByRole('button', { name: '永久删除', exact: true })).toBeEnabled();
+  await expect(page.locator('.project-card')).toHaveCount(2);
+  expect((await page.request.get(`/api/projects/${target.id}`)).ok()).toBeTruthy();
+  expect(deleteRequests).toBe(1);
+  await page.unroute(route);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath('delete-novel-mobile.png'), animations: 'disabled' });
+  let release!: () => void; let reached!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const entered = new Promise<void>(resolve => { reached = resolve; });
+  await page.route(route, async intercepted => {
+    if (intercepted.request().method() === 'DELETE') { reached(); await gate; }
+    await intercepted.continue();
+  });
+  try {
+    await modal.getByRole('button', { name: '永久删除', exact: true }).click();
+    await entered;
+    await expect(modal.getByRole('button', { name: '正在删除…', exact: true })).toBeDisabled();
+    await expect(modal.getByRole('button', { name: '取消', exact: true })).toBeDisabled();
+    await expect(modal.getByRole('button', { name: '关闭对话框', exact: true })).toBeDisabled();
+    await page.keyboard.press('Escape');
+    await expect(modal).toBeVisible();
+    await page.mouse.click(2, 2);
+    await expect(modal).toBeVisible();
+    release();
+    await expect(modal).toHaveCount(0);
+  } finally { release(); await page.unroute(route); }
+  expect(deleteRequests).toBe(2);
+  expect((await page.request.get(`/api/projects/${target.id}`)).status()).toBe(404);
+  await expect(page.locator('.project-card')).toHaveCount(1);
+  expect(await (await page.request.get(`/api/projects/${survivor.id}?view=author`)).json()).toEqual(survivorBefore);
+  await page.getByRole('button', { name: `打开作品 ${survivor.title}`, exact: true }).click();
+  await expect(page.locator('.workspace-project-title')).toContainText(survivor.title);
+  await page.getByRole('button', { name: '返回书架', exact: true }).click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath('delete-novel-shelf-mobile.png'), fullPage: true, animations: 'disabled' });
+  await page.getByRole('button', { name: `删除作品 ${survivor.title}`, exact: true }).click();
+  await modal.getByRole('button', { name: '永久删除', exact: true }).click();
+  await expect(modal).toHaveCount(0);
+  await expect(page.locator('.project-card')).toHaveCount(0);
+  await expect(page.locator('.count-badge')).toHaveText('0');
+  await expect(page.getByRole('heading', { name: '你的下一部故事，从这里开始', exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('heading', { name: '你的下一部故事，从这里开始', exact: true })).toBeVisible();
+  expect(await (await page.request.get('/api/projects')).json()).toEqual([]);
+});

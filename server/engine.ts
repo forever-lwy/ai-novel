@@ -32,6 +32,7 @@ export interface TextModels { generateText: typeof generateText; generateStructu
 export class StoryEngine {
   private controllers = new Map<string, AbortController>();
   private runs = new Map<string, Promise<void>>();
+  private deletingProjects = new Set<string>();
   private started = false;
   private closed = false;
   constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }) {}
@@ -51,6 +52,24 @@ export class StoryEngine {
     this.pump();
   }
   async close() { this.closed = true; for (const controller of this.controllers.values()) controller.abort(); await Promise.allSettled([...this.runs.values()]); }
+  async deleteProject(projectId: string, cleanup?: () => void) {
+    this.store.getProject(projectId);
+    if (this.deletingProjects.has(projectId)) throw new HttpError('作品正在删除，请稍候', 409);
+    this.deletingProjects.add(projectId);
+    try {
+      const jobs = this.jobsInternal(projectId);
+      for (const job of jobs) {
+        if (['queued', 'running', 'paused', 'failed'].includes(job.status)) {
+          job.status = 'cancelled'; job.message = '作品正在删除，任务已停止'; this.save(job);
+        }
+        this.controllers.get(job.id)?.abort();
+      }
+      // Response capture and failure handling may still write while an aborted request unwinds.
+      // Wait for those callbacks before removing their persistent records.
+      await Promise.allSettled(jobs.flatMap(job => { const run = this.runs.get(job.id); return run ? [run] : []; }));
+      this.store.deleteProject(projectId, cleanup);
+    } finally { this.deletingProjects.delete(projectId); }
+  }
   private jobsInternal(projectId?: string, onlyActive = false): Job[] {
     const where = [projectId ? 'project_id=?' : '', onlyActive ? "status IN ('queued','running','paused')" : ''].filter(Boolean).join(' AND ');
     const rows = this.store.db.prepare(`SELECT data FROM jobs${where ? ` WHERE ${where}` : ''} ORDER BY rowid DESC`).all(...(projectId ? [projectId] : []));
@@ -128,17 +147,18 @@ export class StoryEngine {
   private async requestCaptured<T extends { inputTokens: number; outputTokens: number }>(jobId: string, stage: OutputStage, request: ModelRequest, invoke: (request: ModelRequest) => Promise<T>, content: (result: T) => string, chapterId?: string, blockIndex?: number): Promise<{ result: T; output: ModelOutputRecord }> {
     const job = this.live(jobId); job.payload.pendingStage = stage;
     if (chapterId) { job.payload.extractChapterId = chapterId; job.payload.blockIndex = blockIndex ?? 0; } this.save(job);
-    let output: ModelOutputRecord | undefined; let received = false;
+    let output: ModelOutputRecord | undefined; let received = false; let pending = true;
     try {
-      const saveResponse = (response: CapturedModelResponse) => { output = output ? this.store.outputs.completeResponse(output.id, this.safeCapture(response)) : this.capture(job, stage, response, chapterId, blockIndex); received = true; };
+      const saveResponse = (response: CapturedModelResponse) => { if (!pending) return; output = output ? this.store.outputs.completeResponse(output.id, this.safeCapture(response)) : this.capture(job, stage, response, chapterId, blockIndex); received = true; };
       const result = await invoke({ ...request,
-        onRequest: snapshot => { output = this.capture(job, stage, { request: snapshot, rawResponse: '', text: '', inputTokens: 0, outputTokens: 0 }, chapterId, blockIndex); },
+        onRequest: snapshot => { if (pending) output = this.capture(job, stage, { request: snapshot, rawResponse: '', text: '', inputTokens: 0, outputTokens: 0 }, chapterId, blockIndex); },
         onResponse: saveResponse,
       });
       if (!received) saveResponse({ rawResponse: content(result), text: content(result), inputTokens: result.inputTokens, outputTokens: result.outputTokens });
       if (!output) throw new Error('模型输出未能保存');
       this.charge(jobId, result, content(result)); this.live(jobId); return { result, output };
     } catch (error) { if (output) this.failOutput(output, error); throw error; }
+    finally { pending = false; }
   }
   private publicJob(job: Job): Job { return { ...job, usageEstimated: Boolean(job.payload.usageEstimated), payload: {} }; }
   private get(jobId: string): Job { const row = this.store.db.prepare('SELECT data FROM jobs WHERE id=?').get(jobId); if (!row) throw new HttpError('任务不存在', 404); return JSON.parse(String(row.data)); }
@@ -146,6 +166,7 @@ export class StoryEngine {
   enqueue(branchId: string, kind: JobKind, payload: Record<string, unknown>, onQueued?: () => void): Job {
     if (this.closed) throw new HttpError('任务服务正在关闭', 503);
     const branch = this.store.assertVersion(branchId, String(payload.baseRevisionId ?? ''));
+    if (this.deletingProjects.has(branch.projectId)) throw new HttpError('作品正在删除，不能创建任务', 409);
     if (this.jobsInternal(undefined, true).some(j => j.branchId === branchId)) throw new HttpError('此故事线已有进行中或暂停的任务，请先完成或取消', 409);
     const state = this.store.state(branchId);
     if ((kind === 'generate' || kind === 'import') && state.chapters.some(c => c.status !== 'ready')) throw new HttpError('请先完成上一章资料整理', 409);
@@ -172,6 +193,7 @@ export class StoryEngine {
   }
   action(jobId: string, action: 'pause' | 'resume' | 'retry' | 'cancel'): Job {
     const job = this.get(jobId);
+    if (this.deletingProjects.has(job.projectId)) throw new HttpError('作品正在删除，不能操作任务', 409);
     if (action === 'pause' || action === 'cancel') {
       if (job.status === 'completed' || job.status === 'cancelled' || job.status === 'stale') throw new HttpError('任务已经结束');
       job.status = action === 'pause' ? 'paused' : 'cancelled'; job.message = action === 'pause' ? '已暂停，进度已保存' : '已取消；已经保存的正文和资料保留'; this.save(job); this.controllers.get(job.id)?.abort();
@@ -185,7 +207,7 @@ export class StoryEngine {
   }
   private pump() {
     if (!this.started || this.closed) return;
-    for (const job of this.jobsInternal(undefined, true).reverse()) if (job.status === 'queued' && !this.controllers.has(job.id) && ![...this.controllers.keys()].some(key => this.get(key).branchId === job.branchId)) {
+    for (const job of this.jobsInternal(undefined, true).reverse()) if (job.status === 'queued' && !this.deletingProjects.has(job.projectId) && !this.controllers.has(job.id) && ![...this.controllers.keys()].some(key => this.get(key).branchId === job.branchId)) {
       const controller = new AbortController(); this.controllers.set(job.id, controller); const run = this.run(job.id, controller).finally(() => { this.controllers.delete(job.id); this.runs.delete(job.id); this.pump(); }); this.runs.set(job.id, run);
     }
   }

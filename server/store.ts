@@ -61,6 +61,36 @@ export class Store {
   close() { this.db.close(); }
   listProjects(): Project[] { return this.db.prepare('SELECT data FROM projects ORDER BY rowid DESC').all().map(r => parse<Project>(r.data)); }
   getProject(projectId: string): Project { const row = this.db.prepare('SELECT data FROM projects WHERE id=?').get(projectId); if (!row) throw new HttpError('作品不存在', 404); return parse(row.data); }
+  deleteProject(projectId: string, onDelete?: () => void) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.getProject(projectId);
+      // Chapter text is shared by story lines and historical snapshots, with no project column.
+      // Include every stored revision, even one no longer reachable after a rollback.
+      const chapters = new Set<string>(); const retained = new Set<string>();
+      const collect = (owner: unknown, chapterId: string) => (owner === projectId ? chapters : retained).add(chapterId);
+      for (const row of this.db.prepare('SELECT r.state,b.project_id FROM revisions r JOIN branches b ON b.id=r.branch_id').iterate()) {
+        for (const chapter of unpack(row.state).chapters) collect(row.project_id, chapter.id);
+      }
+      for (const row of this.db.prepare('SELECT project_id,data FROM jobs').iterate()) {
+        const job = parse<Job>(row.data);
+        for (const field of ['chapterId', 'generatedChapterId', 'extractChapterId', 'importCurrentChapterId']) {
+          const chapterId = job.payload[field]; if (typeof chapterId === 'string') collect(row.project_id, chapterId);
+        }
+      }
+      for (const row of this.db.prepare('SELECT project_id,chapter_id FROM model_outputs WHERE chapter_id IS NOT NULL').iterate()) collect(row.project_id, String(row.chapter_id));
+      this.db.prepare('DELETE FROM model_outputs WHERE project_id=?').run(projectId);
+      this.db.prepare('DELETE FROM job_import_chapters WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)').run(projectId);
+      this.db.prepare('DELETE FROM jobs WHERE project_id=?').run(projectId);
+      this.db.prepare('DELETE FROM revisions WHERE branch_id IN (SELECT id FROM branches WHERE project_id=?)').run(projectId);
+      this.db.prepare('DELETE FROM branches WHERE project_id=?').run(projectId);
+      const deleteText = this.db.prepare('DELETE FROM chapter_texts WHERE id=?');
+      const deleteSearch = this.db.prepare('DELETE FROM chapter_search WHERE id=?');
+      for (const chapterId of chapters) if (!retained.has(chapterId)) { deleteSearch.run(chapterId); deleteText.run(chapterId); }
+      this.db.prepare('DELETE FROM projects WHERE id=?').run(projectId);
+      onDelete?.(); this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   listBranches(projectId: string): Branch[] { this.getProject(projectId); return this.db.prepare('SELECT data FROM branches WHERE project_id=? ORDER BY rowid').all(projectId).map(r => parse<Branch>(r.data)); }
   getBranch(branchId: string): Branch { const row = this.db.prepare('SELECT data FROM branches WHERE id=?').get(branchId); if (!row) throw new HttpError('故事线不存在', 404); return parse(row.data); }
   revision(revisionId: string): Revision { const row = this.db.prepare('SELECT data FROM revisions WHERE id=?').get(revisionId); if (!row) throw new HttpError('版本不存在', 404); return parse(row.data); }

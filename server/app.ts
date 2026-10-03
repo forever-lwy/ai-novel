@@ -4,8 +4,8 @@ import multipart from '@fastify/multipart';
 import staticFiles from '@fastify/static';
 import { z } from 'zod';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdirSync, existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
-import { join, resolve, basename } from 'node:path';
+import { mkdirSync, mkdtempSync, existsSync, writeFileSync, readFileSync, unlinkSync, renameSync, readdirSync, rmSync } from 'node:fs';
+import { join, resolve, basename, dirname } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { Store } from './store.js';
 import { StoryEngine } from './engine.js';
@@ -54,6 +54,23 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   const engine = new StoryEngine(store, () => settings.get());
   store.db.exec(`CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, filename TEXT NOT NULL, format TEXT NOT NULL, chapter_count INTEGER NOT NULL, created_at TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, preview TEXT NOT NULL, storage_name TEXT NOT NULL)`);
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: 128 * 1024 * 1024 });
+  const deletionDir = join(dataDir, 'deleted-sources');
+  // Originals move aside while SQLite commits. On restart, restore files if the
+  // transaction rolled back, or finish removing them if the project was deleted.
+  const finishSourceDeletion = (directory: string) => {
+    if (dirname(resolve(directory)) !== deletionDir) throw new Error('无效的原文清理目录');
+    for (const file of readdirSync(directory, { withFileTypes: true })) {
+      if (!file.isFile()) throw new Error('无效的原文清理文件');
+      const original = join(uploadDir, file.name);
+      if (store.db.prepare('SELECT 1 FROM sources WHERE storage_name=?').get(file.name) && !existsSync(original)) renameSync(join(directory, file.name), original);
+    }
+    rmSync(directory, { recursive: true });
+  };
+  if (existsSync(deletionDir)) for (const directory of readdirSync(deletionDir, { withFileTypes: true })) {
+    if (directory.isDirectory() && /^delete-[a-zA-Z0-9]+$/.test(directory.name)) {
+      try { finishSourceDeletion(join(deletionDir, directory.name)); } catch (error) { app.log.error(error, '原文文件清理未完成，下次启动将重试'); }
+    }
+  }
   await app.register(cookie);
   await app.register(multipart, { limits: { fileSize: 128 * 1024 * 1024, files: 1, fields: 8 } });
   const attempts = new Map<string, { count: number; since: number }>();
@@ -120,6 +137,34 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.get('/api/projects', async request => store.listProjects().map(project => author(request) ? project : { ...project, premise: '' }));
   app.post('/api/projects', async request => store.createProject(z.object({ title: z.string().trim().min(1).max(200), premise: z.string().max(100000).default(''), mode: mode.default('original') }).parse(request.body)));
   app.get('/api/projects/:id', async request => { const project = store.getProject(param(request)); return { project: author(request) ? project : { ...project, premise: '' }, branches: store.listBranches(param(request)), sources: sourceList(param(request)) }; });
+  app.delete('/api/projects/:id', async request => {
+    const projectId = param(request); let stagedDirectory: string | undefined;
+    try {
+      await engine.deleteProject(projectId, () => {
+        const files = store.db.prepare('SELECT DISTINCT storage_name FROM sources s WHERE project_id=? AND NOT EXISTS (SELECT 1 FROM sources other WHERE other.storage_name=s.storage_name AND other.project_id<>?)').all(projectId, projectId);
+        const paths = files.map(file => {
+          const path = resolve(uploadDir, String(file.storage_name));
+          if (dirname(path) !== uploadDir || basename(path) !== file.storage_name) throw new Error('无效的原文存储路径');
+          return path;
+        });
+        if (paths.length) {
+          mkdirSync(deletionDir, { recursive: true }); stagedDirectory = mkdtempSync(join(deletionDir, 'delete-'));
+          for (const path of paths) {
+            try { renameSync(path, join(stagedDirectory, basename(path))); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          }
+        }
+        store.db.prepare('DELETE FROM sources WHERE project_id=?').run(projectId);
+      });
+    } catch (error) {
+      if (stagedDirectory) finishSourceDeletion(stagedDirectory);
+      throw error;
+    }
+    if (stagedDirectory) {
+      try { finishSourceDeletion(stagedDirectory); } catch (error) { app.log.error(error, '作品已删除，原文文件清理将在下次启动重试'); }
+    }
+    return { ok: true };
+  });
   app.get('/api/branches/:id', async request => store.view(param(request), author(request)));
   app.get('/api/branches/:id/chapters/:chapterId', async request => store.chapter(param(request), param(request, 'chapterId')));
   app.post('/api/branches/:id/chapters', async request => {
@@ -142,6 +187,8 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     const bytes = await file.toBuffer(); if (bytes.length > 32 * 1024 * 1024) fail('小说文件不能超过 32 MiB。', 413);
     let parsed: ReturnType<typeof parseNovel>;
     try { parsed = parseNovel(file.filename, bytes); } catch (e) { fail(e instanceof Error ? e.message : '无法解析小说文件。'); }
+    // The project may have been deleted while the multipart upload was arriving.
+    store.getProject(projectId);
     const id = randomUUID(), filename = basename(file.filename.replace(/\\/g, '/')), now = new Date().toISOString();
     writeFileSync(join(uploadDir, id), bytes, { flag: 'wx', mode: 0o600 });
     try { store.db.prepare('INSERT INTO sources VALUES (?,?,?,?,?,?,?,?,?)').run(id, projectId, filename, parsed.format, parsed.chapters.length, now, 0, JSON.stringify(parsed.chapters), id); }
