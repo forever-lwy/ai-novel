@@ -121,6 +121,13 @@ test('原创生成保存正文、四章细纲及隐藏伏笔，阅读接口不�
   await expect(page.getByLabel('规划章节标题', { exact: true })).toHaveCount(4);
   await page.getByRole('button', { name: /^伏笔手记/ }).click();
   await expect(page.getByRole('textbox', { name: '隐藏的真相', exact: true })).toHaveValue(/SECRET_E2E_FORESHADOW/);
+  await page.getByLabel('伏笔状态', { exact: true }).selectOption('resolved');
+  await page.getByRole('button', { name: '保存伏笔手记', exact: true }).click();
+  await expect(page.getByRole('button', { name: '保存伏笔手记', exact: true })).toBeDisabled();
+  await expect(page.locator('.foreshadow-card')).toHaveCount(0);
+  await page.getByRole('button', { name: '查看已揭晓与已放弃', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: '隐藏的真相', exact: true })).toHaveValue(/SECRET_E2E_FORESHADOW/);
+  await expect(page.getByLabel('伏笔状态', { exact: true })).toHaveValue('resolved');
   const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
   await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
   await expect(page.locator('.workspace-tabs').getByRole('button', { name: '大纲与伏笔' })).toHaveCount(0);
@@ -146,15 +153,33 @@ test('手动编辑正文后自动整理资料，并保留用户对人物的修�
   await expect(page.locator('.entity-card').filter({ has: page.getByRole('heading', { name: '林舟', exact: true }) })).toBeVisible();
   await page.getByRole('button', { name: '编辑 林舟', exact: true }).click();
   const modal = page.getByRole('dialog');
-  await modal.getByRole('textbox', { name: '资料描述', exact: true }).fill('用户确认：林舟是一位善于观察的旅人。');
+  const fullDescription = '用户确认：林舟是一位善于观察的旅人。' + '他会记录旅途中遇到的人、地方和每一条线索。'.repeat(15);
+  await modal.getByRole('textbox', { name: '资料描述', exact: true }).fill(fullDescription);
+  for (const text of ['他擅长辨认古文字。', '他始终保留旅行手记。', '完整资料末尾：他寻找失踪的老师。']) {
+    await modal.getByRole('button', { name: '添加事实', exact: true }).click();
+    await modal.getByRole('textbox', { name: /^事实 \d+$/ }).last().fill(text);
+  }
   await modal.getByRole('button', { name: '保存资料', exact: true }).click();
   await expect(page.locator('.entity-description')).toContainText(['用户确认：林舟是一位善于观察的旅人。', '故事中出现的城池。']);
+  const cards = page.locator('.entity-card');
+  expect(await cards.evaluateAll(elements => elements.every(element => Math.abs(element.getBoundingClientRect().height - 350) < 1))).toBeTruthy();
+  await page.getByRole('button', { name: '查看 林舟 的详细资料', exact: true }).click();
+  await expect(modal).toBeVisible();
+  await expect(modal.locator('.entity-description')).toHaveText(fullDescription);
+  await expect(modal).toContainText('完整资料末尾：他寻找失踪的老师。');
+  await page.screenshot({ path: testInfo.outputPath('desktop-world-detail.png'), fullPage: true, animations: 'disabled' });
+  await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
   await page.screenshot({ path: testInfo.outputPath('desktop-world.png'), fullPage: true, animations: 'disabled' });
 });
 
 test('导入时确认目录，后台整理完成后从资料跳回原文段落', async ({ page }) => {
   await createProject(page, 'E2E 导入小说');
   await importNovel(page);
+  await tab(page, '大纲与伏笔');
+  await expect(page.locator('.plot-summary-list .plot-summary-card')).toHaveCount(2);
+  await page.locator('.plot-summary-card').first().locator('summary').click();
+  await expect(page.locator('.plot-summary-card').first().locator('p')).toContainText('林舟');
+  await expect(page.locator('.plot-summary-card').last().locator('p')).toContainText('林舟');
   await tab(page, '世界资料');
   const character = page.locator('.entity-card').filter({ has: page.getByRole('heading', { name: '林舟', exact: true }) });
   await character.getByRole('button', { name: /^原文第/ }).first().click();
@@ -177,6 +202,8 @@ test('从指定章节建立分支，历史回退同时撤回新资料且主线�
   await modal.getByRole('button', { name: '建立故事线', exact: true }).click();
   await expect(page.getByLabel('当前故事线', { exact: true })).toHaveValue(/.+/);
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(1);
+  await tab(page, '大纲与伏笔');
+  await expect(page.locator('.plot-summary-list .plot-summary-card')).toHaveCount(1);
   await tab(page, '世界资料');
   await page.getByRole('button', { name: '新增资料', exact: true }).click();
   modal = page.getByRole('dialog');
@@ -193,6 +220,8 @@ test('从指定章节建立分支，历史回退同时撤回新资料且主线�
   await expect(page.getByRole('heading', { name: '仅存在于修订线的角色', exact: true })).toHaveCount(0);
   await page.getByLabel('当前故事线', { exact: true }).selectOption({ label: '主线' });
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
+  await tab(page, '大纲与伏笔');
+  await expect(page.locator('.plot-summary-list .plot-summary-card')).toHaveCount(2);
 });
 
 test('手机尺寸可以创作、打开章节目录和地点关系，页面没有横向溢出', async ({ page }, testInfo) => {
@@ -213,7 +242,12 @@ test('手机尺寸可以创作、打开章节目录和地点关系，页面没�
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('mobile-reading.png'), fullPage: true, animations: 'disabled' });
   await tab(page, '地点关系');
-  await expect(page.getByRole('img', { name: '地点与人物关系图', exact: true })).toBeVisible();
+  const map = page.getByRole('img', { name: '世界地理地点关系图', exact: true });
+  await expect(map).toBeVisible();
+  await expect(map).toContainText('白石城');
+  await expect(map).not.toContainText('林舟');
+  await expect(map.locator('[data-location-id]')).toHaveCount(1);
+  await expect(page.locator('.character-locations')).toContainText('林舟正在白石城调查。');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBeTruthy();
   await page.screenshot({ path: testInfo.outputPath('mobile-map.png'), fullPage: true, animations: 'disabled' });
 });

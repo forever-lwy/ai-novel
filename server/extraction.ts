@@ -13,6 +13,8 @@ export const extractionSchema = z.object({
 export interface SourceSlice { paragraph: number; text: string }
 export interface ExtractionBlock { start: number; text: string; sources: SourceSlice[] }
 
+export const ENTITY_RESOLUTION_INSTRUCTION = '同一个人物或地点只输出一个实体。先对照已有名称与别名，姓名、本名、旧名以及原文明确指向同一人的描述性称呼应统一到同一实体，优先用本名作为 name，其他称呼写入 aliases；比如原文确认“戴兜帽的旅人”名叫“林舟”，应以“林舟”为 name，把“戴兜帽的旅人”写入 aliases。描述性称呼在后续片段获得本名时，也要保留之前的称呼以便归并。只有原文足以确认同一身份时才建立别名，不凭外貌、职业相似或名字包含关系合并；“他”“少女”“队长”等无法唯一指向的泛称不要作为别名。别名对照仅辅助统一身份，不是事实证据，也不能据此提前揭晓身份秘密。';
+
 /** Keep the established 5,500-character boundaries unchanged for durable job checkpoints. */
 export function splitExtractionBlocks(text: string, maxChars = 5500): ExtractionBlock[] {
   const blocks: ExtractionBlock[] = []; let sources: SourceSlice[] = []; let size = 0; let start = 1;
@@ -89,7 +91,9 @@ export function normalizeExtraction(input: unknown, block: ExtractionBlock): { v
     if (Array.isArray(candidate.entities)) candidate.entities.forEach((entity, index) => {
       if (!record(entity)) return; const path = `entities[${index}]`;
       addDefault(entity, 'aliases', [], path); addDefault(entity, 'description', '', path); addDefault(entity, 'visibility', 'secret', path); addDefault(entity, 'facts', [], path);
-      if (Array.isArray(entity.facts)) entity.facts.forEach((fact, factIndex) => { if (!record(fact)) return; const factPath = `${path}.facts[${factIndex}]`; addDefault(fact, 'temporal', 'unknown', factPath); addDefault(fact, 'certainty', 'inference', factPath); addDefault(fact, 'visibility', 'secret', factPath); cite(fact, factPath); });
+      if (Array.isArray(entity.facts)) entity.facts.forEach((fact, factIndex) => { if (!record(fact)) return; const factPath = `${path}.facts[${factIndex}]`; addDefault(fact, 'temporal', 'unknown', factPath); addDefault(fact, 'certainty', 'inference', factPath); addDefault(fact, 'visibility', 'secret', factPath);
+        if (typeof fact.attribute === 'string' && ['位置', '所在地', '当前位置', 'current_location'].includes(fact.attribute.trim().toLocaleLowerCase())) { fact.attribute = 'location'; adjustments.push({ path: `${factPath}.attribute`, message: '明确的位置属性名称已统一为 location' }); }
+        cite(fact, factPath); });
     });
     if (Array.isArray(candidate.relations)) candidate.relations.forEach((relation, index) => { if (!record(relation)) return; addDefault(relation, 'visibility', 'secret', `relations[${index}]`); cite(relation, `relations[${index}]`); });
     if (Array.isArray(candidate.foreshadows)) candidate.foreshadows.forEach((foreshadow, index) => { if (!record(foreshadow)) return; const path = `foreshadows[${index}]`; addDefault(foreshadow, 'detail', '', path); addDefault(foreshadow, 'status', 'planned', path); addDefault(foreshadow, 'revealCondition', '', path); addDefault(foreshadow, 'relatedNames', [], path); });
@@ -101,7 +105,14 @@ export function normalizeExtraction(input: unknown, block: ExtractionBlock): { v
 
 /** Reference names assist entity matching; author plans and unrevealed answers are never extraction evidence. */
 export function extractionContext(state: StoryState, block: ExtractionBlock): string {
-  const entities = state.entities.filter(entity => !entity.mergedInto && [entity.name, ...entity.aliases].some(name => name && block.text.includes(name))).slice(0, 80).map(entity => ({ kind: entity.kind, name: entity.name, aliases: entity.aliases }));
-  const foreshadows = state.foreshadows.filter(item => item.status === 'planted' || item.status === 'resolved').slice(-30).map(item => ({ title: item.title, status: item.status }));
-  return `名称对照（仅用于统一称呼，不是新增事实的证据）：${JSON.stringify(entities)}\n已在正文埋设或揭晓的伏笔索引（不可据此推断答案）：${JSON.stringify(foreshadows)}`;
+  const chapterOrder = new Map(state.chapters.map((chapter, index) => [chapter.id, index]));
+  const entityNames = new Map(state.entities.map(entity => [entity.id, [entity.name, ...entity.aliases]]));
+  for (const merged of state.entities) if (merged.mergedInto) entityNames.get(merged.mergedInto)?.push(merged.name, ...merged.aliases);
+  // A new personal name may refer to an earlier unnamed character, so references are not limited to literal block matches.
+  const entities = state.entities.filter(entity => !entity.mergedInto).map(entity => ({ entity, names: entityNames.get(entity.id)!, mentioned: entityNames.get(entity.id)!.some(name => name && block.text.includes(name)), recent: entity.facts.reduce((latest, fact) => Math.max(latest, chapterOrder.get(fact.citation?.chapterId ?? '') ?? -1), -1) }))
+    .filter(({ entity, mentioned }) => mentioned || entity.kind === 'character' || entity.kind === 'faction')
+    .sort((left, right) => Number(right.mentioned) - Number(left.mentioned) || right.recent - left.recent)
+    .slice(0, 80).map(({ entity, names }) => ({ kind: entity.kind, name: entity.name, aliases: [...new Set(names.filter(name => name !== entity.name))] }));
+  const foreshadows = state.foreshadows.filter(item => item.status === 'planted').slice(-30).map(item => ({ title: item.title, status: item.status }));
+  return `名称对照（仅用于统一称呼，不是新增事实的证据）：${JSON.stringify(entities)}\n尚未揭晓的伏笔索引（不可据此推断答案）：${JSON.stringify(foreshadows)}`;
 }

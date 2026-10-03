@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import { modelOutputSchema, OutputStore } from './output-store.js';
+import { findEntitiesByName, reconcileExtractionEntities } from './entity-resolution.js';
 import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState } from '../shared/types.js';
 
 export class HttpError extends Error { constructor(message: string, public statusCode = 400) { super(message); } }
@@ -17,6 +18,20 @@ const pack = (state: StoryState) => gzipSync(JSON.stringify(state));
 const unpack = (value: unknown): StoryState => JSON.parse(gunzipSync(value as Uint8Array).toString());
 export const paragraphs = (text: string) => text.replace(/\r\n?/g, '\n').split('\n').map(s => s.trim()).filter(Boolean);
 const normalize = (value: string) => value.normalize('NFKC').trim().toLocaleLowerCase();
+/** Extraction arrays need not follow prose order. A later citation defines the current exclusive state. */
+function reconcileCurrentAttributes(entity: Entity, chapters: ChapterRef[]) {
+  const order = new Map(chapters.map((chapter, index) => [chapter.id, index]));
+  const attributes = new Set(entity.facts.filter(fact => fact.attribute && fact.temporal === 'current' && fact.certainty === 'fact').map(fact => fact.attribute!));
+  for (const attribute of attributes) {
+    const current = entity.facts.filter(fact => fact.attribute === attribute && fact.temporal === 'current' && fact.certainty === 'fact');
+    if (current.length < 2) continue;
+    const locked = current.filter(fact => fact.locked);
+    if (locked.length) { for (const fact of current) if (!fact.locked) fact.certainty = 'conflict'; continue; }
+    const rank = (fact: Entity['facts'][number]) => [order.get(fact.citation?.chapterId ?? '') ?? -1, fact.citation?.paragraph ?? -1];
+    const latest = current.reduce((chosen, fact) => { const a = rank(chosen); const b = rank(fact); return b[0] > a[0] || (b[0] === a[0] && b[1] >= a[1]) ? fact : chosen; });
+    for (const fact of current) if (fact !== latest) fact.temporal = 'past';
+  }
+}
 const citationSchema = z.object({ chapterId: z.string(), paragraph: z.number().int().positive(), quote: z.string().min(1) });
 const factSchema = z.object({ id: z.string().min(1), text: z.string(), attribute: z.string().optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() });
 const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string(), aliases: z.array(z.string()), description: z.string(), visibility: z.enum(['public', 'secret']), locked: z.boolean(), facts: z.array(factSchema), mergedInto: z.string().optional() });
@@ -218,40 +233,52 @@ export class Store {
     result.entities.forEach((e, i) => e.facts.forEach((fact, j) => validateCitation(fact.paragraph, fact.quote, `entities[${i}].facts[${j}].quote`)));
     result.relations.forEach((relation, i) => validateCitation(relation.paragraph, relation.quote, `relations[${i}].quote`));
     if (issues.length) throw new OutputValidationError(issues, '原文引用校验失败，请在作者输出记录中查看具体位置并修正');
-    const resolve = (name: string, kind?: Entity['kind']) => state.entities.filter(e => !e.mergedInto && (!kind || e.kind === kind) && [e.name, ...e.aliases].some(n => normalize(n) === normalize(name)));
-    for (const extracted of result.entities) {
-      let matches = resolve(extracted.name, extracted.kind);
-      if (!matches.length) matches = state.entities.filter(e => !e.mergedInto && e.kind === extracted.kind && [e.name, ...e.aliases].some(n => extracted.aliases.some(a => normalize(n) === normalize(a))));
+    const reconciled = reconcileExtractionEntities(state, result.entities);
+    if (reconciled.issues.length) throw new OutputValidationError(reconciled.issues, '实体身份存在歧义，请核对名称与别名');
+    const resolve = (name: string, kind?: Entity['kind']) => {
+      const matches = findEntitiesByName(state, name, kind);
+      for (const binding of reconciled.nameBindings.filter(binding => (!kind || binding.kind === kind) && normalize(binding.name) === normalize(name))) {
+        const entity = state.entities.find(entity => entity.id === binding.entityId && !entity.mergedInto);
+        if (entity && !matches.some(match => match.id === entity.id)) matches.push(entity);
+      }
+      return matches;
+    };
+    for (const extracted of reconciled.entities) {
+      const matches = resolve(extracted.name, extracted.kind);
       let entity = matches.length === 1 ? matches[0] : undefined;
       const ambiguous = matches.length > 1;
       if (!entity) { entity = { id: id(), kind: extracted.kind, name: extracted.name, aliases: extracted.aliases, description: '', visibility: extracted.visibility, locked: false, facts: [] }; state.entities.push(entity); }
       // Locked records retain human prose and aliases; evidence may be appended, never overwritten.
       if (!entity.locked) { entity.aliases = [...new Set([...entity.aliases, ...extracted.aliases])]; if (extracted.description.trim() && extracted.facts.some(f => f.temporal === 'current')) entity.description = extracted.description; if (extracted.visibility === 'secret') entity.visibility = 'secret'; }
-      for (const fact of extracted.facts) {
+      for (const fact of [...extracted.facts].sort((a, b) => a.paragraph - b.paragraph)) {
         if (entity.facts.some(f => f.text === fact.text && f.attribute === fact.attribute && f.citation?.chapterId === chapterId && f.citation.paragraph === fact.paragraph && f.citation.quote === fact.quote)) continue;
         let conflict = ambiguous || (entity.locked && fact.temporal === 'current');
         if (fact.attribute && fact.temporal === 'current' && fact.certainty === 'fact') {
           const oldCurrent = entity.facts.filter(f => f.attribute === fact.attribute && f.temporal === 'current' && f.certainty === 'fact');
           if (oldCurrent.some(f => f.locked)) conflict = true;
-          if (!conflict) for (const old of oldCurrent) old.temporal = 'past';
+          // Keep candidates until their citations can be compared across the whole extraction.
         }
-        entity.facts.push({ id: id(), text: fact.text, attribute: fact.attribute, temporal: fact.temporal, certainty: conflict ? 'conflict' : fact.certainty, visibility: fact.visibility, citation: citation(fact.paragraph, fact.quote) });
+        entity.facts.push({ id: id(), text: fact.text, attribute: fact.attribute, temporal: fact.temporal, certainty: conflict ? 'conflict' : fact.certainty, visibility: extracted.visibility === 'secret' ? 'secret' : fact.visibility, citation: citation(fact.paragraph, fact.quote) });
       }
     }
+    for (const entity of state.entities.filter(entity => !entity.mergedInto)) reconcileCurrentAttributes(entity, state.chapters);
+    const secretIds = new Set(reconciled.entities.filter(entity => entity.visibility === 'secret').flatMap(entity => resolve(entity.name, entity.kind).map(match => match.id)));
     for (const [index, extracted] of result.relations.entries()) {
       const from = resolve(extracted.from); const to = resolve(extracted.to);
       for (const [field, matches] of [['from', from], ['to', to]] as const) if (matches.length !== 1) issues.push({ path: `relations[${index}].${field}`, message: '关系端点必须匹配唯一的已有或本次提取实体，请核对名称与别名', paragraph: extracted.paragraph, quote: extracted.quote, sourceText: lines[extracted.paragraph - 1] });
       if (from.length !== 1 || to.length !== 1) continue;
-      if (!state.relations.some(r => r.fromId === from[0].id && r.toId === to[0].id && r.label === extracted.label && r.citation?.chapterId === chapterId)) state.relations.push({ id: id(), fromId: from[0].id, toId: to[0].id, label: extracted.label, visibility: extracted.visibility, citation: citation(extracted.paragraph, extracted.quote) });
+      if (!state.relations.some(r => r.fromId === from[0].id && r.toId === to[0].id && r.label === extracted.label && r.citation?.chapterId === chapterId)) state.relations.push({ id: id(), fromId: from[0].id, toId: to[0].id, label: extracted.label, visibility: secretIds.has(from[0].id) || secretIds.has(to[0].id) ? 'secret' : extracted.visibility, citation: citation(extracted.paragraph, extracted.quote) });
     }
     for (const [index, item] of result.foreshadows.entries()) {
       const old = state.foreshadows.find(f => normalize(f.title) === normalize(item.title));
       const relatedEntityIds = item.relatedNames.flatMap((n, nameIndex) => { const matches = resolve(n); if (matches.length !== 1) { issues.push({ path: `foreshadows[${index}].relatedNames[${nameIndex}]`, message: '伏笔关联名称必须匹配唯一实体，请核对名称与别名' }); return []; } return matches[0].id; });
-      const updated: Foreshadow = { id: old?.id ?? id(), title: item.title, detail: item.detail, status: item.status, dueChapter: item.dueChapter, revealCondition: item.revealCondition, relatedEntityIds, plantedChapterId: old?.plantedChapterId ?? (item.status === 'planted' ? chapterId : undefined), resolvedChapterId: item.status === 'resolved' ? chapterId : old?.resolvedChapterId };
+      // Repeated mentions cannot reopen a completed clue. Earlier versions retain their own planted state.
+      if (old && (old.status === 'resolved' || old.status === 'abandoned')) continue;
+      const updated: Foreshadow = { id: old?.id ?? id(), title: old?.title ?? item.title, detail: item.detail || old?.detail || '', status: item.status, dueChapter: item.dueChapter ?? old?.dueChapter, revealCondition: item.revealCondition || old?.revealCondition || '', relatedEntityIds: relatedEntityIds.length ? relatedEntityIds : old?.relatedEntityIds ?? [], plantedChapterId: old?.plantedChapterId ?? (item.status === 'planted' ? chapterId : undefined), resolvedChapterId: item.status === 'resolved' ? chapterId : old?.resolvedChapterId };
       if (old) Object.assign(old, updated); else state.foreshadows.push(updated);
     }
     if (issues.length) throw new OutputValidationError(issues, '资料关联校验失败，请在作者输出记录中查看全部问题并修正');
-    ref.summary = [ref.summary, result.summary].filter(Boolean).join('\n').slice(-16000); ref.status = complete ? 'ready' : 'pending';
+    ref.summary = [ref.summary, result.summary].filter(Boolean).join('\n'); ref.status = complete ? 'ready' : 'pending';
     return this.commit(branchId, base, state, complete ? `完成资料整理：${ref.title}` : `整理章节片段：${ref.title}`, checkpoint);
   }
   exportProject(projectId: string): unknown {

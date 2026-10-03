@@ -9,6 +9,9 @@
 - POST /branches/:id/chapters {baseRevisionId,title,text,chapterId?} -> BranchView（保存后 pending，自动整理，没配置模型可保留正文后配置并重试）；改旧章自动另开修订线，返回的 branch 可能不同。
 - POST /branches/:id/fork {baseRevisionId,chapterId?,name} -> BranchView（不指定chapterId代表当前结尾）。
 - POST /branches/:id/rollback {baseRevisionId,revisionId} -> BranchView。
+- 作者视图的 `state.chapters[].summary` 为导入或整理正文时同时提取的已发生剧情大纲，片段摘要按处理顺序累积；与 `state.outline.coarse/fine` 的未来规划分开。回退和旧章节分支读取该边界的整份快照，摘要、伏笔状态与人物位置事实一起恢复。读者视图及章节正文接口继续隐藏摘要。
+- `state.foreshadows` 保留历史状态，界面默认只显示 `planned/planted`。`resolved/abandoned` 不进入后续待处理伏笔上下文，模型再次提及同名线索不会自动重新打开；作者仍可在历史入口手工查看与修正。
+- 地图使用两端均为 `location` 的地理关系，不将人物或任务关系画成地图节点。人物当前位置使用 `attribute=location` 的当前事实；同一状态按引用章节、段落的先后更新，旧记录转为过去，锁定或不确定的冲突保留供作者核对。
 - PUT /branches/:id/outline {baseRevisionId,outline} -> BranchView。
 - PUT /branches/:id/entities/:entityId {baseRevisionId,entity} -> BranchView；POST /branches/:id/entities/merge {baseRevisionId,fromId,toId} -> BranchView（回退撤销合并）。
 - PUT /branches/:id/foreshadows {baseRevisionId,foreshadows} -> BranchView。
