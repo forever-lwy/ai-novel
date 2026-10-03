@@ -27,6 +27,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 Desktop.ini
+.idea/
 
 # 小说、数据库、凭据和浏览器测试产物
 data/
