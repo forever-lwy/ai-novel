@@ -30,7 +30,7 @@ function RequiredInteger({ label, value, min, max, onChange }: { label: string; 
   return <input aria-label={label} required type="number" step={1} min={min} max={max} value={text} onChange={event => { const next = event.target.value; setText(next); if (next !== '' && Number.isSafeInteger(Number(next))) onChange(Number(next)); }} />;
 }
 
-export function ProviderParameters({ parameters, protocol, onChange, onReset }: { parameters: ModelParameters; protocol: ProviderProtocol; onChange: (patch: Partial<ModelParameters>) => void; onReset: () => void }) {
+export function ProviderParameters({ parameters, protocol, onChange, onReset, writing = false }: { parameters: ModelParameters; protocol: ProviderProtocol; onChange: (patch: Partial<ModelParameters>) => void; onReset: () => void; writing?: boolean }) {
   const openai = protocol === 'openai-chat' || protocol === 'openai-responses';
   const gemini = protocol === 'gemini'; const claude = protocol === 'claude'; const thinking = activeThinking(parameters, protocol);
   const hasOtherSettings = (!openai && parameters.reasoningEffort !== undefined)
@@ -75,7 +75,7 @@ export function ProviderParameters({ parameters, protocol, onChange, onReset }: 
       </div>}
       <div className="form-grid">
         <OptionalNumber label="请求超时（秒）" value={parameters.timeoutMs === undefined ? undefined : parameters.timeoutMs / 1000} min={1} max={3600} step={0.001} onChange={seconds => onChange({ timeoutMs: seconds === undefined ? undefined : Math.round(seconds * 1000) })} hint="留空使用默认 180 秒。范围 1–3600 秒；服务自身仍可能更早中断。" />
-        <label>返回方式<select aria-label="返回方式" value={parameters.stream === undefined ? '' : parameters.stream ? 'true' : 'false'} onChange={event => onChange({ stream: event.target.value === '' ? undefined : event.target.value === 'true' })}><option value="">应用默认（非流式）</option><option value="false">非流式 · 完整响应</option><option value="true">流式 · 分段接收后汇总</option></select><span className="hint">只改变向模型请求的方式，工作台仍在内容完整后保存。代理可能只支持其中一种方式。</span></label>
+        <label>{writing ? '连接测试返回方式' : '返回方式'}<select aria-label="返回方式" value={parameters.stream === undefined ? '' : parameters.stream ? 'true' : 'false'} onChange={event => onChange({ stream: event.target.value === '' ? undefined : event.target.value === 'true' })}><option value="">应用默认（非流式）</option><option value="false">非流式 · 完整响应</option><option value="true">流式 · 分段接收后汇总</option></select><span className="hint">{writing ? '正文写作固定实时流式输出，完成后保存。本项只影响连接测试。' : '只改变向模型请求的方式，工作台仍在内容完整后保存。代理可能只支持其中一种方式。'}</span></label>
       </div>
       {hasOtherSettings && <p className="notice">其他协议的设置仍保留，切回对应协议可继续编辑。当前请求不会发送不属于本协议的参数。</p>}
       {issue && <p className="notice error">{issue}</p>}

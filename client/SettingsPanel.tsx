@@ -15,7 +15,7 @@ const protocols: Record<ProviderProtocol, { name: string; url: string }> = {
 };
 const roles = [
   { role: 'writing', providerKey: 'writingProviderId', modelKey: 'writingModel', label: '正文写作' },
-  { role: 'planning', providerKey: 'planningProviderId', modelKey: 'planningModel', label: '大纲规划' },
+  { role: 'planning', providerKey: 'planningProviderId', modelKey: 'planningModel', label: '剧情规划' },
   { role: 'extraction', providerKey: 'extractionProviderId', modelKey: 'extractionModel', label: '资料提取' },
 ] as const;
 type Role = typeof roles[number];
@@ -101,7 +101,7 @@ export function SettingsPanel() {
   }
   if (!settings) return error ? <Notice error={error} /> : <Spinner />;
   return <form className="form-stack" onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
-    <p className="muted">先添加供应商连接，再为正文写作、大纲规划和资料提取分别选择模型，并在模型下方设置生成参数。每个任务独立保存参数，同模型用于不同任务也不共用。密钥保存在服务端，作品备份不包含密钥。</p>
+    <p className="muted">先添加供应商连接，再为正文写作、剧情规划和资料提取分别选择模型，并在模型下方设置生成参数。每个任务独立保存参数，同模型用于不同任务也不共用。密钥保存在服务端，作品备份不包含密钥。</p>
     <div className="settings-providers">{settings.providers.map((provider, index) => <section className="provider-card" key={provider.id}>
       <div className="row between"><span className="eyebrow">供应商 {String(index + 1).padStart(2, '0')}</span><button type="button" className="icon-button danger-text" title="删除此供应商" aria-label={`删除供应商 ${provider.name}`} disabled={busy} onClick={() => deleteProvider(provider.id)}><Trash2 size={16} /></button></div>
       <div className="form-grid"><label>供应商名称<input required value={provider.name} onChange={e => updateProvider(index, { name: e.target.value })} placeholder="例如：我的模型服务商" /></label><label>接口协议<select aria-label="接口协议" value={provider.protocol} onChange={e => { const protocol = e.target.value as ProviderProtocol; const wasDefault = provider.baseUrl.replace(/\/+$/, '') === protocols[provider.protocol].url.replace(/\/+$/, ''); updateProvider(index, { protocol, ...(wasDefault ? { baseUrl: protocols[protocol].url } : {}) }); }}>{Object.entries(protocols).map(([key, value]) => <option key={key} value={key}>{value.name}</option>)}</select></label></div>
@@ -124,7 +124,7 @@ export function SettingsPanel() {
           <div className="model-list-feedback"><span className="hint">{list?.loading ? '正在从供应商获取模型列表…' : list?.models.length ? `已获取 ${list.models.length} 个模型；也可以直接填写自定义模型名称。` : '可直接填写自定义模型名称。'}</span><button type="button" className="text-button" aria-label={`${role.label}刷新模型列表`} disabled={busy || list?.loading} onClick={() => loadModels(provider, true)}><RefreshCw size={13} />刷新列表</button></div>
           {list?.error && <p className="notice error model-list-error">获取模型列表失败：{list.error}</p>}
           {!list?.loading && !list?.error && list && !list.models.length && <p className="hint">供应商未返回可用模型，请填写自定义模型名称。</p>}
-          {modelName ? <ProviderParameters key={JSON.stringify([role.role, provider.id, modelName])} protocol={provider.protocol} parameters={getModelParameters(settings, role.role, provider.id, modelName)} onChange={patch => updateParameters(role.role, provider.id, modelName, patch)} onReset={() => resetParameters(role.role, provider.id, modelName)} /> : <p className="hint">选择或填写模型名称后，可设置此任务的模型参数；新模型自动使用通用默认值。</p>}
+          {modelName ? <ProviderParameters writing={role.role === 'writing'} key={JSON.stringify([role.role, provider.id, modelName])} protocol={provider.protocol} parameters={getModelParameters(settings, role.role, provider.id, modelName)} onChange={patch => updateParameters(role.role, provider.id, modelName, patch)} onReset={() => resetParameters(role.role, provider.id, modelName)} /> : <p className="hint">选择或填写模型名称后，可设置此任务的模型参数；新模型自动使用通用默认值。</p>}
           <button type="button" className="button secondary small" aria-label={`${role.label}保存并测试连接`} disabled={busy || !model.trim() || !provider.baseUrl} onClick={event => { if (event.currentTarget.form?.reportValidity()) void save(role); }}><PlugZap size={15} />保存并测试连接</button>
         </>}
       </section>;

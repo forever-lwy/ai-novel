@@ -138,21 +138,23 @@ describe('single-request context and output limits', () => {
     const project = ctx.store.createProject({ title: '重试不覆盖诊断' }); const branch = ctx.store.getBranch(project.mainBranchId);
     const outlined = ctx.store.updateOutline(branch.id, branch.revisionId, { coarse: '旅人寻找灯塔', locked: '', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第 ${chapter} 章`, goal: '寻找线索' })) });
     const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: outlined.branch.revisionId, mode: 'original', instruction: '写开场' }); ctx.engine.start();
-    expect((await terminal(ctx.engine, job.id)).status).toBe('failed');
+    expect((await terminal(ctx.engine, job.id)).status).toBe('completed');
+    const background = ctx.engine.listJobs().find(value => value.kind === 'extract')!;
+    expect((await terminal(ctx.engine, background.id)).status).toBe('failed');
     expect(fixture.calls).toHaveLength(2);
-    const output = ctx.engine.listOutputs(job.id).find(value => value.stage === 'extraction')!;
+    const output = ctx.engine.listOutputs(background.id).find(value => value.stage === 'extraction')!;
     const oldOutput = structuredClone(ctx.store.outputs.get(output.id)!);
     expect(oldOutput.status).toBe('invalid'); expect(oldOutput.incomplete).toBe(true); expect(oldOutput.issues.length).toBeGreaterThan(0);
     const chapterId = ctx.store.state(branch.id).chapters[0].id;
     const extractionParameters = config.modelParameters!.find(profile => profile.model === 'extractor')!;
-    extractionParameters.contextTokens = 64000; ctx.engine.action(job.id, 'retry');
-    const preflightFailed = await terminal(ctx.engine, job.id);
+    extractionParameters.contextTokens = 64000; ctx.engine.action(background.id, 'retry');
+    const preflightFailed = await terminal(ctx.engine, background.id);
     expect(preflightFailed.status).toBe('failed'); expect(preflightFailed.error).toContain('上下文');
     expect(fixture.calls).toHaveLength(2); expect(ctx.store.outputs.get(output.id)).toEqual(oldOutput);
-    expect(ctx.engine.listOutputs(job.id)).toHaveLength(2);
+    expect(ctx.engine.listOutputs(background.id)).toHaveLength(1);
     expect(ctx.store.state(branch.id).chapters[0]).toMatchObject({ id: chapterId, status: 'pending' });
-    extractionParameters.contextTokens = 512000; ctx.engine.action(job.id, 'retry');
-    expect((await terminal(ctx.engine, job.id)).status).toBe('completed');
+    extractionParameters.contextTokens = 512000; ctx.engine.action(background.id, 'retry');
+    expect((await terminal(ctx.engine, background.id)).status).toBe('completed');
     expect(fixture.calls).toHaveLength(3); expect(fixture.calls.filter(call => call.path.includes('/writer:'))).toHaveLength(1);
     expect(fixture.calls[2].path).toContain('/extractor:'); expect(fixture.calls[2].body.generationConfig.maxOutputTokens).toBe(64000);
     expect(ctx.store.outputs.get(output.id)).toEqual(oldOutput);
@@ -169,8 +171,9 @@ describe('single-request context and output limits', () => {
     const outlined = ctx.store.updateOutline(branch.id, branch.revisionId, { coarse: '旅人寻找灯塔', locked: '', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第 ${chapter} 章`, goal: '寻找线索' })) });
     const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: outlined.branch.revisionId, mode: 'original', instruction: '写开场' }); ctx.engine.start();
     expect((await terminal(ctx.engine, job.id)).status).toBe('completed');
+    expect((await terminal(ctx.engine, ctx.engine.listJobs().find(value => value.kind === 'extract')!.id)).status).toBe('completed');
     expect(fixture.calls.map(call => [call.path.split('/').at(-1), call.body.generationConfig.maxOutputTokens])).toEqual([
-      ['writer:generateContent', 2048], ['extractor:generateContent', 64000],
+      ['writer:streamGenerateContent?alt=sse', 2048], ['extractor:generateContent', 64000],
     ]);
   });
 
@@ -199,11 +202,15 @@ describe('single-request context and output limits', () => {
     ];
     const ctx = harness(config);
     const project = ctx.store.createProject({ title: '同模型任务参数隔离' }); const branch = ctx.store.getBranch(project.mainBranchId);
-    const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: branch.revisionId, mode: 'original', instruction: '写开场' }); ctx.engine.start();
+    const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId }); ctx.engine.start();
+    expect((await terminal(ctx.engine, planJob.id)).status).toBe('completed');
+    const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '写开场' });
     expect((await terminal(ctx.engine, job.id)).status).toBe('completed');
-    expect(fixture.calls.map(call => call.path.split('/').at(-1))).toEqual(['shared-model:generateContent', 'shared-model:generateContent', 'shared-model:generateContent']);
+    const background = ctx.engine.listJobs().find(value => value.kind === 'extract')!;
+    expect((await terminal(ctx.engine, background.id)).status).toBe('completed');
+    expect(fixture.calls.map(call => call.path.split('/').at(-1))).toEqual(['shared-model:generateContent', 'shared-model:streamGenerateContent?alt=sse', 'shared-model:generateContent']);
     expect(fixture.calls.map(call => call.body.generationConfig.maxOutputTokens)).toEqual([8192, 2048, 64000]);
-    const capturedLimits = Object.fromEntries(ctx.engine.listOutputs(job.id).map(output => [output.stage, JSON.parse(ctx.store.outputs.get(output.id)!.request!.body).generationConfig.maxOutputTokens]));
+    const capturedLimits = Object.fromEntries([planJob.id, job.id, background.id].flatMap(id => ctx.engine.listOutputs(id)).map(output => [output.stage, JSON.parse(ctx.store.outputs.get(output.id)!.request!.body).generationConfig.maxOutputTokens]));
     expect(capturedLimits).toEqual({ planning: 8192, writing: 2048, extraction: 64000 });
   });
 });

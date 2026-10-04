@@ -1,0 +1,14 @@
+import { Brain, CheckCircle2, CircleAlert, LoaderCircle, Search } from 'lucide-react';
+import type { JobStatus, WritingActivity } from '../shared/types';
+import { Notice } from './ui';
+
+const toolNames: Record<string, string> = { search_story: '搜索故事资料', read_entity: '读取完整资料', read_chapter: '读取历史原文' };
+const activityStatus = { running: '进行中', completed: '已完成', failed: '失败' };
+function readable(value: unknown) { return typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
+
+export function WritingActivityPanel({ activities, loading, error, status }: { activities: WritingActivity[]; loading?: boolean; error?: string; status: JobStatus }) {
+  return <section className="writing-activities" aria-label="生成过程"><div className="writing-activities-heading"><h2>生成过程 <span>{activities.length}</span></h2><span>仅作者可见</span></div><p className="hint">显示模型实际公开的思考内容或摘要，以及资料查询过程。具体内容默认折叠，不会写入正文，也不会因此额外调用模型。</p>{error && <Notice error={error} />}{!activities.length && !error && <p className="hint">{loading ? '正在读取已保存的过程…' : ['queued', 'running'].includes(status) ? '模型公开过程会在这里逐步更新。' : '没有已保存的公开思考内容或资料查询记录。'}</p>}{activities.map(activity => <details className={`writing-activity activity-${activity.kind}`} key={activity.id} data-kind={activity.kind} data-status={activity.status}>
+    <summary><span className="writing-activity-label">{activity.kind === 'thinking' ? <Brain size={15} /> : <Search size={15} />}<strong>{activity.kind === 'thinking' ? '模型公开思考' : toolNames[activity.name || ''] || activity.name || '资料查询'}</strong>{activity.kind === 'tool' && activity.name && <small>{activity.name}</small>}</span><span className={`activity-status ${activity.status}`}>{activity.status === 'running' ? <LoaderCircle size={13} className="spin" /> : activity.status === 'failed' ? <CircleAlert size={13} /> : <CheckCircle2 size={13} />}{activity.kind === 'tool' && activity.status === 'running' ? '调用中' : activityStatus[activity.status]}</span></summary>
+    <div className="writing-activity-content">{activity.kind === 'thinking' ? <p className="writing-thinking">{activity.text || '这条记录没有公开的思考文本。'}</p> : <>{activity.arguments && <div><h3>调用参数</h3><pre aria-label="工具调用参数">{readable(activity.arguments)}</pre></div>}{activity.result !== undefined && <div><h3>查询结果</h3><pre aria-label="工具查询结果">{readable(activity.result)}</pre></div>}{activity.status === 'running' && <p className="hint">正在等待查询结果…</p>}{activity.error && <Notice error={activity.error} />}</>}</div>
+  </details>)}</section>;
+}

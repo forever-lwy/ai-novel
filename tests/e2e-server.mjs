@@ -14,6 +14,7 @@ if (!existsSync(join(staticDir, 'index.html'))) throw new Error('请先 npm run 
 const dataDir = mkdtempSync(join(tmpdir(), 'ai-novel-browser-'));
 
 function fixtureReply(system, prompt) {
+  if (system.includes('只压缩') && system.includes('剧情摘要')) return JSON.stringify({ text: '林舟调查白石城。' });
   if (system.includes('本片段提要') || system.includes('只做当前编号片段')) {
     const fragment = prompt.split('全文段落编号如下（仅提取本片段）：\n').at(-1) || '';
     const paragraphs = [...fragment.matchAll(/^\[(\d+)\]\s*(.+)$/gm)].map(match => ({ paragraph: Number(match[1]), quote: match[2] }));
@@ -23,7 +24,7 @@ function fixtureReply(system, prompt) {
     return JSON.stringify({
       summary: person ? '林舟来到白石城，继续探索城中的线索。' : '这段故事记录了新的经历。',
       entities: [
-        ...(person ? [{ kind: 'character', name: '林舟', aliases: ['小舟'], description: '来到白石城的旅人。', visibility: 'public', facts: [fact(person, '林舟正在白石城调查。', 'location')] }] : []),
+        ...(person ? [{ kind: 'character', name: '林舟', nameStatus: 'confirmed', isMain: true, aliases: ['小舟'], description: '来到白石城的旅人。', visibility: 'public', facts: [fact(person, '林舟正在白石城调查。', 'location')] }] : []),
         ...(place ? [{ kind: 'location', name: '白石城', aliases: [], description: '故事中出现的城池。', visibility: 'public', facts: [fact(place, '白石城是本章出现的地点。', 'identity')] }] : []),
       ],
       relations: person && place ? [{ from: '林舟', to: '白石城', label: '身处', visibility: 'public', ...place }] : [],
@@ -33,12 +34,12 @@ function fixtureReply(system, prompt) {
   if (system.includes('fine 必须包含')) {
     const next = Number(prompt.match(/请为第\s+(\d+)\s+章至第/)?.[1] || 1);
     return JSON.stringify({
-      coarse: '林舟从白石城出发，查明旧钥匙的来历，最后找到自己的归宿。',
       fine: Array.from({ length: 4 }, (_, index) => ({ chapter: next + index, title: `第${next + index}章 城中线索`, goal: '围绕白石城的线索推进人物行动。' })),
       foreshadows: [{ title: '旧钥匙的主人', detail: 'SECRET_E2E_FORESHADOW：旧钥匙属于失踪的守城人。', status: 'planned', dueChapter: next + 3, revealCondition: '打开钟楼后揭晓', relatedNames: [] }],
     });
   }
   if (prompt.includes('Reply with OK only.')) return 'OK';
+  if (prompt.includes('REGEN_BRANCH_ONLY')) return '林舟来到白石城，发现标记为 REGEN_BRANCH_ONLY 的新线索。\n\n他拿起钥匙，走向守城人留下的石阶。';
   return '林舟来到白石城，发现城门下藏着一把旧钥匙。\n\n他拾起钥匙，决定沿着石阶寻找守城人留下的线索。';
 }
 
@@ -75,19 +76,47 @@ const modelServer = createServer(async (req, res) => {
     }
     const system = body.messages?.find(message => message.role === 'system')?.content || '';
     const prompt = body.messages?.find(message => message.role === 'user')?.content || '';
-    const text = body.model === 'e2e-compact-extraction' ? JSON.stringify({ summary: '林舟来到白石城。', entities: [{ kind: 'character', name: '林舟', visibility: 'public', facts: [{ text: '林舟走进白石城', paragraph: 1, temporal: 'current', certainty: 'fact', visibility: 'public', attribute: 'location' }] }] }) : body.model === 'e2e-quote-mismatch' ? JSON.stringify({ summary: '旅人进入古城。', entities: [{ kind: 'character', name: '林舟', aliases: [], description: '旅人', visibility: 'public', facts: [{ text: '林舟来到白石城', attribute: 'location', temporal: 'current', certainty: 'fact', visibility: 'public', paragraph: 1, quote: '回来了。林舟走进山谷。' }] }], relations: [], foreshadows: [] }) : fixtureReply(system, prompt);
+    if (body.model === 'e2e-public-activities') {
+      const queried = body.messages?.some(message => message.role === 'tool');
+      if (queried && prompt.includes('ACTIVITY_HTTP_FAILURE')) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Deliberate activity-history failure' } })); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': 'e2e-activity-stream' });
+      const frame = (delta, finish_reason = null) => { if (!res.destroyed) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`); };
+      const done = () => { if (!res.destroyed) { res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 120, completion_tokens: 80 } })}\n\n`); res.end('data: [DONE]\n\n'); } };
+      frame({ reasoning_content: queried ? 'AUTHOR_PUBLIC_THINK_2：根据查询结果安排人物行动。' : 'AUTHOR_PUBLIC_THINK_1：先核对故事资料，' });
+      if (!queried) {
+        setTimeout(() => frame({ reasoning_content: '再检查尚未确认的人物身份。' }), 250);
+        setTimeout(() => {
+          frame({ tool_calls: [
+            { index: 0, id: 'activity-search', type: 'function', function: { name: 'search_story', arguments: JSON.stringify({ query: '林舟', scope: 'entities' }) } },
+            { index: 1, id: 'activity-missing', type: 'function', function: { name: 'read_entity', arguments: JSON.stringify({ id: 'ACTIVITY_MISSING_ENTITY' }) } },
+          ] });
+          frame({}, 'tool_calls'); done();
+        }, 900);
+      } else {
+        const prose = '林舟来到白石城，循着石碑上的纹路找到一处旧门。\n\n他握住钥匙，推开了门。'; const middle = Math.floor(prose.length / 2);
+        setTimeout(() => frame({ content: prose.slice(0, middle) }), 150);
+        setTimeout(() => { frame({ content: prose.slice(middle) }); frame({}, 'stop'); done(); }, 6000);
+      }
+      return;
+    }
+    const text = body.model === 'e2e-noncompact-summary' ? JSON.stringify({ text: prompt }) : body.model === 'e2e-compact-extraction' ? JSON.stringify({ summary: '林舟来到白石城。', entities: [{ kind: 'character', name: '林舟', visibility: 'public', facts: [{ text: '林舟走进白石城', paragraph: 1, temporal: 'current', certainty: 'fact', visibility: 'public', attribute: 'location' }] }] }) : body.model === 'e2e-quote-mismatch' ? JSON.stringify({ summary: '旅人进入古城。', entities: [{ kind: 'character', name: '林舟', aliases: [], description: '旅人', visibility: 'public', facts: [{ text: '林舟来到白石城', attribute: 'location', temporal: 'current', certainty: 'fact', visibility: 'public', paragraph: 1, quote: '回来了。林舟走进山谷。' }] }], relations: [], foreshadows: [] }) : fixtureReply(system, prompt);
     // A short real async wait exercises job polling and persisted checkpoints.
     setTimeout(() => {
       if (res.destroyed) return;
       if (body.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'x-request-id': 'e2e-stream-request' });
         const middle = Math.floor(text.length / 2);
-        for (const content of [text.slice(0, middle), text.slice(middle)]) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
-        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
-        res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 120, completion_tokens: 80 } })}\n\n`);
-        res.end('data: [DONE]\n\n');
+        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text.slice(0, middle) }, finish_reason: null }] })}\n\n`);
+        const finish = () => {
+          if (res.destroyed) return;
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text.slice(middle) }, finish_reason: null }] })}\n\n`);
+          res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+          res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 120, completion_tokens: 80 } })}\n\n`);
+          res.end('data: [DONE]\n\n');
+        };
+        if (body.model === 'e2e-streaming-writing') setTimeout(finish, 3000); else finish();
       } else { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 120, completion_tokens: 80 } })); }
-    }, 100);
+    }, body.model === 'e2e-slow-extraction' ? 5000 : 100);
   } catch { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'Invalid fixture request' })); }
 });
 modelServer.listen(mockPort, '127.0.0.1'); await once(modelServer, 'listening');

@@ -10,7 +10,7 @@ import type { ExtractionResult, Job, ModelRequest, PlanningResult, Settings } fr
 const cleanup: { store: Store; engine: StoryEngine }[] = [];
 afterEach(async () => { for (const context of cleanup.splice(0)) { await context.engine.close(); context.store.close(); } });
 const extraction = (): ExtractionResult => ({ summary: '记录员完成检查。', entities: [], relations: [], foreshadows: [] });
-const planning = (): PlanningResult => ({ coarse: '记录员调查沿岸灯塔。', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第${chapter}章`, goal: '检查设备并记录线索。' })), foreshadows: [] });
+const planning = (): PlanningResult => ({ fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第${chapter}章`, goal: '检查设备并记录线索。' })), foreshadows: [] });
 const settings = (): Settings => ({ providers: [{ id: 'fixture', name: '中性模拟服务', protocol: 'gemini', baseUrl: 'http://unused.invalid', model: 'fixture', apiKey: 'test-configured-key-DO-NOT-PERSIST', maxOutputTokens: 4096, contextTokens: 64000 }], planningProviderId: 'fixture', writingProviderId: 'fixture', extractionProviderId: 'fixture' });
 function provider(response: (request: ModelRequest, writing: boolean) => Promise<string> | string): TextModels {
   const text = async (request: ModelRequest, writing: boolean) => { const body = await response(request, writing); request.onResponse?.({ rawResponse: JSON.stringify({ candidates: [{ content: { parts: [{ text: body }] } }] }), text: body, inputTokens: 13, outputTokens: 21, httpStatus: 200 }); return body; };
@@ -70,8 +70,12 @@ describe('author-only persisted model output recovery (neutral, simulated respon
     const context = make(model); context.store.updateOutline(context.project.mainBranchId, context.store.getBranch(context.project.mainBranchId).revisionId, { ...planning(), locked: '', fine: planning().fine });
     const job = context.engine.enqueue(context.project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '描述一次设备检查' }); await waitJob(context.engine, job.id);
     const outputId = context.engine.listOutputs(job.id)[0].id; const envelope = JSON.stringify({ choices: [{ message: { content: '记录员走向灯塔，完成了检查。' } }] });
-    expect(apply(context.engine, job, outputId, envelope).status).toBe('paused'); expect(calls).toBe(1); expect(context.store.exportText(context.project.mainBranchId)).toContain('记录员走向灯塔，完成了检查。'); expect(context.store.state(context.project.mainBranchId).chapters[0].status).toBe('pending');
-    context.engine.action(job.id, 'resume'); expect((await waitJob(context.engine, job.id)).status).toBe('completed'); expect(calls).toBe(2); expect(context.store.state(context.project.mainBranchId).chapters).toHaveLength(1);
+    expect(apply(context.engine, job, outputId, envelope).status).toBe('completed'); expect(calls).toBe(1); expect(context.store.exportText(context.project.mainBranchId)).toContain('记录员走向灯塔，完成了检查。'); expect(context.store.state(context.project.mainBranchId).chapters[0].status).toBe('pending');
+    const background = context.engine.listJobs(context.project.id).find(item => item.kind === 'extract')!;
+    expect(background.id).not.toBe(job.id); expect(background.status).toBe('paused'); expect(context.engine.listOutputs(background.id)).toEqual([]);
+    await new Promise(resolve => setTimeout(resolve, 20)); expect(calls).toBe(1);
+    context.engine.action(background.id, 'resume'); expect((await waitJob(context.engine, background.id)).status).toBe('completed'); expect(calls).toBe(2); expect(context.store.state(context.project.mainBranchId).chapters).toHaveLength(1); expect(context.store.state(context.project.mainBranchId).chapters[0].status).toBe('ready');
+    expect(context.engine.listJobs(context.project.id).find(item => item.id === job.id)?.status).toBe('completed');
   });
 
   it('imports legacy pasted envelopes, redacts configured keys, and preserves outputs across backup restoration', async () => {
@@ -90,7 +94,7 @@ describe('author-only persisted model output recovery (neutral, simulated respon
     for (const mode of ['cancel', 'stale'] as const) {
       let resolve!: (value: string) => void; let began = false; const delayed = new Promise<string>(r => { resolve = r; });
       const context = make(provider(() => { began = true; return delayed; }), '记录员检查设备。'); const job = enqueueExtract(context); await until(() => began, Boolean);
-      if (mode === 'cancel') context.engine.action(job.id, 'cancel'); else context.store.updateOutline(context.project.mainBranchId, context.store.getBranch(context.project.mainBranchId).revisionId, { coarse: '已更新的大纲', locked: '', fine: [] });
+      if (mode === 'cancel') context.engine.action(job.id, 'cancel'); else context.store.updateOutline(context.project.mainBranchId, context.store.getBranch(context.project.mainBranchId).revisionId, { worldview: '已更新的世界观', locked: '', fine: [] });
       resolve(JSON.stringify(extraction())); await until(() => context.engine.listOutputs(job.id), outputs => outputs.length === 1); await new Promise(r => setTimeout(r, 10));
       const output = context.engine.listOutputs(job.id)[0]; const detail = context.engine.outputDetail(job.id, output.id); expect(detail.canApply).toBe(false); expect(detail.output.text).toContain('summary'); expect(() => apply(context.engine, job, output.id, JSON.stringify(extraction()))).toThrow();
       expect(context.store.state(context.project.mainBranchId).chapters[0].status).toBe('pending');

@@ -1,7 +1,7 @@
 import { ZodError } from 'zod';
-import type { CapturedModelResponse, ModelRequest, ModelRequestSnapshot, ModelResult, ModelTransportDiagnostics, OutputIssue, ProviderConfig } from '../shared/types.js';
+import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequestSnapshot, ModelResult, ModelTransportDiagnostics, OutputIssue, ProviderConfig } from '../shared/types.js';
 import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions } from './provider-options.js';
-import { createStreamEndDetector, parseModelStream } from './model-stream.js';
+import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream } from './model-stream.js';
 export { validateProviderOptions } from './provider-options.js';
 
 export const MODEL_TIMEOUT_MS = DEFAULT_MODEL_TIMEOUT_MS;
@@ -164,19 +164,22 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const key = config.apiKey?.trim();
   const options = providerWireOptions(config);
-  const stream = config.stream ?? false;
+  const stream = Boolean(request.onTextDelta) || (config.stream ?? false);
+  const tools = request.tools ?? [];
   if (stream) headers.Accept = 'text/event-stream';
   switch (config.protocol) {
     case 'openai-chat':
       if (key) headers.Authorization = `Bearer ${key}`;
       return { url: endpoint(config.baseUrl, 'chat/completions'), headers, body: {
         model: config.model, messages: [{ role: 'system', content: request.system }, { role: 'user', content: request.prompt }],
+        ...(tools.length ? { tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) } : {}),
         [config.openaiMaxTokensField ?? 'max_tokens']: tokens, stream, ...(stream ? { stream_options: { include_usage: true } } : {}), ...options,
       } };
     case 'openai-responses':
       if (key) headers.Authorization = `Bearer ${key}`;
       return { url: endpoint(config.baseUrl, 'responses'), headers, body: {
         model: config.model, instructions: request.system, input: request.prompt, max_output_tokens: tokens, stream, store: false, ...options,
+        ...(tools.length ? { tools: tools.map(tool => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters, strict: false })) } : {}),
       } };
     case 'gemini':
       if (key) headers['x-goog-api-key'] = key;
@@ -185,12 +188,14 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
       return { url, headers, body: {
         systemInstruction: { parts: [{ text: request.system }] }, contents: [{ role: 'user', parts: [{ text: request.prompt }] }],
         generationConfig: { maxOutputTokens: tokens, ...options },
+        ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })) }] } : {}),
       } };
     case 'claude':
       if (key) headers['x-api-key'] = key;
       headers['anthropic-version'] = '2023-06-01';
       return { url: endpoint(config.baseUrl, 'messages'), headers, body: {
         model: config.model, system: request.system, messages: [{ role: 'user', content: request.prompt }], max_tokens: tokens, stream, ...options,
+        ...(tools.length ? { tools: tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })) } : {}),
       } };
     default: throw new Error('不支持的模型接口协议。');
   }
@@ -258,7 +263,7 @@ function requestSnapshot(config: ProviderConfig, wire: ReturnType<typeof request
     url: redactKnown(url.toString(), config.apiKey),
     headers: Object.fromEntries(Object.entries(wire.headers).map(([name, value]) => [name, credentialName(name) ? '[REDACTED]' : redactKnown(value, config.apiKey)])),
     body: redactPayload(JSON.stringify(wire.body), config.apiKey), startedAt: new Date().toISOString(),
-    timeoutMs: config.timeoutMs ?? MODEL_TIMEOUT_MS, stream: config.stream ?? false,
+    timeoutMs: config.timeoutMs ?? MODEL_TIMEOUT_MS, stream: Boolean((wire.body as JsonObject).stream || wire.url.searchParams.get('alt') === 'sse'),
   };
 }
 
@@ -267,13 +272,15 @@ export function buildRequestSnapshot(config: ProviderConfig, request: ModelReque
   return requestSnapshot(config, requestBody(config, request));
 }
 
-async function readBody(response: Response, config: ProviderConfig): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
+async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
   if (!response.body) return { raw: '', bytes: 0, incomplete: false };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   const streaming = config.stream || response.headers.get('content-type')?.includes('text/event-stream');
   const detector = createStreamEndDetector(config.protocol);
   const decoder = new TextDecoder();
+  const emit = createStreamTextEmitter(config.protocol, text => onTextDelta?.(redactKnown(text, config.apiKey)));
+  const activities = createStreamActivityEmitter(config.protocol, event => onActivity?.(event));
   let length = 0;
   let error: 'limit' | 'read' | undefined;
   try {
@@ -290,13 +297,17 @@ async function readBody(response: Response, config: ProviderConfig): Promise<{ r
       }
       chunks.push(next.value);
       length += next.value.byteLength;
-      if (streaming && detector(decoder.decode(next.value, { stream: true }))) {
+      const decoded = decoder.decode(next.value, { stream: true });
+      if (streaming) { activities.feed(decoded); emit(decoded); }
+      if (streaming && detector(decoded)) {
         // End events are authoritative. Some gateways keep a finished SSE socket open.
         try { await reader.cancel(); } catch { /* All protocol events were received. */ }
         break;
       }
     }
   } catch { error ??= 'read'; }
+  // Socket closure is not a thinking completion marker. Interrupted blocks
+  // remain open for the job's failed/paused/cancelled state to settle them.
   finally { reader.releaseLock(); }
   return { raw: Buffer.concat(chunks, length).toString('utf8'), bytes: length, incomplete: Boolean(error), error };
 }
@@ -320,8 +331,7 @@ function inspectBody(config: ProviderConfig, response: Response | undefined, bod
 }
 
 /** A single billable request. Failures never trigger automatic retries. */
-export async function generateText(config: ProviderConfig, request: ModelRequest): Promise<ModelResult> {
-  const wire = requestBody(config, request);
+async function sendModelRequest(config: ProviderConfig, request: ModelRequest, wire: ReturnType<typeof requestBody>): Promise<{ data: JsonObject; result: ModelResult }> {
   const snapshot = requestSnapshot(config, wire);
   const started = Date.now();
   const controller = new AbortController();
@@ -355,12 +365,12 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
     const promptBlockReason = metadataCode(config.protocol === 'gemini' ? data?.promptFeedback?.blockReason : undefined);
     const refusal = config.protocol === 'openai-responses' && objects(data?.output).flatMap(item => objects(item.content)).some(part => part.type === 'refusal');
     const blocked = Boolean(promptBlockReason || ['SAFETY', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'RECITATION', 'IMAGE_SAFETY', 'IMAGE_PROHIBITED_CONTENT', 'content_filter', 'refusal'].includes(finishReason ?? '') || data?.choices?.[0]?.message?.refusal || refusal);
-    const validEndings = config.protocol === 'gemini' ? ['STOP', 'MAX_TOKENS'] : config.protocol === 'openai-chat' ? ['stop', 'length'] : config.protocol === 'claude' ? ['end_turn', 'stop_sequence', 'max_tokens'] : ['completed', 'incomplete'];
+    const validEndings = config.protocol === 'gemini' ? ['STOP', 'MAX_TOKENS'] : config.protocol === 'openai-chat' ? ['stop', 'length', 'tool_calls'] : config.protocol === 'claude' ? ['end_turn', 'stop_sequence', 'max_tokens', 'tool_use'] : ['completed', 'incomplete'];
     const rejectedEnding = Boolean(finishReason && !validEndings.includes(finishReason));
     const modelOutcome: ModelTransportDiagnostics['modelOutcome'] = !response ? undefined
       : !response.ok || data?.error || inspection.streamError ? 'error'
       : blocked ? 'blocked' : incomplete ? 'truncated'
-      : rejectedEnding || (!data && received.raw.trim()) ? 'error' : text.trim() ? 'completed' : 'empty';
+      : rejectedEnding || (!data && received.raw.trim()) ? 'error' : text.trim() || (data && responseToolCalls(config.protocol, data).length) ? 'completed' : 'empty';
     const value: CapturedModelResponse = {
       rawResponse, text, ...inspection.tokens, ...(response ? { httpStatus: response.status } : {}), incomplete, request: snapshot,
       diagnostics: { elapsedMs: Math.max(0, Date.now() - started), responseBytes: received.bytes, responseHeaders, transport, ...(errorCode ? { errorCode } : {}), ...(modelOutcome ? { modelOutcome } : {}), ...(finishReason ? { finishReason } : {}), ...(promptBlockReason ? { promptBlockReason } : {}) },
@@ -386,9 +396,10 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
       if (typeof code === 'string' && /^(?:E[A-Z0-9_]{1,50}|UND_ERR_[A-Z0-9_]{1,40}|ABORT_ERR)$/.test(code)) errorCode = code;
       throw new Error('无法连接模型服务，请检查服务地址、网络和接口配置。');
     }
-    received = await readBody(response, config);
+    received = await readBody(response, { ...config, stream: snapshot.stream }, response.ok ? request.onTextDelta : undefined, response.ok ? request.onActivity : undefined);
     transport = request.signal?.aborted ? 'cancelled' : timedOut ? 'timeout' : received.error === 'read' ? 'interrupted' : 'http';
     const { data, tokens, streamError } = capture();
+    if (data && response.ok && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) emitResponseActivities(config.protocol, data, event => request.onActivity?.(event));
     if (received.error === 'limit') throw new ModelOutputError('模型响应超过 16 MiB，已保留收到的部分内容，请缩小本次生成范围。', tokens);
     if (received.error === 'read') throw new ModelOutputError('读取模型响应中断，已保留收到的部分内容，请检查网络连接。', tokens);
     if (!response.ok) {
@@ -400,7 +411,27 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
     }
     if (streamError) throw new ModelOutputError(streamError, tokens);
     if (!data) throw new ModelOutputError('模型服务返回的不是有效 JSON 对象，请检查服务地址与接口协议。', { inputTokens: 0, outputTokens: 0 }, [{ path: '$', message: '服务响应必须是 JSON 对象；原始响应可供人工检查。' }]);
-    try { const result = parseResult(config.protocol, data); return { ...result, text: redactPayload(result.text, config.apiKey) }; }
+    try {
+      if (responseToolCalls(config.protocol, data).length) {
+        // Tool-only responses are complete turns, not empty novels. Validate the
+        // provider's completion before executing any request from the model.
+        const check = structuredClone(data);
+        if (config.protocol === 'openai-chat') { check.choices[0].finish_reason = check.choices[0].finish_reason === 'tool_calls' ? 'stop' : check.choices[0].finish_reason; check.choices[0].message.content ||= '工具调用'; }
+        else if (config.protocol === 'openai-responses') check.output.push({ type: 'message', content: [{ type: 'output_text', text: '工具调用' }] });
+        else if (config.protocol === 'gemini') check.candidates[0].content.parts.push({ text: '工具调用' });
+        else { check.stop_reason = check.stop_reason === 'tool_use' ? 'end_turn' : check.stop_reason; check.content.push({ type: 'text', text: '工具调用' }); }
+        parseResult(config.protocol, check);
+        const text = redactPayload(responseText(config.protocol, data), config.apiKey);
+        // A compatible gateway may also answer a tool turn with ordinary JSON;
+        // keep any visible prose available before the continuation can fail.
+        if (text && request.onTextDelta && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) request.onTextDelta(text);
+        return { data, result: { text, ...responseUsage(config.protocol, data) } };
+      }
+      const result = parseResult(config.protocol, data);
+      // Some compatible gateways answer a streaming request with ordinary JSON.
+      if (request.onTextDelta && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) request.onTextDelta(redactPayload(result.text, config.apiKey));
+      return { data, result: { ...result, text: redactPayload(responseText(config.protocol, data), config.apiKey) } };
+    }
     catch (error) {
       const message = error instanceof TypeError ? '模型响应结构不完整，请检查模型和接口协议是否匹配。' : (error as Error).message;
       throw new ModelOutputError(message, responseUsage(config.protocol, data));
@@ -416,6 +447,118 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
   } finally {
     clearTimeout(timer);
     request.signal?.removeEventListener('abort', abort);
+  }
+}
+
+type ToolCall = { id: string; name: string; arguments: unknown };
+function responseToolCalls(protocol: ProviderConfig['protocol'], data: JsonObject): ToolCall[] {
+  if (protocol === 'openai-chat') return objects(data.choices?.[0]?.message?.tool_calls).map(call => ({ id: call.id, name: call.function?.name, arguments: call.function?.arguments }));
+  if (protocol === 'openai-responses') return objects(data.output).filter(item => item.type === 'function_call').map(call => ({ id: call.call_id, name: call.name, arguments: call.arguments }));
+  if (protocol === 'gemini') return objects(data.candidates?.[0]?.content?.parts).filter(part => object(part.functionCall)).map((part, index) => ({ id: part.functionCall.id ?? `call_${index}`, name: part.functionCall.name, arguments: part.functionCall.args }));
+  return objects(data.content).filter(part => part.type === 'tool_use').map(call => ({ id: call.id, name: call.name, arguments: call.input }));
+}
+
+const estimateTokens = (text: string) => Math.ceil([...text].reduce((sum, char) => sum + (char.charCodeAt(0) > 127 ? 1.3 : 0.3), 0));
+
+/** Same first-round estimate as the tool loop, including tool declarations and protocol framing. */
+export function estimateModelRequestInputTokens(config: ProviderConfig, request: ModelRequest): number {
+  return estimateTokens(JSON.stringify(requestBody(config, request).body));
+}
+
+/** Redact whole normalized events, including credential fields inside tool objects and thought JSON. */
+function activityEmitter(config: ProviderConfig, request: ModelRequest, round: number): (event: ModelActivityEvent) => void {
+  const thoughts = new Map<string, { raw: string; published: string }>();
+  const keys = config.apiKey ? [config.apiKey] : [];
+  const variants = [...new Set(keys.flatMap(key => [key, key.trim(), JSON.stringify(key).slice(1, -1), encodeURIComponent(key)]).filter(Boolean))];
+  const deliver = (event: ModelActivityEvent) => { if (request.onActivity) request.onActivity(JSON.parse(redactModelPayload(JSON.stringify({ ...event, id: `round-${round + 1}:${event.id}` }), keys)) as ModelActivityEvent); };
+  const flush = (id: string, finished = false) => {
+    const thought = thoughts.get(id); if (!thought) return;
+    const safe = JSON.parse(redactModelPayload(JSON.stringify({ type: 'thinking', id, text: thought.raw }), keys)).text as string;
+    let end = safe.length;
+    // Do not publish a credential prefix which the next reasoning delta could complete.
+    if (!finished) for (const variant of variants) for (let length = Math.min(variant.length - 1, safe.length); length > 0; length--) if (safe.endsWith(variant.slice(0, length))) { end = Math.min(end, safe.length - length); break; }
+    // An unfinished JSON thought may contain another JSON document in a string;
+    // wait until recursive field redaction can inspect the complete document.
+    if (!finished) { const jsonStart = safe.search(/[\[{]\s*"/); if (jsonStart >= 0) { try { JSON.parse(thought.raw.slice(jsonStart)); } catch { end = Math.min(end, jsonStart); } } }
+    if (safe.startsWith(thought.published) && end > thought.published.length) {
+      deliver({ type: 'thinking', id, text: safe.slice(thought.published.length, end) }); thought.published = safe.slice(0, end);
+    }
+  };
+  return event => {
+    if (!request.onActivity) return;
+    if (event.type === 'thinking') { const thought = thoughts.get(event.id) ?? { raw: '', published: '' }; thought.raw += event.text; thoughts.set(event.id, thought); flush(event.id); }
+    else if (event.type === 'thinking_done') { flush(event.id, true); deliver(event); thoughts.delete(event.id); }
+    else deliver(event);
+  };
+}
+
+/** Explicit tool continuations are new turns; failed billable requests are never retried. */
+export async function generateText(config: ProviderConfig, request: ModelRequest): Promise<ModelResult> {
+  const wire = requestBody(config, request);
+  const body = wire.body as JsonObject;
+  const tools = request.tools ?? [];
+  const tokens = { inputTokens: 0, outputTokens: 0 };
+  let text = '';
+  let callCount = 0;
+  try {
+    for (let round = 0; round < 6; round++) {
+      if (request.signal?.aborted) throw new Error('模型请求已取消。');
+      if (tools.length) {
+        // Include wire messages, tool schemas, signatures and retrieved material
+        // in each round's estimate without borrowing from earlier token usage.
+        const inputEstimate = estimateTokens(JSON.stringify(body));
+        const reserved = request.maxOutputTokens ?? config.maxOutputTokens;
+        if (inputEstimate + reserved > config.contextTokens) throw new Error(`写作上下文预计需要 ${inputEstimate} 个输入 token，加上 ${reserved} 个输出 token，超过 ${config.contextTokens} 的上下文上限；请减少检索内容、提高上下文上限或确认压缩剧情摘要。`);
+      }
+      const emitActivity = activityEmitter(config, request, round);
+      const { data, result } = await sendModelRequest(config, { ...request, onActivity: request.onActivity ? emitActivity : undefined }, wire);
+      tokens.inputTokens += result.inputTokens; tokens.outputTokens += result.outputTokens;
+      text += result.text;
+      const calls = responseToolCalls(config.protocol, data);
+      if (!calls.length) return { text: text.trim(), ...tokens };
+      callCount += calls.length;
+      if (round === 5 || callCount > 24) throw new Error('模型检索次数超过上限，请缩小本次写作范围后手动重试。');
+      const results: { call: ToolCall; output: string }[] = [];
+      for (const [index, call] of calls.entries()) {
+        if (request.signal?.aborted) throw new Error('模型请求已取消。');
+        const tool = tools.find(value => value.name === call.name);
+        if (!tool || typeof call.name !== 'string' || typeof call.id !== 'string' || !call.id) throw new Error('模型请求了未提供的资料检索工具。');
+        let args: unknown;
+        try { args = typeof call.arguments === 'string' ? JSON.parse(call.arguments) : call.arguments; }
+        catch { throw new Error('模型返回的工具参数不是有效 JSON。'); }
+        if (!object(args)) throw new Error('资料检索工具参数必须是 JSON 对象。');
+        const activityId = `tool:${index}:${call.id}`;
+        emitActivity({ type: 'tool_call', id: activityId, name: call.name, arguments: args });
+        try {
+          const output = JSON.stringify(await tool.execute(args)) ?? 'null';
+          if (request.signal?.aborted) throw new Error('模型请求已取消。');
+          const result: unknown = JSON.parse(output);
+          const error = object(result) && typeof result.error === 'string' && result.error.trim() ? result.error : undefined;
+          emitActivity({ type: 'tool_result', id: activityId, name: call.name, result, ...(error ? { error } : {}) });
+          results.push({ call, output });
+        } catch (error) { emitActivity({ type: 'tool_result', id: activityId, name: call.name, error: error instanceof Error ? error.message : '资料检索失败。' }); throw error; }
+      }
+      if (config.protocol === 'openai-chat') {
+        body.messages.push({ role: 'assistant', ...data.choices[0].message });
+        body.messages.push(...results.map(({ call, output }) => ({ role: 'tool', tool_call_id: call.id, content: output })));
+      } else if (config.protocol === 'openai-responses') {
+        if (typeof body.input === 'string') body.input = [{ role: 'user', content: body.input }];
+        body.input.push(...objects(data.output).filter(item => item.type !== 'message' || objects(item.content).some(part => typeof part.text === 'string' && part.text)));
+        body.input.push(...results.map(({ call, output }) => ({ type: 'function_call_output', call_id: call.id, output })));
+      } else if (config.protocol === 'gemini') {
+        const candidate = data.candidates[0];
+        body.contents.push({ role: 'model', parts: candidate.historyParts ?? candidate.content.parts });
+        body.contents.push({ role: 'user', parts: results.map(({ call, output }) => ({ functionResponse: { name: call.name, ...(call.id.startsWith('call_') ? {} : { id: call.id }), response: { result: JSON.parse(output) } } })) });
+      } else {
+        body.messages.push({ role: 'assistant', content: data.content });
+        body.messages.push({ role: 'user', content: results.map(({ call, output }) => ({ type: 'tool_result', tool_use_id: call.id, content: output })) });
+      }
+    }
+    throw new Error('模型未在资料检索后完成正文。');
+  } catch (error) {
+    const current = error instanceof ModelOutputError ? error : undefined;
+    if (tokens.inputTokens || tokens.outputTokens) throw new ModelOutputError((error as Error).message, { inputTokens: tokens.inputTokens + (current?.inputTokens ?? 0), outputTokens: tokens.outputTokens + (current?.outputTokens ?? 0) }, current?.issues);
+    throw error;
   }
 }
 

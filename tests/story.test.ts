@@ -20,11 +20,11 @@ function append(store: Store, branchId: string, text: string, result = emptyExtr
   return store.applyExtraction(branchId, saved.branch.revisionId, saved.state.chapters.at(-1)!.id, result, true);
 }
 const settings = (): Settings => ({ providers: [{ id: 'fixture', name: '协议模拟模型', protocol: 'openai-chat', baseUrl: 'http://unused.invalid/v1', model: 'fixture', maxOutputTokens: 1024, contextTokens: 64000 }], writingProviderId: 'fixture', planningProviderId: 'fixture', extractionProviderId: 'fixture' });
-const plan = (): PlanningResult => ({ coarse: '旅人寻找回家的路', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第 ${chapter} 章`, goal: '继续寻找线索' })), foreshadows: [] });
+const plan = (): PlanningResult => ({ fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第 ${chapter} 章`, goal: '继续寻找线索' })), foreshadows: [] });
 function models(extract?: (request: ModelRequest) => Promise<ExtractionResult>, write?: (request: ModelRequest) => Promise<string>): TextModels {
   return {
     generateText: vi.fn(async (_config, request) => ({ text: await (write?.(request) ?? Promise.resolve('阿青走进临江城。')), inputTokens: 10, outputTokens: 20 })),
-    generateStructured: vi.fn(async (_config, request, validate) => ({ value: validate(request.system.includes('整部作品粗大纲') ? plan() : await (extract?.(request) ?? Promise.resolve(emptyExtraction()))), inputTokens: 10, outputTokens: 20 })) as TextModels['generateStructured'],
+    generateStructured: vi.fn(async (_config, request, validate) => ({ value: validate(request.system.includes('只规划尚未发生的剧情') ? plan() : await (extract?.(request) ?? Promise.resolve(emptyExtraction()))), inputTokens: 10, outputTokens: 20 })) as TextModels['generateStructured'],
   };
 }
 function engineFor(store: Store, model: TextModels, config = settings()) { const engine = new StoryEngine(store, () => config, model); engines.push(engine); engine.start(); return engine; }
@@ -93,7 +93,7 @@ describe('versioned story and world state', () => {
     const store = makeStore(); const p = store.createProject({ title: '人类约束', premise: '禁用穿越' });
     const result = emptyExtraction(); result.entities.push(person('临时人物', '本章才出现', '临时人物')); let view = append(store, p.mainBranchId, '临时人物出现。', result);
     const chapterId = view.state.chapters[0].id;
-    view = store.updateOutline(p.mainBranchId, view.branch.revisionId, { coarse: '', fine: [], locked: '必须保持单一视角' });
+    view = store.updateOutline(p.mainBranchId, view.branch.revisionId, { worldview: '', fine: [], locked: '必须保持单一视角' });
     const manual: Entity = { id: 'manual', name: '主角', aliases: ['阿青'], kind: 'character', description: '用户确认的主角', visibility: 'public', locked: true, facts: [{ id: 'manual-fact', text: '主角不会魔法', certainty: 'fact', temporal: 'current', visibility: 'public', locked: true }] };
     view = store.updateEntity(p.mainBranchId, view.branch.revisionId, manual);
     const revised = store.saveChapter(p.mainBranchId, { baseRevisionId: view.branch.revisionId, chapterId, title: '重写第一章', text: '主角走过田野。' });
@@ -107,7 +107,7 @@ describe('versioned story and world state', () => {
     const second = append(store, p.mainBranchId, '新角色带着钥匙。', result);
     const rollback = store.rollback(p.mainBranchId, { baseRevisionId: second.branch.revisionId, revisionId: first.branch.revisionId });
     expect(rollback.state.chapters).toHaveLength(1); expect(rollback.state.entities).toHaveLength(0); expect(rollback.state.foreshadows).toHaveLength(0);
-    expect(() => store.updateOutline(p.mainBranchId, second.branch.revisionId, { coarse: '过期编辑', fine: [], locked: '' })).toThrow('新版本');
+    expect(() => store.updateOutline(p.mainBranchId, second.branch.revisionId, { worldview: '过期编辑', fine: [], locked: '' })).toThrow('新版本');
     expect(store.view(p.mainBranchId, true).state).toEqual(first.state);
   });
 
@@ -119,7 +119,7 @@ describe('versioned story and world state', () => {
     const facts = store.state(p.mainBranchId).entities[0].facts;
     expect(facts.filter(f => f.temporal === 'current').map(f => f.text)).toEqual(['阿青现在在山城']);
     expect(facts.find(f => f.text === '阿青现在在江城')?.temporal).toBe('past');
-    expect(store.state(p.mainBranchId).entities[0].description).toBe('阿青现在在山城');
+    expect(store.state(p.mainBranchId).entities[0].description).toBe('所在地：阿青现在在山城');
   });
 
   it('retains a return to the same place within one chapter and deduplicates only the same citation', () => {
@@ -142,7 +142,7 @@ describe('versioned story and world state', () => {
     const firstResult = emptyExtraction(); firstResult.entities.push(person('阿青', '阿青在江城', '阿青在江城', { aliases: ['青姑娘'], attribute: 'location' })); let view = append(store, p.mainBranchId, '阿青在江城', firstResult);
     view = store.updateEntity(p.mainBranchId, view.branch.revisionId, { ...view.state.entities[0], locked: true, facts: view.state.entities[0].facts.map(f => ({ ...f, locked: true })) });
     const secondResult = emptyExtraction(); secondResult.entities.push(person('青姑娘', '青姑娘在山城', '青姑娘在山城', { attribute: 'location' })); view = append(store, p.mainBranchId, '青姑娘在山城', secondResult);
-    expect(view.state.entities).toHaveLength(1); expect(view.state.entities[0].description).toBe('阿青在江城');
+    expect(view.state.entities).toHaveLength(1); expect(view.state.entities[0].description).toBe('所在地：阿青在江城');
     expect(view.state.entities[0].facts[0].temporal).toBe('current'); expect(view.state.entities[0].facts[1].certainty).toBe('conflict');
     view = store.updateEntity(p.mainBranchId, view.branch.revisionId, { id: 'second', kind: 'character', name: '青儿', aliases: [], description: '', facts: [], visibility: 'public', locked: true });
     const beforeMerge = view; const merged = store.mergeEntities(p.mainBranchId, view.branch.revisionId, view.state.entities[1].id, view.state.entities[0].id);
@@ -158,7 +158,7 @@ describe('versioned story and world state', () => {
     view = store.updateEntity(p.mainBranchId, view.branch.revisionId, { ...view.state.entities[0], locked: false, facts: view.state.entities[0].facts.map(f => ({ ...f, locked: false })) });
     expect(view.state.entities[0].locked).toBe(false); expect(view.state.entities[0].facts[0].locked).toBe(false);
     const second = emptyExtraction(); second.entities.push(person('阿青', '当前位于山城', '阿青在山城', { attribute: 'location' })); view = append(store, p.mainBranchId, '阿青在山城', second);
-    expect(view.state.entities[0].description).toBe('当前位于山城');
+    expect(view.state.entities[0].description).toBe('所在地：当前位于山城');
     expect(view.state.entities[0].facts.map(f => [f.temporal, f.certainty])).toEqual([['past', 'fact'], ['current', 'fact']]);
   });
 
@@ -213,9 +213,14 @@ describe('durable writing and extraction jobs (simulated models)', () => {
     const store = makeStore(); const p = store.createProject({ title: '失败恢复' }); let calls = 0;
     const mock = models(async () => { if (++calls === 1) throw new Error('模拟提取断网'); const result = emptyExtraction(); result.entities.push(person('阿青', '抵达临江城', '阿青')); return result; }); const engine = engineFor(store, mock);
     const job = engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '写开场' });
-    expect((await terminal(engine, job.id)).status).toBe('failed'); const pending = store.state(p.mainBranchId); expect(pending.chapters).toHaveLength(1); expect(pending.chapters[0].status).toBe('pending'); expect(store.exportText(p.mainBranchId)).toContain('阿青走进临江城');
+    expect((await terminal(engine, job.id)).status).toBe('completed');
+    const background = engine.listJobs(p.id).find(item => item.kind === 'extract')!;
+    expect(background.id).not.toBe(job.id); expect((await terminal(engine, background.id)).status).toBe('failed');
+    const pending = store.state(p.mainBranchId); expect(pending.chapters).toHaveLength(1); expect(pending.chapters[0].status).toBe('pending'); expect(store.exportText(p.mainBranchId)).toContain('阿青走进临江城');
     expect(() => engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original' })).toThrow('上一章');
-    engine.action(job.id, 'retry'); expect((await terminal(engine, job.id)).status).toBe('completed');
+    expect(() => engine.action(job.id, 'retry')).toThrow('只能继续');
+    engine.action(background.id, 'retry'); expect((await terminal(engine, background.id)).status).toBe('completed');
+    expect(jobState(engine, job.id).status).toBe('completed');
     expect(mock.generateText).toHaveBeenCalledTimes(1); expect(calls).toBe(2); expect(store.state(p.mainBranchId).chapters).toHaveLength(1); expect(store.state(p.mainBranchId).entities).toHaveLength(1); expect(store.state(p.mainBranchId).chapters[0].id).toBe(pending.chapters[0].id);
   });
 
@@ -264,6 +269,9 @@ describe('durable writing and extraction jobs (simulated models)', () => {
     mock.generateText = vi.fn(async () => ({ text: '阿青的新正文', inputTokens: 600000, outputTokens: 0 })); const engine = engineFor(store, mock);
     const job = engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '写作' }); const done = await terminal(engine, job.id);
     expect(done.status).toBe('completed'); expect(done.inputTokens).toBeGreaterThanOrEqual(600000); expect(done.outputTokens).toBeGreaterThan(0); expect(rawJob(store, job.id).payload.usageEstimated).toBe(true);
-    expect(store.exportText(p.mainBranchId)).toContain('阿青的新正文'); expect(store.state(p.mainBranchId).chapters[0].status).toBe('ready'); expect(mock.generateStructured).toHaveBeenCalledTimes(2);
+    const background = engine.listJobs(p.id).find(item => item.kind === 'extract')!;
+    const extracted = await terminal(engine, background.id); expect(extracted.status).toBe('completed'); expect(extracted.inputTokens).toBe(10); expect(extracted.outputTokens).toBe(20);
+    expect(store.exportText(p.mainBranchId)).toContain('阿青的新正文'); expect(store.state(p.mainBranchId).chapters[0].status).toBe('ready'); expect(mock.generateStructured).toHaveBeenCalledTimes(1);
+    expect(engine.listJobs(p.id).some(item => item.kind === 'plan')).toBe(false);
   });
 });

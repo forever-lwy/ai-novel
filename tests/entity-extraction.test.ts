@@ -25,6 +25,89 @@ function append(store: Store, branchId: string, text: string, result: Extraction
 }
 
 describe('committed entity reconciliation', () => {
+  it('persists a placeholder identity, promotes its confirmed name, and retains role metadata across a saved revision', () => {
+    const { store, branchId } = createStory();
+    const firstCharacter = character('黑袍客', '身披黑袍', '黑袍客出现在港口。', [], 'appearance'); firstCharacter.nameStatus = 'placeholder';
+    const first = append(store, branchId, '黑袍客出现在港口。', extraction(firstCharacter));
+    const entityId = first.state.entities[0].id;
+    const named = character('林舟', '姓名为林舟', '黑袍客说：“我叫林舟。”', ['黑袍客'], 'name'); named.nameStatus = 'confirmed'; named.isMain = true;
+    const next = append(store, branchId, '黑袍客说：“我叫林舟。”', extraction(named));
+    expect(next.state.entities.filter(entity => !entity.mergedInto)).toHaveLength(1);
+    expect(next.state.entities[0]).toMatchObject({ id: entityId, name: '林舟', nameStatus: 'confirmed', isMain: true, aliases: ['黑袍客'] });
+    expect(store.state(branchId).entities[0]).toMatchObject({ name: '林舟', nameStatus: 'confirmed', isMain: true });
+    expect(store.revisionState(first.branch.revisionId).entities[0]).toMatchObject({ name: '黑袍客', nameStatus: 'placeholder' });
+    const restored = store.rollback(branchId, { baseRevisionId: next.branch.revisionId, revisionId: first.branch.revisionId });
+    expect(restored.state.entities[0]).toMatchObject({ name: '黑袍客', nameStatus: 'placeholder' }); expect(restored.state.entities[0].isMain).toBeUndefined();
+  });
+
+  it('updates profile fields without losing unrelated abilities or turning daily narrative into character history', () => {
+    const { store, branchId } = createStory();
+    const source = '琥珀是精灵族的女性，精通长弓，并在灯塔觉醒风魔法。';
+    const profile = character('琥珀', '女性', source, [], 'gender');
+    profile.nameStatus = 'confirmed'; profile.isMain = true;
+    profile.facts.push(
+      { ...profile.facts[0], text: '精灵族血统', attribute: 'bloodline' },
+      { ...profile.facts[0], text: '精通长弓', attribute: 'ability:archery' },
+      { ...profile.facts[0], text: '在灯塔觉醒风魔法', attribute: 'major_event', temporal: 'past' },
+    );
+    append(store, branchId, source, extraction(profile));
+    const later = '琥珀在港口吃过早餐，得知自己也有人类血统，并学会控制风魔法。';
+    const updated = character('琥珀', '精灵与人类混合血统', later, [], 'bloodline');
+    updated.facts.push({ ...updated.facts[0], text: '能够控制风魔法', attribute: 'ability:wind' });
+    const result = extraction(updated); result.summary = '琥珀在港口吃过早餐，确认混合血统并学会控制风魔法。';
+    const next = append(store, branchId, later, result); const current = next.state.entities[0];
+    for (const text of ['女性', '精灵与人类混合血统', '精通长弓', '能够控制风魔法', '在灯塔觉醒风魔法']) expect(current.description).toContain(text);
+    expect(current.description).not.toContain('精灵族血统'); expect(current.description).not.toContain('早餐');
+    expect(current.facts.find(fact => fact.text === '精灵族血统')?.temporal).toBe('past');
+    expect(current.facts.filter(fact => fact.attribute === 'bloodline' && fact.temporal === 'current')).toHaveLength(1);
+    expect(current.facts.some(fact => fact.text.includes('早餐'))).toBe(false);
+    expect(next.state.chapters.at(-1)!.summary).toContain('早餐');
+    expect(current.isMain).toBe(true);
+  });
+
+  it('retains author-locked placeholder names, role choice, and prose when extraction confirms a new name', () => {
+    const { store, branchId } = createStory();
+    const initial = character('黑袍客', '身披黑袍', '黑袍客出现在港口。', [], 'appearance'); initial.nameStatus = 'placeholder'; initial.isMain = false;
+    let view = append(store, branchId, '黑袍客出现在港口。', extraction(initial));
+    const fixed = view.state.entities[0];
+    view = store.updateEntity(branchId, view.branch.revisionId, { ...fixed, locked: true, description: '作者暂时保留黑袍客的身份' });
+    const confirmed = character('林舟', '姓名为林舟', '黑袍客说：“我叫林舟。”', ['黑袍客'], 'name'); confirmed.nameStatus = 'confirmed'; confirmed.isMain = true;
+    const next = append(store, branchId, '黑袍客说：“我叫林舟。”', extraction(confirmed));
+    expect(next.state.entities[0]).toMatchObject({ id: fixed.id, name: '黑袍客', nameStatus: 'placeholder', isMain: false, aliases: [], description: '作者暂时保留黑袍客的身份' });
+    expect(next.state.entities[0].facts.find(fact => fact.attribute === 'name')?.certainty).toBe('conflict');
+  });
+
+  it('normalizes a manually entered Chinese property before applying its fact lock to later extraction', () => {
+    const { store, branchId } = createStory();
+    let view = append(store, branchId, '琥珀是女性。', extraction(character('琥珀', '女性', '琥珀是女性。', [], 'gender')));
+    const original = view.state.entities[0]; const factId = original.facts[0].id;
+    view = store.updateEntity(branchId, view.branch.revisionId, { ...original, locked: false, facts: original.facts.map(fact => ({ ...fact, attribute: '性别', locked: true })) });
+    expect(view.state.entities[0].locked).toBe(false);
+    expect(view.state.entities[0].facts[0]).toMatchObject({ id: factId, attribute: 'gender', locked: true });
+    const later = append(store, branchId, '琥珀被误认为男性。', extraction(character('琥珀', '男性', '琥珀被误认为男性。', [], 'gender')));
+    const facts = later.state.entities[0].facts;
+    expect(facts.find(fact => fact.id === factId)).toMatchObject({ text: '女性', attribute: 'gender', locked: true, temporal: 'current', certainty: 'fact' });
+    expect(facts.find(fact => fact.text === '男性')).toMatchObject({ attribute: 'gender', temporal: 'current', certainty: 'conflict' });
+    expect(facts.filter(fact => fact.attribute === 'gender' && fact.temporal === 'current' && fact.certainty === 'fact')).toHaveLength(1);
+    expect(later.state.entities[0].description).toContain('女性'); expect(later.state.entities[0].description).not.toContain('男性');
+  });
+
+  it('upgrades an extracted supporting role but retains an explicitly authored supporting-role choice', () => {
+    const { store, branchId } = createStory();
+    const supporting = character('林舟', '港口船员', '林舟是港口的一名船员。', [], 'identity'); supporting.isMain = false;
+    let view = append(store, branchId, '林舟是港口的一名船员。', extraction(supporting));
+    expect(view.state.entities[0]).toMatchObject({ isMain: false, isMainSource: 'extraction' });
+    const leading = character('林舟', '追查旧塔的核心人物', '林舟从此独自追查旧塔的秘密。', [], 'identity'); leading.isMain = true;
+    view = append(store, branchId, '林舟从此独自追查旧塔的秘密。', extraction(leading));
+    expect(view.state.entities[0]).toMatchObject({ isMain: true, isMainSource: 'extraction' });
+    view = store.updateEntity(branchId, view.branch.revisionId, { ...view.state.entities[0], isMain: false, locked: false });
+    expect(view.state.entities[0]).toMatchObject({ isMain: false, isMainSource: 'author', locked: false });
+    const recurring = character('林舟', '继续追查旧塔', '林舟继续追查旧塔。', [], 'identity'); recurring.isMain = true;
+    view = append(store, branchId, '林舟继续追查旧塔。', extraction(recurring));
+    expect(view.state.entities[0]).toMatchObject({ isMain: false, isMainSource: 'author', locked: false });
+    expect(view.state.entities[0].facts.find(fact => fact.text === '继续追查旧塔')).toMatchObject({ temporal: 'current', certainty: 'fact' });
+  });
+
   it('keeps different characters across chapters when only their aliases overlap', () => {
     const { store, branchId } = createStory();
     append(store, branchId, '林舟率领船队。', extraction(character('林舟', '率领船队', '林舟率领船队。', ['队长'])));

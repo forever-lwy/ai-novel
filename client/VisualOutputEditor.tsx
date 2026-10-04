@@ -149,15 +149,16 @@ function FactCard({ item, path, index }: { item: unknown; path: FormPath; index:
 }
 
 function EntityCard({ item, path, index }: { item: unknown; path: FormPath; index: number }) {
-  const { issues } = useEditor();
+  const { issues, disabled, change } = useEditor();
   if (!isObject(item)) return <InvalidItem path={path} label={`资料 ${index + 1}`} />;
   return <details className="visual-record-card" id={fieldId(path)} open={index === 0 || issues.some(issue => hasPrefix(issue, path))}>
     <summary><span>{displayValue(item.name) || `资料 ${index + 1}（未命名）`}</span><small>{kindNames[item.kind as keyof typeof kindNames] || '类型未指定'} · {Array.isArray(item.facts) ? item.facts.length : 0} 条事实</small></summary>
     <div className="visual-record-body">
       <div className="row end"><DeleteItem path={path} label="删除这条资料" /></div>
-      <div className="visual-form-grid"><TextField path={[...path, 'name']} label="名称" help="同一人物尽量使用统一名称，其他称呼填写到别名。" /><SelectField path={[...path, 'kind']} label="资料类型" options={kindNames} /></div>
+      <div className="visual-form-grid"><TextField path={[...path, 'name']} label="名称" help="已披露本名时使用本名作为名称，原来的明确称呼保留在别名。" /><SelectField path={[...path, 'kind']} label="资料类型" options={kindNames} /></div>
+      {item.kind === 'character' && <div className="visual-form-grid"><SelectField path={[...path, 'nameStatus']} label="姓名状态" options={{ confirmed: '已披露姓名', placeholder: '尚未披露，暂用原文称呼' }} optional /><label className="checkbox"><input type="checkbox" checked={item.isMain === true} disabled={disabled} onChange={event => change([...path, 'isMain'], event.target.checked)} />主要角色，写作时放入上下文</label></div>}
       <StringListField path={[...path, 'aliases']} label="别名（每行一个）" help="例如另一个称呼、名字缩写。不需要时可留空。" />
-      <TextField path={[...path, 'description']} label="资料描述" rows={3} help="概述原文已经说明的信息。尚未揭晓的秘密应标成仅作者可见。" />
+      <TextField path={[...path, 'description']} label="资料描述" rows={3} help="概述身份、血统、能力和性格等已明确的信息，经历仅保留重大事件。尚未揭晓的秘密应标成仅作者可见。" />
       <SelectField path={[...path, 'visibility']} label="整条资料可见范围" options={visibilityOptions} />
       <ListSection path={[...path, 'facts']} title="事实与变化" empty="这条资料暂无事实。需要记录状态或变化时，可以添加。" addLabel="添加事实" newItem={newFact}>{(fact, factPath, factIndex) => <FactCard key={factIndex} item={fact} path={factPath} index={factIndex} />}</ListSection>
     </div>
@@ -201,9 +202,9 @@ function FineOutlineCard({ item, path, index }: { item: unknown; path: FormPath;
   </article>;
 }
 
-export function VisualOutputEditor({ value, stage, issues, sourceParagraphs, disabled, onChange, focusRequest, onCannotFocus }: {
+export function VisualOutputEditor({ value, stage, issues, sourceParagraphs, disabled, onChange, focusRequest, onCannotFocus, compression = false }: {
   value: OutputObject; stage: OutputStage; issues: OutputIssue[]; sourceParagraphs: SourceParagraph[]; disabled: boolean;
-  onChange: (value: OutputObject) => void; focusRequest: { path: string; nonce: number } | null; onCannotFocus: () => void;
+  onChange: (value: OutputObject) => void; focusRequest: { path: string; nonce: number } | null; onCannotFocus: () => void; compression?: boolean;
 }) {
   const root = useRef<HTMLDivElement>(null); const fallback = useRef(onCannotFocus); fallback.current = onCannotFocus;
   useEffect(() => {
@@ -223,14 +224,14 @@ export function VisualOutputEditor({ value, stage, issues, sourceParagraphs, dis
   }, [focusRequest]);
   const context: EditorContext = { value, issues, sourceParagraphs, disabled, change: (path, next) => { if (!disabled) onChange(replaceAt(value, path, next)); } };
   return <Context.Provider value={context}><div className="visual-output-editor" ref={root}>
-    {stage === 'extraction' ? <>
+    {compression ? <TextField path={['text']} label="压缩摘要候选" rows={16} help="保留关键事件、人物变化和因果关系，确保比本次原摘要更短。保存修正后仍需作者确认，才用于之后的写作。" /> : stage === 'extraction' ? <>
       <TextField path={['summary']} label="本段摘要" rows={3} help="用几句话概括本次原文片段中已经发生的事，不写未来剧情或未揭晓的答案。" />
       <ListSection path={['entities']} title="人物、地点与其他资料" help="每张卡片对应一项资料；需要修改的具体变化放在卡片内的事实中。" empty="本次没有提取到资料。需要补充人物、地点或规则时，可以添加。" addLabel="添加资料" newItem={() => ({ kind: 'character', name: '', aliases: [], description: '', visibility: 'secret', facts: [] })}>{(item, path, index) => <EntityCard key={index} item={item} path={path} index={index} />}</ListSection>
       <ListSection path={['relations']} title="资料之间的关系" help="例如人物位于某地、组织隶属、师徒或亲属关系。" empty="本次没有需要新增的关系，可保持为空。" addLabel="添加关系" newItem={() => ({ from: '', to: '', label: '', visibility: 'secret' })}>{(item, path, index) => <RelationCard key={index} item={item} path={path} index={index} />}</ListSection>
     </> : <>
-      <TextField path={['coarse']} label="故事粗大纲" rows={6} help="提供故事的大致方向，可随发展调整。" />
-      <ListSection path={['fine']} title="章节细纲" help="核对当前待写章节与接下来三章的安排，章节序号应与故事进度一致。" empty="暂时没有章节安排，请添加需要规划的章节。" addLabel="添加细纲" newItem={() => ({ chapter: Array.isArray(value.fine) ? Math.max(0, ...value.fine.filter(isObject).map(item => typeof item.chapter === 'number' ? item.chapter : 0)) + 1 : 1, title: '', goal: '' })}>{(item, path, index) => <FineOutlineCard key={index} item={item} path={path} index={index} />}</ListSection>
+
+      <ListSection path={['fine']} title="未发生剧情的预期规划" help="核对当前待写章节与接下来三章的安排，章节序号应与故事进度一致。" empty="暂时没有章节安排，请添加需要规划的章节。" addLabel="添加章节规划" newItem={() => ({ chapter: Array.isArray(value.fine) ? Math.max(0, ...value.fine.filter(isObject).map(item => typeof item.chapter === 'number' ? item.chapter : 0)) + 1 : 1, title: '', goal: '' })}>{(item, path, index) => <FineOutlineCard key={index} item={item} path={path} index={index} />}</ListSection>
     </>}
-    <ListSection path={['foreshadows']} title="伏笔与隐藏安排" help="这里的内容只供作者查看，不会出现在普通阅读资料中。" empty="本次没有新增伏笔，可保持为空。" addLabel="添加伏笔" newItem={newForeshadow}>{(item, path, index) => <ForeshadowCard key={index} item={item} path={path} index={index} />}</ListSection>
+    {!compression && <ListSection path={['foreshadows']} title="伏笔与隐藏安排" help="这里的内容只供作者查看，不会出现在普通阅读资料中。" empty="本次没有新增伏笔，可保持为空。" addLabel="添加伏笔" newItem={newForeshadow}>{(item, path, index) => <ForeshadowCard key={index} item={item} path={path} index={index} />}</ListSection>}
   </div></Context.Provider>;
 }

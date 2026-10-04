@@ -76,7 +76,7 @@ describe('real client requests through Fastify parsers', () => {
     const project = await post<Project>('/projects', { title: 'JSON 创建作品', premise: 'JSON 中的中文设定', mode: 'original' });
     expect(project.title).toBe('JSON 创建作品');
     const branch = context.store.getBranch(project.mainBranchId);
-    const outline = { coarse: '寻找旧城的秘密。', locked: '主角只有一个。', fine: [] };
+    const outline = { worldview: '旧城建于一座失落王国的遗址上。', locked: '主角只有一个。', fine: [] };
     const view = await put<BranchView>(`/branches/${branch.id}/outline`, { baseRevisionId: branch.revisionId, outline });
     expect(view.state.outline).toEqual(outline);
     expect(context.received.map(request => request.contentType)).toEqual(['application/json', 'application/json']);

@@ -6,7 +6,8 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import { modelOutputSchema, OutputStore } from './output-store.js';
 import { findEntitiesByName, reconcileExtractionEntities } from './entity-resolution.js';
-import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState } from '../shared/types.js';
+import { rebuildCharacterProfileDescription, normalizeProfileAttribute } from './extraction.js';
+import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState, type WritingActivity, type ModelActivityEvent } from '../shared/types.js';
 
 export class HttpError extends Error { constructor(message: string, public statusCode = 400) { super(message); } }
 export class OutputValidationError extends HttpError { constructor(public issues: OutputIssue[], message = '模型输出未通过校验，请在作者输出记录中查看具体位置并修正') { super(message, 422); } }
@@ -34,11 +35,12 @@ function reconcileCurrentAttributes(entity: Entity, chapters: ChapterRef[]) {
 }
 const citationSchema = z.object({ chapterId: z.string(), paragraph: z.number().int().positive(), quote: z.string().min(1) });
 const factSchema = z.object({ id: z.string().min(1), text: z.string(), attribute: z.string().optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() });
-const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string(), aliases: z.array(z.string()), description: z.string(), visibility: z.enum(['public', 'secret']), locked: z.boolean(), facts: z.array(factSchema), mergedInto: z.string().optional() });
+const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string(), aliases: z.array(z.string()), description: z.string(), visibility: z.enum(['public', 'secret']), locked: z.boolean(), facts: z.array(factSchema), mergedInto: z.string().optional(), isMain: z.boolean().optional(), isMainSource: z.enum(['author', 'extraction']).optional(), nameStatus: z.enum(['placeholder', 'confirmed']).optional() });
 const refSchema = z.object({ id: z.string().min(1), title: z.string(), sourceId: z.string().optional(), summary: z.string(), status: z.enum(['pending', 'ready', 'failed']), createdAt: z.string() });
-const stateSchema = z.object({ chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })) }) });
+const stateSchema = z.object({ chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
 const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
-const backupSchema = z.object({ version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), createdAt: z.string() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: stateSchema.optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]) });
+const writingActivitySchema = z.object({ id: z.string().min(1), kind: z.enum(['thinking', 'tool']), text: z.string().optional(), name: z.string().optional(), arguments: z.record(z.string(), z.unknown()).optional(), result: z.unknown().optional(), status: z.enum(['running', 'completed', 'failed']), error: z.string().optional() });
+const backupSchema = z.object({ version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), createdAt: z.string() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: stateSchema.optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
 
 export class Store {
   readonly db: DatabaseSync;
@@ -55,10 +57,30 @@ export class Store {
       CREATE VIRTUAL TABLE IF NOT EXISTS chapter_search USING fts5(id UNINDEXED, title, text, tokenize='trigram');
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, project_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS job_import_chapters (job_id TEXT NOT NULL, position INTEGER NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY(job_id,position));
+      CREATE TABLE IF NOT EXISTS job_writing_drafts (job_id TEXT PRIMARY KEY, text TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS job_writing_activities (job_id TEXT NOT NULL, activity_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(job_id,activity_id));
       CREATE INDEX IF NOT EXISTS jobs_branch ON jobs(branch_id,status);`);
     this.outputs = new OutputStore(this.db);
   }
   close() { this.db.close(); }
+  listWritingActivities(jobId: string): WritingActivity[] { return this.db.prepare('SELECT data FROM job_writing_activities WHERE job_id=? ORDER BY rowid').all(jobId).map(row => parse<WritingActivity>(row.data)); }
+  clearWritingActivities(jobId: string) { this.db.prepare('DELETE FROM job_writing_activities WHERE job_id=?').run(jobId); }
+  recordWritingActivity(jobId: string, event: ModelActivityEvent, redact?: (text: string) => string): WritingActivity | undefined {
+    const row = this.db.prepare('SELECT data FROM job_writing_activities WHERE job_id=? AND activity_id=?').get(jobId, event.id);
+    const previous = row ? parse<WritingActivity>(row.data) : undefined; let activity: WritingActivity;
+    if (event.type === 'thinking') activity = { id: event.id, kind: 'thinking', text: (previous?.text ?? '') + event.text, status: 'running' };
+    else if (event.type === 'thinking_done') { if (!previous || previous.kind !== 'thinking') return undefined; activity = { ...previous, status: 'completed' }; }
+    else if (event.type === 'tool_call') activity = { id: event.id, kind: 'tool', name: event.name, arguments: clone(event.arguments), status: 'running' };
+    else activity = { ...previous, id: event.id, kind: 'tool', name: event.name, result: clone(event.result), status: event.error ? 'failed' : 'completed', error: event.error };
+    const safe = redact ? parse<WritingActivity>(redact(JSON.stringify(activity))) : activity;
+    this.db.prepare('INSERT INTO job_writing_activities VALUES(?,?,?) ON CONFLICT(job_id,activity_id) DO UPDATE SET data=excluded.data').run(jobId, safe.id, JSON.stringify(safe));
+    return safe;
+  }
+  finishWritingActivities(jobId: string, error?: string): WritingActivity[] {
+    const finished = this.listWritingActivities(jobId).filter(activity => activity.status === 'running').map(activity => ({ ...activity, status: error ? 'failed' as const : 'completed' as const, ...(error ? { error } : {}) }));
+    for (const activity of finished) this.db.prepare('UPDATE job_writing_activities SET data=? WHERE job_id=? AND activity_id=?').run(JSON.stringify(activity), jobId, activity.id);
+    return finished;
+  }
   listProjects(): Project[] { return this.db.prepare('SELECT data FROM projects ORDER BY rowid DESC').all().map(r => parse<Project>(r.data)); }
   getProject(projectId: string): Project { const row = this.db.prepare('SELECT data FROM projects WHERE id=?').get(projectId); if (!row) throw new HttpError('作品不存在', 404); return parse(row.data); }
   deleteProject(projectId: string, onDelete?: () => void) {
@@ -81,6 +103,8 @@ export class Store {
       for (const row of this.db.prepare('SELECT project_id,chapter_id FROM model_outputs WHERE chapter_id IS NOT NULL').iterate()) collect(row.project_id, String(row.chapter_id));
       this.db.prepare('DELETE FROM model_outputs WHERE project_id=?').run(projectId);
       this.db.prepare('DELETE FROM job_import_chapters WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)').run(projectId);
+      this.db.prepare('DELETE FROM job_writing_drafts WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)').run(projectId);
+      this.db.prepare('DELETE FROM job_writing_activities WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)').run(projectId);
       this.db.prepare('DELETE FROM jobs WHERE project_id=?').run(projectId);
       this.db.prepare('DELETE FROM revisions WHERE branch_id IN (SELECT id FROM branches WHERE project_id=?)').run(projectId);
       this.db.prepare('DELETE FROM branches WHERE project_id=?').run(projectId);
@@ -106,7 +130,7 @@ export class Store {
     if (!input.title?.trim()) throw new HttpError('请输入作品名称');
     const project: Project = { id: id(), title: input.title.trim(), premise: input.premise ?? '', mode: input.mode ?? 'original', createdAt: now(), updatedAt: now(), mainBranchId: id() };
     const branch: Branch = { id: project.mainBranchId, projectId: project.id, name: '主线', revisionId: '', createdAt: now() };
-    const state = emptyState(); state.outline.locked = project.premise;
+    const state = emptyState(); state.outline.locked = project.premise; state.outline.worldview = project.premise;
     this.db.exec('BEGIN IMMEDIATE');
     try { branch.revisionId = this.insertRevision(branch, state, '创建作品').id; this.db.prepare('INSERT INTO projects VALUES(?,?)').run(project.id, JSON.stringify(project)); this.db.prepare('INSERT INTO branches VALUES(?,?,?)').run(branch.id, project.id, JSON.stringify(branch)); this.db.exec('COMMIT'); } catch (e) { this.db.exec('ROLLBACK'); throw e; }
     return project;
@@ -161,6 +185,24 @@ export class Store {
     if (index < 0) throw new HttpError('改写的章节不存在');
     return this.atBoundary(branchId, index);
   }
+  /** Re-generation always forks before its target, including the latest unfinished chapter. */
+  forkForGeneration(branchId: string, base: string, chapterId: string): BranchView {
+    const original = this.assertVersion(branchId, base); const current = this.state(branchId);
+    const index = current.chapters.findIndex(chapter => chapter.id === chapterId);
+    if (index < 0) throw new HttpError('重新生成的章节不存在', 404);
+    const state = this.cleanBoundary(this.atBoundary(branchId, index));
+    if (state.chapters.some(chapter => chapter.status !== 'ready')) throw new HttpError('前面的章节尚未整理完成，请先完成资料整理', 409);
+    state.outline.locked = current.outline.locked;
+    state.outline.worldview = current.outline.worldview;
+    // Deliberate future plans may survive; the rejected chapter's discovered facts may not.
+    const currentPlans = clone(current.outline.fine).filter(plan => plan.chapter > index);
+    state.outline.fine = [...state.outline.fine.filter(plan => plan.chapter > index && !currentPlans.some(current => current.chapter === plan.chapter)), ...currentPlans].sort((a, b) => a.chapter - b.chapter);
+    for (const entity of state.entities) {
+      const authored = current.entities.find(item => item.id === entity.id);
+      if (authored?.isMainSource === 'author') { entity.isMain = authored.isMain; entity.isMainSource = 'author'; }
+    }
+    return this.createFork(original, state, `重新生成 · ${current.chapters[index].title}`, current.chapters[index - 1]?.id);
+  }
   private cleanBoundary(state: StoryState): StoryState {
     const included = new Set(state.chapters.map(c => c.id));
     for (const entity of state.entities) entity.facts = entity.facts.filter(f => f.temporal !== 'future' && (!f.citation || included.has(f.citation.chapterId)));
@@ -192,6 +234,7 @@ export class Store {
       else {
         // Keep deliberate human constraints when replacing the latest draft. AI discoveries are reverted.
         previous.outline.locked = state.outline.locked;
+        previous.outline.worldview = state.outline.worldview;
         const included = new Set(previous.chapters.map(c => c.id));
         for (const current of state.entities.filter(e => e.locked || e.facts.some(f => f.locked))) {
           const existing = previous.entities.find(e => e.id === current.id);
@@ -205,6 +248,7 @@ export class Store {
       state = previous;
     } else if (state.chapters.some(c => c.status !== 'ready')) throw new HttpError('上一章资料尚未整理完成，请先重试整理', 409);
     const chapter = this.putChapter(input.title, input.text); state.chapters.push(chapter);
+    state.outline.fine = state.outline.fine.filter(plan => plan.chapter > state.chapters.length);
     return this.commit(branch.id, branch.revisionId, state, input.chapterId ? '修订正文，等待资料整理' : '保存正文，等待资料整理', checkpoint);
   }
   rollback(branchId: string, input: { baseRevisionId: string; revisionId: string }): BranchView {
@@ -212,10 +256,16 @@ export class Store {
     if (!this.history(branchId).some(r => r.id === input.revisionId)) throw new HttpError('只能回退到本故事线的历史版本');
     return this.commit(branchId, input.baseRevisionId, this.revisionState(input.revisionId), '回退正文与世界资料');
   }
-  updateOutline(branchId: string, base: string, outline: Outline): BranchView { this.assertVersion(branchId, base); const state = this.state(branchId); state.outline = clone(outline); return this.commit(branchId, base, state, '修改大纲与锁定设定'); }
+  updateOutline(branchId: string, base: string, outline: Outline): BranchView {
+    this.assertVersion(branchId, base); const state = this.state(branchId);
+    // Summary replacement goes through the separate author-confirmation endpoint.
+    state.outline = { worldview: outline.worldview ?? state.outline.worldview ?? '', locked: outline.locked, fine: clone(outline.fine).filter(plan => plan.chapter > state.chapters.length), summaryCompression: state.outline.summaryCompression };
+    return this.commit(branchId, base, state, '修改世界观与预期规划');
+  }
   updateEntity(branchId: string, base: string, entity: Entity): BranchView {
     this.assertVersion(branchId, base); const state = this.state(branchId); const index = state.entities.findIndex(e => e.id === entity.id);
-    const replacement = clone(entity); replacement.id = index >= 0 ? entity.id : id(); replacement.facts = replacement.facts.map(f => ({ ...f, id: f.id || id() }));
+    const replacement = clone(entity); replacement.id = index >= 0 ? entity.id : id(); replacement.facts = replacement.facts.map(f => ({ ...f, id: f.id || id(), attribute: f.attribute ? normalizeProfileAttribute(f.attribute) : undefined }));
+    if (replacement.isMain !== undefined) replacement.isMainSource = 'author';
     const included = new Set(state.chapters.map(c => c.id));
     for (const fact of replacement.facts) {
       const citation = fact.citation; if (!citation) continue;
@@ -232,6 +282,7 @@ export class Store {
     this.assertVersion(branchId, base); const state = this.state(branchId); const from = state.entities.find(e => e.id === fromId && !e.mergedInto); const to = state.entities.find(e => e.id === toId && !e.mergedInto);
     if (!from || !to || fromId === toId || from.kind !== to.kind) throw new HttpError('请选择两个不同且类型相同的资料条目');
     to.aliases = [...new Set([...to.aliases, from.name, ...from.aliases])]; to.facts.push(...from.facts); to.locked = true; from.mergedInto = to.id;
+    if (to.isMainSource !== 'author' && from.isMainSource === 'author') { to.isMain = from.isMain; to.isMainSource = 'author'; }
     state.relations = state.relations.map(r => ({ ...r, fromId: r.fromId === fromId ? toId : r.fromId, toId: r.toId === fromId ? toId : r.toId }));
     for (const f of state.foreshadows) f.relatedEntityIds = [...new Set(f.relatedEntityIds.map(e => e === fromId ? toId : e))];
     return this.commit(branchId, base, state, `合并资料：${from.name} → ${to.name}`);
@@ -277,9 +328,9 @@ export class Store {
       const matches = resolve(extracted.name, extracted.kind);
       let entity = matches.length === 1 ? matches[0] : undefined;
       const ambiguous = matches.length > 1;
-      if (!entity) { entity = { id: id(), kind: extracted.kind, name: extracted.name, aliases: extracted.aliases, description: '', visibility: extracted.visibility, locked: false, facts: [] }; state.entities.push(entity); }
+      if (!entity) { entity = { id: id(), kind: extracted.kind, name: extracted.name, aliases: extracted.aliases, description: '', visibility: extracted.visibility, locked: false, facts: [], nameStatus: extracted.nameStatus, isMain: extracted.isMain, isMainSource: extracted.isMain !== undefined ? 'extraction' : undefined }; state.entities.push(entity); }
       // Locked records retain human prose and aliases; evidence may be appended, never overwritten.
-      if (!entity.locked) { entity.aliases = [...new Set([...entity.aliases, ...extracted.aliases])]; if (extracted.description.trim() && extracted.facts.some(f => f.temporal === 'current')) entity.description = extracted.description; if (extracted.visibility === 'secret') entity.visibility = 'secret'; }
+      if (!entity.locked) { entity.aliases = [...new Set([...entity.aliases, ...extracted.aliases])].filter(alias => alias !== entity.name); if (extracted.description.trim() && extracted.facts.some(f => f.temporal === 'current')) entity.description = extracted.description; if (extracted.visibility === 'secret') entity.visibility = 'secret'; if (extracted.nameStatus === 'confirmed' || !entity.nameStatus) entity.nameStatus = extracted.nameStatus; if (entity.isMainSource !== 'author' && extracted.isMain !== undefined) { entity.isMain = extracted.isMain; entity.isMainSource = 'extraction'; } }
       for (const fact of [...extracted.facts].sort((a, b) => a.paragraph - b.paragraph)) {
         if (entity.facts.some(f => f.text === fact.text && f.attribute === fact.attribute && f.citation?.chapterId === chapterId && f.citation.paragraph === fact.paragraph && f.citation.quote === fact.quote)) continue;
         let conflict = ambiguous || (entity.locked && fact.temporal === 'current');
@@ -291,7 +342,7 @@ export class Store {
         entity.facts.push({ id: id(), text: fact.text, attribute: fact.attribute, temporal: fact.temporal, certainty: conflict ? 'conflict' : fact.certainty, visibility: extracted.visibility === 'secret' ? 'secret' : fact.visibility, citation: citation(fact.paragraph, fact.quote) });
       }
     }
-    for (const entity of state.entities.filter(entity => !entity.mergedInto)) reconcileCurrentAttributes(entity, state.chapters);
+    for (const entity of state.entities.filter(entity => !entity.mergedInto)) { reconcileCurrentAttributes(entity, state.chapters); entity.description = rebuildCharacterProfileDescription(entity); }
     const secretIds = new Set(reconciled.entities.filter(entity => entity.visibility === 'secret').flatMap(entity => resolve(entity.name, entity.kind).map(match => match.id)));
     for (const [index, extracted] of result.relations.entries()) {
       const from = resolve(extracted.from); const to = resolve(extracted.to);
@@ -309,6 +360,7 @@ export class Store {
     }
     if (issues.length) throw new OutputValidationError(issues, '资料关联校验失败，请在作者输出记录中查看全部问题并修正');
     ref.summary = [ref.summary, result.summary].filter(Boolean).join('\n'); ref.status = complete ? 'ready' : 'pending';
+    if (complete) state.outline.fine = state.outline.fine.filter(plan => plan.chapter > state.chapters.length);
     return this.commit(branchId, base, state, complete ? `完成资料整理：${ref.title}` : `整理章节片段：${ref.title}`, checkpoint);
   }
   exportProject(projectId: string): unknown {
@@ -322,7 +374,9 @@ export class Store {
     const chapters = [...chapterIds].map(chapterId => { const row = this.db.prepare('SELECT data,text FROM chapter_texts WHERE id=?').get(chapterId)!; return { ...parse<ChapterRef>(row.data), text: String(row.text) }; });
     const jobs = this.db.prepare('SELECT data FROM jobs WHERE project_id=?').all(projectId).map(r => parse<Job>(r.data));
     const importChapters = this.db.prepare('SELECT c.job_id AS jobId,c.position,c.title,c.text FROM job_import_chapters c JOIN jobs j ON j.id=c.job_id WHERE j.project_id=? ORDER BY c.job_id,c.position').all(projectId);
-    return { version: 1, project, branches, revisions, chapters, jobs, importChapters, outputs: this.outputs.all(projectId) };
+    const writingDrafts = this.db.prepare('SELECT d.job_id AS jobId,d.text FROM job_writing_drafts d JOIN jobs j ON j.id=d.job_id WHERE j.project_id=?').all(projectId);
+    const writingActivities = jobs.filter(job => job.kind === 'generate').map(job => ({ jobId: job.id, activities: this.listWritingActivities(job.id) })).filter(entry => entry.activities.length);
+    return { version: 1, project, branches, revisions, chapters, jobs, importChapters, writingDrafts, writingActivities, outputs: this.outputs.all(projectId) };
   }
   restoreProject(input: unknown, sourceIdMap: Record<string, string> = {}, onRestore?: (project: Project) => void): Project {
     const parsed = backupSchema.safeParse(input); if (!parsed.success) throw new HttpError('作品备份格式不正确或缺少正文与世界资料字段');
@@ -336,7 +390,9 @@ export class Store {
     register(data.project.id); for (const b of data.branches) register(b.id); for (const c of data.chapters) register(c.id); for (const job of data.jobs) register(job.id); for (const output of data.outputs) register(output.id);
     for (const r of data.revisions) { register(r.revision.id); const state = readState(r); for (const e of state.entities) { register(e.id); for (const f of e.facts) register(f.id); } for (const relation of state.relations) register(relation.id); for (const f of state.foreshadows) register(f.id); }
     const remap = (value: unknown, key = ''): unknown => {
-      if (typeof value === 'string') { if (key === 'sourceId') return sourceIdMap[value]; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds') return map.get(value) ?? value; return value; }
+      // Process payloads are historical observations, like raw model responses. Only their owning job is remapped.
+      if (key === 'writingActivities' && Array.isArray(value)) return value.map(entry => ({ jobId: map.get(entry.jobId) ?? entry.jobId, activities: clone(entry.activities) }));
+      if (typeof value === 'string') { if (key === 'sourceId') return sourceIdMap[value]; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds') return map.get(value) ?? value; return value; }
       if (Array.isArray(value)) return value.map(v => remap(v, key)); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, remap(v, k)])); return value;
     };
     const restored = remap(data) as typeof data;
@@ -348,6 +404,8 @@ export class Store {
       const state = restoredState(index);
       if (state.chapters.some(c => !chapterIds.has(c.id)) || restored.revisions[index].revision.chapterCount !== state.chapters.length) throw new HttpError('备份章节版本关联无效');
       const included = new Set(state.chapters.map(c => c.id)); const entities = new Set(state.entities.map(e => e.id));
+      const compression = state.outline.summaryCompression;
+      if (compression && (!compression.text.trim() || !compression.chapterIds.length || new Set(compression.chapterIds).size !== compression.chapterIds.length || compression.chapterIds.some(chapterId => !included.has(chapterId)))) throw new HttpError('备份压缩摘要存在无效章节关联');
       const validCitation = (c: { chapterId: string; paragraph: number; quote: string } | undefined) => !c || (included.has(c.chapterId) && chapterLookup.get(c.chapterId)?.[c.paragraph - 1]?.includes(c.quote));
       if (included.size !== state.chapters.length || entities.size !== state.entities.length || state.entities.some(e => (e.mergedInto && (!entities.has(e.mergedInto) || e.mergedInto === e.id)) || e.facts.some(f => !validCitation(f.citation))) || state.relations.some(r => !entities.has(r.fromId) || !entities.has(r.toId) || !validCitation(r.citation)) || state.foreshadows.some(f => f.relatedEntityIds.some(e => !entities.has(e)) || (f.plantedChapterId && !included.has(f.plantedChapterId)) || (f.resolvedChapterId && !included.has(f.resolvedChapterId)))) throw new HttpError('备份存在无效资料关联或原文引用');
     }
@@ -374,6 +432,18 @@ export class Store {
       for (const chapter of restored.chapters) { const { text, ...ref } = chapter; this.db.prepare('INSERT INTO chapter_texts VALUES(?,?,?)').run(ref.id, JSON.stringify(ref), text); this.db.prepare('INSERT INTO chapter_search(id,title,text) VALUES(?,?,?)').run(ref.id, ref.title, text); }
       for (const job of restored.jobs) this.db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?)').run(job.id, job.branchId, job.projectId, job.status, JSON.stringify(job));
       for (const chapter of restored.importChapters) this.db.prepare('INSERT INTO job_import_chapters VALUES(?,?,?,?)').run(chapter.jobId, chapter.position, chapter.title, chapter.text);
+      for (const draft of restored.writingDrafts) { if (jobs.get(draft.jobId)?.kind !== 'generate') throw new HttpError('备份流式草稿关联无效'); this.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?)').run(draft.jobId, draft.text); }
+      const activityJobs = new Set<string>();
+      for (const entry of restored.writingActivities) {
+        if (jobs.get(entry.jobId)?.kind !== 'generate' || activityJobs.has(entry.jobId) || new Set(entry.activities.map(activity => activity.id)).size !== entry.activities.length) throw new HttpError('备份作者工作过程关联无效');
+        activityJobs.add(entry.jobId);
+        const owner = jobs.get(entry.jobId)!;
+        for (const activity of entry.activities) {
+          const recovered: WritingActivity = activity.status === 'running' && ['completed', 'paused', 'failed', 'cancelled', 'stale'].includes(owner.status)
+            ? { ...activity, status: owner.status === 'completed' ? 'completed' : 'failed', ...(owner.status === 'completed' ? {} : { error: owner.message || '任务已暂停，过程已停止' }) } : activity;
+          this.db.prepare('INSERT INTO job_writing_activities VALUES(?,?,?)').run(entry.jobId, activity.id, JSON.stringify(recovered));
+        }
+      }
       for (const output of restored.outputs) this.outputs.insert(output);
       onRestore?.(restored.project);
       this.db.exec('COMMIT');

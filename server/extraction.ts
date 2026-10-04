@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import type { ExtractionResult, OutputIssue, StoryState } from '../shared/types.js';
+import type { Entity, ExtractionResult, OutputIssue, StoryState } from '../shared/types.js';
 import { paragraphs } from './store.js';
 
 const visibility = z.enum(['public', 'secret']);
 export const extractionSchema = z.object({
   summary: z.string(),
-  entities: z.array(z.object({ kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string().min(1), aliases: z.array(z.string()), description: z.string(), visibility,
+  entities: z.array(z.object({ kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string().min(1), nameStatus: z.enum(['placeholder', 'confirmed']).optional(), isMain: z.boolean().optional(), aliases: z.array(z.string()), description: z.string(), visibility,
     facts: z.array(z.object({ text: z.string().min(1), attribute: z.string().min(1).max(100).optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility, paragraph: z.number().int().positive(), quote: z.string().min(1) })) })),
   relations: z.array(z.object({ from: z.string().min(1), to: z.string().min(1), label: z.string().min(1), visibility, paragraph: z.number().int().positive(), quote: z.string().min(1) })),
   foreshadows: z.array(z.object({ title: z.string().min(1), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedNames: z.array(z.string()) })),
@@ -14,6 +14,35 @@ export interface SourceSlice { paragraph: number; text: string }
 export interface ExtractionBlock { start: number; text: string; sources: SourceSlice[] }
 
 export const ENTITY_RESOLUTION_INSTRUCTION = '同一个人物或地点只输出一个实体。先对照已有名称与别名，姓名、本名、旧名以及原文明确指向同一人的描述性称呼应统一到同一实体，优先用本名作为 name，其他称呼写入 aliases；比如原文确认“戴兜帽的旅人”名叫“林舟”，应以“林舟”为 name，把“戴兜帽的旅人”写入 aliases。描述性称呼在后续片段获得本名时，也要保留之前的称呼以便归并。只有原文足以确认同一身份时才建立别名，不凭外貌、职业相似或名字包含关系合并；“他”“少女”“队长”等无法唯一指向的泛称不要作为别名。别名对照仅辅助统一身份，不是事实证据，也不能据此提前揭晓身份秘密。';
+
+export const CHARACTER_PROFILE_INSTRUCTION = '人物资料要回答“这个人是谁、有什么特点和能力、目前处于什么状态”，不能写成逐段行动流水账。正文明确披露的姓名、性别、种族、血统、年龄、外貌、身份、所属势力、能力、性格、目标、弱点、当前状态与所在地分别使用稳定属性 name、gender、race、bloodline、age、appearance、identity、affiliation、ability、personality、goal、weakness、status、location；缺失资料不补造，也不按称呼、外貌推测性别、种族或血统。可并存的能力、性格等使用稳定子属性，例如 ability:archery、ability:fire_magic、personality:courage，同一项后续变化继续使用相同子属性。只有改变身份、能力、关系、命运或后续剧情的重大/关键经历才写为 attribute=major_event 的 past 事实；吃饭、走路、递物、普通对话等日常经过只保存在 summary，不放入人物 facts 或 description。description 是已明确资料的简洁介绍，不能塞进普通经历或尚未发生的规划。nameStatus=placeholder 表示正文未披露姓名、暂用唯一称呼定位；得知明确本名后使用本名作为 name、nameStatus=confirmed，并在 aliases 中保留正文明确对应的旧称呼，不能把本名仅写进 aliases。isMain 仅在作者指定或正文明确呈现持续核心视角/主线地位时设为 true；仅出现一次、参与一段对话或与主角相识不等于主要角色；不能确定时省略该字段。每条资料仍必须引用当前正文的精确证据，已有名称索引只辅助身份对照。';
+
+const profileLabels: Record<string, string> = { name: '姓名', gender: '性别', race: '种族', bloodline: '血统', age: '年龄', appearance: '外貌', identity: '身份', affiliation: '所属', ability: '能力', personality: '性格', goal: '目标', weakness: '弱点', status: '状态', location: '所在地' };
+const attributeAliases: Record<string, string> = { 姓名: 'name', 性别: 'gender', 种族: 'race', 血统: 'bloodline', 年龄: 'age', 外貌: 'appearance', 身份: 'identity', 所属势力: 'affiliation', 所属: 'affiliation', 能力: 'ability', 性格: 'personality', 目标: 'goal', 弱点: 'weakness', 状态: 'status', 位置: 'location', 所在地: 'location', 当前位置: 'location', current_location: 'location', 重大经历: 'major_event', 关键经历: 'major_event', 重大事件: 'major_event', 关键事件: 'major_event' };
+
+/** Only normalize explicit field labels. Narrative wording is not a reliable classifier. */
+export function normalizeProfileAttribute(attribute: string): string {
+  const value = attribute.trim(); const separator = value.indexOf(':');
+  const prefix = separator < 0 ? value : value.slice(0, separator).trim();
+  const normalized = attributeAliases[prefix.toLocaleLowerCase()] ?? prefix;
+  return separator < 0 ? normalized : `${normalized}:${value.slice(separator + 1).trim()}`;
+}
+
+/** Run after current-attribute reconciliation; human-locked prose is never reconstructed. */
+export function rebuildCharacterProfileDescription(entity: Entity): string {
+  if (entity.kind !== 'character' || entity.locked) return entity.description;
+  const fields = new Map<string, string[]>(); const events: string[] = [];
+  for (const fact of entity.facts) {
+    if (fact.certainty !== 'fact' || fact.temporal === 'future' || !fact.attribute || !fact.text.trim()) continue;
+    const attribute = normalizeProfileAttribute(fact.attribute); const prefix = attribute.split(':')[0];
+    if (prefix === 'major_event' && fact.temporal !== 'unknown') { if (!events.includes(fact.text)) events.push(fact.text); continue; }
+    if (fact.temporal !== 'current' || !profileLabels[prefix]) continue;
+    const values = fields.get(prefix) ?? []; if (!values.includes(fact.text)) values.push(fact.text); fields.set(prefix, values);
+  }
+  const parts = Object.entries(profileLabels).flatMap(([attribute, label]) => fields.has(attribute) ? [`${label}：${fields.get(attribute)!.join('；')}`] : []);
+  if (events.length) parts.push(`关键经历：${events.join('；')}`);
+  return parts.length ? parts.join('\n') : entity.description;
+}
 
 /** Keep the established 5,500-character boundaries unchanged for durable job checkpoints. */
 export function splitExtractionBlocks(text: string, maxChars = 5500): ExtractionBlock[] {
@@ -92,7 +121,7 @@ export function normalizeExtraction(input: unknown, block: ExtractionBlock): { v
       if (!record(entity)) return; const path = `entities[${index}]`;
       addDefault(entity, 'aliases', [], path); addDefault(entity, 'description', '', path); addDefault(entity, 'visibility', 'secret', path); addDefault(entity, 'facts', [], path);
       if (Array.isArray(entity.facts)) entity.facts.forEach((fact, factIndex) => { if (!record(fact)) return; const factPath = `${path}.facts[${factIndex}]`; addDefault(fact, 'temporal', 'unknown', factPath); addDefault(fact, 'certainty', 'inference', factPath); addDefault(fact, 'visibility', 'secret', factPath);
-        if (typeof fact.attribute === 'string' && ['位置', '所在地', '当前位置', 'current_location'].includes(fact.attribute.trim().toLocaleLowerCase())) { fact.attribute = 'location'; adjustments.push({ path: `${factPath}.attribute`, message: '明确的位置属性名称已统一为 location' }); }
+        if (typeof fact.attribute === 'string') { const normalized = normalizeProfileAttribute(fact.attribute); if (normalized !== fact.attribute) { fact.attribute = normalized; adjustments.push({ path: `${factPath}.attribute`, message: `明确的资料属性名称已统一为 ${normalized}` }); } }
         cite(fact, factPath); });
     });
     if (Array.isArray(candidate.relations)) candidate.relations.forEach((relation, index) => { if (!record(relation)) return; addDefault(relation, 'visibility', 'secret', `relations[${index}]`); cite(relation, `relations[${index}]`); });
@@ -112,7 +141,7 @@ export function extractionContext(state: StoryState, block: ExtractionBlock): st
   const entities = state.entities.filter(entity => !entity.mergedInto).map(entity => ({ entity, names: entityNames.get(entity.id)!, mentioned: entityNames.get(entity.id)!.some(name => name && block.text.includes(name)), recent: entity.facts.reduce((latest, fact) => Math.max(latest, chapterOrder.get(fact.citation?.chapterId ?? '') ?? -1), -1) }))
     .filter(({ entity, mentioned }) => mentioned || entity.kind === 'character' || entity.kind === 'faction')
     .sort((left, right) => Number(right.mentioned) - Number(left.mentioned) || right.recent - left.recent)
-    .slice(0, 80).map(({ entity, names }) => ({ kind: entity.kind, name: entity.name, aliases: [...new Set(names.filter(name => name !== entity.name))] }));
+    .slice(0, 80).map(({ entity, names }) => ({ kind: entity.kind, name: entity.name, nameStatus: entity.nameStatus, isMain: entity.isMain, aliases: [...new Set(names.filter(name => name !== entity.name))] }));
   const foreshadows = state.foreshadows.filter(item => item.status === 'planted').slice(-30).map(item => ({ title: item.title, status: item.status }));
   return `名称对照（仅用于统一称呼，不是新增事实的证据）：${JSON.stringify(entities)}\n尚未揭晓的伏笔索引（不可据此推断答案）：${JSON.stringify(foreshadows)}`;
 }

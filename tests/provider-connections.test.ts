@@ -35,6 +35,14 @@ async function endpoint(handler: (request: IncomingMessage, response: ServerResp
 }
 function json(response: ServerResponse, value: unknown, status = 200) { response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify(value)); }
 
+async function waitForTask(engine: Awaited<ReturnType<typeof buildApp>>['engine'], id: string) {
+  const deadline = Date.now() + 4000;
+  while (!['completed', 'failed'].includes(engine.listJobs().find(job => job.id === id)!.status)) {
+    if (Date.now() > deadline) throw new Error('本地模拟任务未完成'); await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  expect(engine.listJobs().find(job => job.id === id)?.status).toBe('completed');
+}
+
 describe('provider connections and task model assignments', () => {
   it('drops legacy task limits while migrating supplier limits into each assigned model and preserving keys', async () => {
     const ctx = await context();
@@ -185,12 +193,15 @@ describe('provider connections and task model assignments', () => {
     });
     ctx.settings.save({ ...settings(provider({ baseUrl })), modelParameters: ['writer', 'planner', 'extractor'].map((model, index) => ({ ...defaultModelParameters(), role: modelRoles[index], providerId: 'upstream', model, maxOutputTokens: 1024 * (index + 1), contextTokens: 128000, temperature: index / 2 })) });
     const project = ctx.store.createProject({ title: '分任务模型' }); const branch = ctx.store.getBranch(project.mainBranchId);
-    ctx.engine.start(); const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: branch.revisionId, mode: 'original', instruction: '继续写作' });
+    ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId });
+    await waitForTask(ctx.engine, planJob.id);
+    const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
     const deadline = Date.now() + 4000;
     while (!['completed', 'failed'].includes(ctx.engine.listJobs().find(value => value.id === job.id)!.status)) {
       if (Date.now() > deadline) throw new Error('本地模拟任务未完成'); await new Promise(resolve => setTimeout(resolve, 5));
     }
     expect(ctx.engine.listJobs().find(value => value.id === job.id)).toMatchObject({ status: 'completed' });
+    await waitForTask(ctx.engine, ctx.engine.listJobs().find(value => value.kind === 'extract')!.id);
     expect(requests.map(body => [body.model, body.max_tokens, body.temperature])).toEqual([['planner', 2048, 0.5], ['writer', 1024, 0], ['extractor', 3072, 1]]);
     expect(ctx.store.state(branch.id).chapters[0].status).toBe('ready');
   });
@@ -215,12 +226,15 @@ describe('provider connections and task model assignments', () => {
     });
     ctx.settings.save({ ...settings(provider({ baseUrl })), writingModel: 'shared-model', planningModel: 'shared-model', extractionModel: 'shared-model', modelParameters: modelRoles.map((role, index) => ({ ...defaultModelParameters(), role, providerId: 'upstream', model: 'shared-model', maxOutputTokens: 1024 * (index + 1), contextTokens: 128000, temperature: index / 2 })) });
     const project = ctx.store.createProject({ title: '相同模型按任务隔离参数' }); const branch = ctx.store.getBranch(project.mainBranchId);
-    ctx.engine.start(); const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: branch.revisionId, mode: 'original', instruction: '继续写作' });
+    ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId });
+    await waitForTask(ctx.engine, planJob.id);
+    const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
     const deadline = Date.now() + 4000;
     while (!['completed', 'failed'].includes(ctx.engine.listJobs().find(value => value.id === job.id)!.status)) {
       if (Date.now() > deadline) throw new Error('本地模拟任务未完成'); await new Promise(resolve => setTimeout(resolve, 5));
     }
     expect(ctx.engine.listJobs().find(value => value.id === job.id)).toMatchObject({ status: 'completed' });
+    await waitForTask(ctx.engine, ctx.engine.listJobs().find(value => value.kind === 'extract')!.id);
     expect(requests.map(body => [body.model, body.max_tokens, body.temperature])).toEqual([['shared-model', 2048, 0.5], ['shared-model', 1024, 0], ['shared-model', 3072, 1]]);
     expect(ctx.store.state(branch.id).chapters[0].status).toBe('ready');
   });

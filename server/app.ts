@@ -19,7 +19,7 @@ import { modelRoles, resolveModelConfig } from '../shared/model-settings.js';
 const revision = z.string().min(1).max(100);
 const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite']);
 const passwordBody = z.object({ password: z.string().min(8, '密码至少 8 位').max(256) });
-const outlineSchema = z.object({ coarse: z.string().max(100000), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000) });
+const outlineSchema = z.object({ worldview: z.string().max(100000).optional(), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000) });
 const modelNameSchema = z.string().trim().max(300).refine(value => !/[\u0000-\u001f\u007f]/.test(value), '模型名称不能包含控制字符');
 const modelParametersSchema = z.object({
   maxOutputTokens: z.number().int().min(256).max(128000), contextTokens: z.number().int().min(2048).max(2000000),
@@ -37,7 +37,7 @@ const modelRoleSchema = z.enum(modelRoles);
 const modelProfileSchema = modelParametersSchema.extend({ role: modelRoleSchema.optional(), providerId: z.string().min(1).max(100), model: modelNameSchema.refine(value => Boolean(value), '模型参数需要指定模型名称') }).strict();
 const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional() });
 const citationSchema = z.object({ chapterId: z.string(), paragraph: z.number().int().positive(), quote: z.string().max(10000) });
-const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(200), description: z.string().max(30000), visibility: z.enum(['public', 'secret']), locked: z.boolean(), mergedInto: z.string().optional(), facts: z.array(z.object({ id: z.string(), text: z.string().max(10000), attribute: z.string().min(1).max(100).optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() })).max(5000) });
+const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(200), description: z.string().max(30000), visibility: z.enum(['public', 'secret']), locked: z.boolean(), isMain: z.boolean().optional(), nameStatus: z.enum(['placeholder', 'confirmed']).optional(), mergedInto: z.string().optional(), facts: z.array(z.object({ id: z.string(), text: z.string().max(10000), attribute: z.string().min(1).max(100).optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() })).max(5000) });
 const foreshadowSchema = z.object({ id: z.string().min(1), title: z.string().min(1).max(300), detail: z.string().max(20000), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string().max(20000), relatedEntityIds: z.array(z.string()).max(1000) });
 const chaptersSchema = z.array(z.object({ title: z.string().min(1).max(500), text: z.string().max(20000000) })).min(1).max(20000);
 
@@ -209,13 +209,35 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     });
     return job;
   });
-  app.post('/api/branches/:id/generate', async request => { const b = z.object({ baseRevisionId: revision, mode, instruction: z.string().max(30000), title: z.string().max(500).optional(), chapterId: z.string().optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), maxWords: z.number().int().min(100).max(20000).optional() }).parse(request.body); return engine.enqueue(param(request), 'generate', b); });
+  app.post('/api/branches/:id/generate', async request => { const b = z.object({ baseRevisionId: revision, mode, instruction: z.string().max(30000), title: z.string().max(500).optional(), chapterId: z.string().optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), maxWords: z.number().int().min(100).max(20000).optional(), regenerate: z.boolean().optional(), discardBackground: z.boolean().optional() }).parse(request.body); return engine.enqueue(param(request), 'generate', b); });
   app.post('/api/branches/:id/plan', async request => { const b = z.object({ baseRevisionId: revision, instruction: z.string().max(30000).optional() }).parse(request.body); return engine.enqueue(param(request), 'plan', b); });
   app.post('/api/branches/:id/extract', async request => engine.enqueue(param(request), 'extract', { baseRevisionId: base(request.body) }));
-  const jobView = (job: Job, asAuthor: boolean): Job => ({ ...job, payload: {}, message: asAuthor ? job.message : ({ queued: '任务等待中', running: '任务进行中', paused: '任务已暂停', failed: '任务未完成', completed: '任务已完成', cancelled: '任务已取消', stale: '起始版本已变化' })[job.status], error: asAuthor ? job.error : job.error ? '请进入作者视图查看具体原因。' : undefined });
+  const jobView = (job: Job, asAuthor: boolean): Job => ({ ...job, title: asAuthor ? job.title : undefined, generationInput: asAuthor ? job.generationInput : undefined, payload: {}, message: asAuthor ? job.message : ({ queued: '任务等待中', running: '任务进行中', paused: '任务已暂停', failed: '任务未完成', completed: '任务已完成', cancelled: '任务已取消', stale: '起始版本已变化' })[job.status], error: asAuthor ? job.error : job.error ? '请进入作者视图查看具体原因。' : undefined });
   app.get('/api/jobs', async request => { const { projectId } = z.object({ projectId: z.string().optional() }).parse(request.query); return engine.listJobs(projectId).map(job => jobView(job, author(request))); });
   // Model outputs can contain unrevealed plot details; never expose them in reader requests.
   const requireAuthor = (request: unknown) => { if (!author(request)) fail('请在作者视图查看或修正模型输出。', 403); };
+  app.get('/api/jobs/:id/activities', async request => { requireAuthor(request); return engine.listWritingActivities(param(request)); });
+  app.get('/api/jobs/:id/events', async (request, reply) => {
+    requireAuthor(request); const jobId = param(request); const snapshot = engine.writingSnapshot(jobId);
+    reply.hijack(); reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+    const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'stale', 'paused'].includes(status);
+    let unsubscribe = () => {}; let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const cleanup = () => { unsubscribe(); if (heartbeat) clearInterval(heartbeat); };
+    const send = (event: Parameters<typeof engine.subscribeWriting>[1] extends (event: infer T) => void ? T : never) => {
+      if (reply.raw.destroyed || reply.raw.writableEnded) { cleanup(); return; }
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      if ((event.type === 'snapshot' || event.type === 'status') && terminal(event.job.status)) { cleanup(); reply.raw.end(); }
+    };
+    unsubscribe = engine.subscribeWriting(jobId, send); reply.raw.on('close', cleanup);
+    send(snapshot);
+    if (!terminal(snapshot.job.status)) heartbeat = setInterval(() => { if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.write(': keepalive\n\n'); else cleanup(); }, 15000);
+  });
+  app.post('/api/branches/:id/summary-compression', async request => { requireAuthor(request); return engine.enqueue(param(request), 'plan', { baseRevisionId: base(request.body), purpose: 'compress-summary' }); });
+  app.get('/api/jobs/:id/summary-compression', async request => { requireAuthor(request); return engine.summaryCompression(param(request)); });
+  app.post('/api/branches/:id/summary-compression/confirm', async request => {
+    requireAuthor(request); const body = z.object({ baseRevisionId: revision, jobId: z.string().min(1), text: z.string().trim().min(1).max(1000000) }).parse(request.body);
+    return engine.confirmSummaryCompression(param(request), body);
+  });
   app.get('/api/jobs/:id/outputs', async request => { requireAuthor(request); return engine.listOutputs(param(request)); });
   app.get('/api/jobs/:id/outputs/:outputId', async request => { requireAuthor(request); return engine.outputDetail(param(request), param(request, 'outputId')); });
   app.post('/api/jobs/:id/outputs', async request => {

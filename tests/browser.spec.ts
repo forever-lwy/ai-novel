@@ -76,10 +76,10 @@ test('首次设置密码，一个供应商自动获取模型，三个任务各�
   await modal.getByRole('combobox', { name: '正文写作供应商', exact: true }).selectOption({ index: 1 });
   await expect(modal.getByRole('combobox', { name: '正文写作上游模型', exact: true })).toBeEnabled();
   await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('');
-  await modal.getByRole('combobox', { name: '大纲规划供应商', exact: true }).selectOption({ index: 1 });
+  await modal.getByRole('combobox', { name: '剧情规划供应商', exact: true }).selectOption({ index: 1 });
   await modal.getByRole('combobox', { name: '资料提取供应商', exact: true }).selectOption({ index: 1 });
   await modal.getByRole('combobox', { name: '正文写作上游模型', exact: true }).selectOption('e2e-fixture');
-  await modal.getByRole('combobox', { name: '大纲规划上游模型', exact: true }).selectOption('e2e-planning');
+  await modal.getByRole('combobox', { name: '剧情规划上游模型', exact: true }).selectOption('e2e-planning');
   await modal.getByLabel('资料提取模型名称', { exact: true }).fill('e2e-custom-extraction');
   expect(listRequests).toBe(1);
   await modal.locator('.settings-role-card').scrollIntoViewIfNeeded();
@@ -101,7 +101,7 @@ test('首次设置密码，一个供应商自动获取模型，三个任务各�
   await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
 });
 
-test('原创生成保存正文、四章细纲及隐藏伏笔，阅读接口不返回作者秘密', async ({ page }, testInfo) => {
+test('原创生成保存正文、四章预期规划及隐藏伏笔，阅读接口不返回作者秘密', async ({ page }, testInfo) => {
   const modelBefore = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
   await createProject(page, 'E2E 原创世界');
   await page.getByRole('button', { name: '开始创作', exact: true }).click();
@@ -109,15 +109,22 @@ test('原创生成保存正文、四章细纲及隐藏伏笔，阅读接口不�
   await modal.getByLabel('章节标题（可选）', { exact: true }).fill('第一章 城门的钥匙');
   await modal.getByLabel('这一次，你想写什么？', { exact: true }).fill('让林舟发现白石城城门下的旧钥匙。');
   await modal.getByRole('button', { name: '开始生成', exact: true }).click();
-  await completedJobs(page, 1);
-  const modelAfter = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
-  for (const model of ['e2e-fixture', 'e2e-planning', 'e2e-custom-extraction']) expect((modelAfter.modelRequestsByModel[model] || 0) - (modelBefore.modelRequestsByModel[model] || 0)).toBeGreaterThan(0);
+  await expect(page.locator('.workspace-tabs > button.active')).toContainText('正文');
+  await expect(page.locator('.prose')).toContainText('林舟来到白石城');
+  await completedJobs(page, 2);
   await tab(page, '正文');
   await page.locator('.chapter-list').getByRole('button', { name: /第一章 城门的钥匙/ }).click();
   await expect(page.locator('.prose')).toContainText('林舟来到白石城');
   await page.screenshot({ path: testInfo.outputPath('desktop-writing.png'), fullPage: true, animations: 'disabled' });
-  await tab(page, '大纲与伏笔');
-  await expect(page.getByRole('textbox', { name: /粗大纲/ })).toHaveValue(/林舟从白石城出发/);
+  await tab(page, '剧情与伏笔');
+  await expect(page.getByRole('textbox', { name: /粗大纲/ })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: '已发生剧情的摘要', exact: true })).toContainText('林舟');
+  await page.getByRole('button', { name: '让 AI 规划', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '开始规划', exact: true }).click();
+  await completedJobs(page, 3);
+  const modelAfter = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+  for (const model of ['e2e-fixture', 'e2e-planning', 'e2e-custom-extraction']) expect((modelAfter.modelRequestsByModel[model] || 0) - (modelBefore.modelRequestsByModel[model] || 0)).toBeGreaterThan(0);
+  await tab(page, '剧情与伏笔');
   await expect(page.getByLabel('规划章节标题', { exact: true })).toHaveCount(4);
   await page.getByRole('button', { name: /^伏笔手记/ }).click();
   await expect(page.getByRole('textbox', { name: '隐藏的真相', exact: true })).toHaveValue(/SECRET_E2E_FORESHADOW/);
@@ -130,11 +137,228 @@ test('原创生成保存正文、四章细纲及隐藏伏笔，阅读接口不�
   await expect(page.getByLabel('伏笔状态', { exact: true })).toHaveValue('resolved');
   const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
   await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
-  await expect(page.locator('.workspace-tabs').getByRole('button', { name: '大纲与伏笔' })).toHaveCount(0);
+  await expect(page.locator('.workspace-tabs').getByRole('button', { name: '剧情与伏笔' })).toHaveCount(0);
   const reader = await page.request.get(`/api/branches/${branchId}`);
   expect(await reader.text()).not.toContain('SECRET_E2E_FORESHADOW');
   const search = await page.request.get(`/api/branches/${branchId}/search?q=SECRET_E2E_FORESHADOW`);
   expect((await search.json()).entities).toEqual([]);
+});
+
+test('新章实时显示正文，阅读视图隐藏流，重新生成可放弃后台整理并自动分支', async ({ page }, testInfo) => {
+  const auth = await (await page.request.get('/api/auth/status')).json();
+  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  const originalSettings = await (await page.request.get('/api/settings')).json();
+  const providerId = 'e2e-streaming-provider';
+  expect((await page.request.put('/api/settings', { data: {
+    providers: [{ id: providerId, name: '流式与后台验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }],
+    writingProviderId: providerId, writingModel: 'e2e-streaming-writing', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-slow-extraction',
+  } })).ok()).toBeTruthy();
+  try {
+    await createProject(page, 'E2E 流式重新生成');
+    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    await page.getByRole('button', { name: '开始创作', exact: true }).click();
+    const modal = page.getByRole('dialog');
+    await modal.getByLabel('章节标题（可选）', { exact: true }).fill('第一章 流式正文');
+    await modal.getByLabel('这一次，你想写什么？', { exact: true }).fill('林舟发现古城的钥匙。');
+    await modal.getByRole('button', { name: '开始生成', exact: true }).click();
+    await expect(page.locator('.workspace-tabs > button.active')).toContainText('正文');
+    await expect(page.getByRole('article', { name: '正在生成的章节' })).toBeVisible();
+    await expect(page.locator('.streaming-prose')).toContainText('林舟来到白石城');
+    await expect(page.locator('.streaming-prose')).not.toContainText('寻找守城人留下的线索');
+    await page.screenshot({ path: testInfo.outputPath('streaming-writing-desktop.png'), fullPage: true, animations: 'disabled' });
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
+    await expect(page.locator('.streaming-manuscript')).toHaveCount(0);
+    await expect(page.locator('.prose')).toHaveCount(0);
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+    await expect(page.locator('.prose')).toContainText('林舟来到白石城');
+    await expect(page.locator('.streaming-manuscript')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '编辑', exact: true })).toBeEnabled();
+    await expect(page.getByRole('button', { name: '重新生成', exact: true })).toBeEnabled();
+    const before = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    expect(before.state.chapters[0].status).toBe('pending');
+    await page.getByRole('button', { name: '重新生成', exact: true }).click();
+    await expect(modal).toContainText('资料还在后台整理');
+    await modal.getByRole('button', { name: '等待后台整理', exact: true }).click();
+    await expect(modal).toHaveCount(0);
+    expect(await page.getByLabel('当前故事线', { exact: true }).inputValue()).toBe(branchId);
+    await page.getByRole('button', { name: '重新生成', exact: true }).click();
+    await modal.getByRole('button', { name: '放弃后台任务并重新生成', exact: true }).click();
+    await expect(modal).toContainText('自动建立分支');
+    await expect(modal.getByLabel('这一次，你想写什么？', { exact: true })).toHaveValue('林舟发现古城的钥匙。');
+    await modal.getByLabel('这一次，你想写什么？', { exact: true }).fill('REGEN_BRANCH_ONLY：换一个线索展开这一章。');
+    const submitted = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === `/api/branches/${branchId}/generate`);
+    await modal.getByRole('button', { name: '开始生成', exact: true }).click();
+    expect((await submitted).postDataJSON()).toMatchObject({ regenerate: true, discardBackground: true, chapterId: before.state.chapters[0].id, instruction: 'REGEN_BRANCH_ONLY：换一个线索展开这一章。' });
+    await expect(page.getByLabel('当前故事线', { exact: true })).not.toHaveValue(branchId);
+    await expect(page.locator('.streaming-prose')).toContainText('林舟来到白石城');
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBeTruthy();
+    await page.screenshot({ path: testInfo.outputPath('streaming-regeneration-mobile.png'), fullPage: true, animations: 'disabled' });
+    const newBranchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.getByLabel('当前故事线', { exact: true }).selectOption(branchId);
+    await expect(page.locator('.streaming-manuscript')).toHaveCount(0);
+    await expect(page.locator('.prose')).not.toContainText('REGEN_BRANCH_ONLY');
+    await page.getByLabel('当前故事线', { exact: true }).selectOption(newBranchId);
+    await expect(page.locator('.prose')).toContainText('REGEN_BRANCH_ONLY');
+    await expect(page.locator('.streaming-manuscript')).toHaveCount(0);
+    await expect.poll(async () => (await (await page.request.get(`/api/branches/${newBranchId}?view=author`)).json()).state.chapters[0]?.status).toBe('ready');
+    const original = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    expect(original.state.chapters[0].id).toBe(before.state.chapters[0].id);
+    expect((await (await page.request.get(`/api/branches/${branchId}/chapters/${before.state.chapters[0].id}`)).json()).text).toContain('寻找守城人留下的线索');
+    const projectId = original.branch.projectId;
+    const jobs = await (await page.request.get(`/api/jobs?projectId=${projectId}&view=author`)).json();
+    expect(jobs.find((job: any) => job.kind === 'extract' && job.branchId === branchId).status).toBe('cancelled');
+    expect(jobs.filter((job: any) => job.kind === 'generate' && job.status === 'completed')).toHaveLength(2);
+  } finally { await page.request.put('/api/settings', { data: originalSettings }); }
+});
+
+test('作者实时查看公开思考与工具过程，默认折叠且正文独立，完成刷新及切视图不泄漏', async ({ page }, testInfo) => {
+  const auth = await (await page.request.get('/api/auth/status')).json();
+  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  const originalSettings = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-activity-provider';
+  expect((await page.request.put('/api/settings', { data: {
+    providers: [{ id: providerId, name: '公开思考与工具验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-public-activities', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
+  } })).ok()).toBeTruthy();
+  try {
+    await createProject(page, 'E2E 作者生成过程');
+    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const base = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    const forked = await page.request.post(`/api/branches/${branchId}/fork`, { data: { baseRevisionId: base.branch.revisionId, name: '没有生成过程的分支' } }); expect(forked.ok()).toBeTruthy(); const emptyBranch = await forked.json();
+    await page.getByRole('button', { name: '开始创作', exact: true }).click();
+    const submitted = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/branches/${branchId}/generate`);
+    await page.getByRole('dialog').getByLabel('章节标题（可选）', { exact: true }).fill('第一章 过程独立');
+    await page.getByRole('dialog').getByRole('button', { name: '开始生成', exact: true }).click();
+    const writingJob = await (await submitted).json(); const process = page.getByRole('region', { name: '生成过程', exact: true });
+    const thinking = process.locator('[data-kind=thinking]');
+    await expect(thinking.first()).toBeVisible();
+    await expect(thinking.first()).toHaveJSProperty('open', false);
+    await expect(thinking.first().locator('.writing-thinking')).not.toBeVisible();
+    await expect(page.locator('.prose')).not.toContainText('AUTHOR_PUBLIC_THINK');
+    await thinking.first().locator('summary').click();
+    await expect(thinking.first().locator('.writing-thinking')).toContainText('AUTHOR_PUBLIC_THINK_1');
+    const searchTool = process.locator('[data-kind=tool]').filter({ hasText: 'search_story' });
+    const failedTool = process.locator('[data-kind=tool]').filter({ hasText: 'read_entity' });
+    await expect(searchTool).toHaveAttribute('data-status', 'completed');
+    await expect(failedTool).toHaveAttribute('data-status', 'failed');
+    await expect(searchTool).toHaveJSProperty('open', false); await expect(failedTool).toHaveJSProperty('open', false);
+    await searchTool.locator('summary').click();
+    await expect(searchTool.getByLabel('工具调用参数', { exact: true })).toContainText('林舟');
+    await expect(searchTool.getByLabel('工具查询结果', { exact: true })).toContainText('entities');
+    await failedTool.locator('summary').click();
+    await expect(failedTool.getByRole('alert')).toContainText('没有此资料');
+    await page.screenshot({ path: testInfo.outputPath('author-activities-desktop.png'), fullPage: true, animations: 'disabled' });
+    await expect(page.locator('.streaming-prose')).toContainText('林舟来到白石城');
+    const partialDownload = page.waitForEvent('download'); await page.getByRole('button', { name: '下载当前正文 TXT', exact: true }).click();
+    const partial = await readFile((await (await partialDownload).path())!, 'utf8');
+    expect(partial).toContain('林舟来到白石城'); expect(partial).not.toContain('AUTHOR_PUBLIC_THINK'); expect(partial).not.toContain('search_story'); expect(partial).not.toContain('ACTIVITY_MISSING_ENTITY');
+    await expect(page.locator('.streaming-manuscript')).toHaveCount(0);
+    await expect(process.locator('[data-kind=tool]')).toHaveCount(2);
+    await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).state.chapters[0]?.status).toBe('ready');
+    const saved = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json(); const chapterId = saved.state.chapters[0].id;
+    const chapter = await (await page.request.get(`/api/branches/${branchId}/chapters/${chapterId}`)).json();
+    expect(chapter.text).toBe('林舟来到白石城，循着石碑上的纹路找到一处旧门。\n\n他握住钥匙，推开了门。');
+    const persisted = await (await page.request.get(`/api/jobs/${writingJob.id}/activities?view=author`)).json(); expect(persisted.filter((activity: any) => activity.kind === 'tool')).toHaveLength(2);
+    expect((await page.request.get(`/api/jobs/${writingJob.id}/activities`)).status()).toBe(403);
+    const requestsBeforeReload = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+    await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 作者生成过程', exact: true }).click(); await expect(page.locator('.prose')).toContainText('林舟来到白石城'); await expect(process).toHaveCount(0);
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+    await expect(process.locator('.writing-activity')).toHaveCount(persisted.length);
+    expect(await process.locator('details').evaluateAll(elements => elements.every(element => !(element as HTMLDetailsElement).open))).toBeTruthy();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await thinking.first().locator('summary').click(); await searchTool.locator('summary').click();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBeTruthy();
+    await page.screenshot({ path: testInfo.outputPath('author-activities-mobile.png'), fullPage: true, animations: 'disabled' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await expect(process).toHaveCount(0); await expect(page.locator('main')).not.toContainText('AUTHOR_PUBLIC_THINK');
+    let release!: () => void; let reached!: () => void; const gate = new Promise<void>(resolve => { release = resolve; }); const entered = new Promise<void>(resolve => { reached = resolve; });
+    const route = `**/api/jobs/${writingJob.id}/activities?view=author`;
+    await page.route(route, async intercepted => { const response = await intercepted.fetch(); reached(); await gate; await intercepted.fulfill({ response }); });
+    try {
+      await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await entered;
+      await page.getByLabel('当前故事线', { exact: true }).selectOption(emptyBranch.branch.id); await expect(process).toHaveCount(0);
+      release(); await expect(page.locator('main')).not.toContainText('AUTHOR_PUBLIC_THINK'); await expect(process).toHaveCount(0);
+    } finally { release(); await page.unroute(route); }
+    await page.getByLabel('当前故事线', { exact: true }).selectOption(branchId); await expect(process.locator('.writing-activity')).toHaveCount(persisted.length);
+    await page.getByRole('button', { name: '新建章节', exact: true }).click(); await expect(process).toHaveCount(0);
+    await page.locator('.chapter-list').getByRole('button', { name: /第一章 过程独立/ }).click(); await expect(process.locator('.writing-activity')).toHaveCount(persisted.length);
+    await tab(page, '任务'); await page.locator('.job-card').filter({ has: page.getByRole('button', { name: '打开生成章节', exact: true }) }).getByRole('button', { name: '打开生成章节', exact: true }).click();
+    await expect(process.locator('.writing-activity')).toHaveCount(persisted.length); await expect(page.locator('.prose')).not.toContainText('AUTHOR_PUBLIC_THINK');
+    const requestsAfterReload = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json(); expect(requestsAfterReload.modelRequests).toBe(requestsBeforeReload.modelRequests);
+    await page.getByRole('button', { name: '继续创作', exact: true }).click();
+    await page.getByRole('dialog').getByLabel('这一次，你想写什么？', { exact: true }).fill('ACTIVITY_HTTP_FAILURE：验收已失败任务的过程记录。');
+    await page.getByRole('dialog').getByRole('button', { name: '开始生成', exact: true }).click();
+    await tab(page, '任务');
+    const failedJob = page.locator('.job-card').filter({ has: page.locator('.status-pill.failed') }); await expect(failedJob).toHaveCount(1);
+    const requestsBeforeHistory = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+    await failedJob.getByRole('button', { name: '查看生成过程与正文', exact: true }).click();
+    await expect(process.locator('[data-kind=thinking]')).toHaveCount(1); await expect(process.locator('[data-kind=tool]')).toHaveCount(2);
+    await expect(process.locator('[data-kind=tool][data-status=failed]')).toHaveCount(1);
+    expect(await process.locator('details').evaluateAll(elements => elements.every(element => !(element as HTMLDetailsElement).open))).toBeTruthy();
+    const requestsAfterHistory = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json(); expect(requestsAfterHistory.modelRequests).toBe(requestsBeforeHistory.modelRequests);
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await expect(process).toHaveCount(0); await expect(page.locator('main')).not.toContainText('AUTHOR_PUBLIC_THINK');
+  } finally { await page.request.put('/api/settings', { data: originalSettings }); }
+});
+
+test('摘要压缩保留各章原摘要，候选取消不生效，作者确认后保存；主要角色可编辑', async ({ page }, testInfo) => {
+  const auth = await (await page.request.get('/api/auth/status')).json();
+  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  const originalSettings = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-summary-provider';
+  expect((await page.request.put('/api/settings', { data: {
+    providers: [{ id: providerId, name: '摘要确认验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
+  } })).ok()).toBeTruthy();
+  try {
+    await createProject(page, 'E2E 摘要确认'); await importNovel(page);
+    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const initial = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    await tab(page, '剧情与伏笔');
+    await page.getByRole('button', { name: '生成压缩摘要候选', exact: true }).click();
+    const modal = page.getByRole('dialog');
+    await expect(modal.getByLabel('压缩摘要', { exact: true })).toHaveValue('林舟调查白石城。');
+    await page.screenshot({ path: testInfo.outputPath('summary-confirmation-desktop.png'), animations: 'disabled' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+    await page.screenshot({ path: testInfo.outputPath('summary-confirmation-mobile.png'), animations: 'disabled' });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    expect((await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).state.outline.summaryCompression).toBeUndefined();
+    await modal.getByRole('button', { name: '取消', exact: true }).click();
+    await page.getByRole('button', { name: '查看最近压缩候选', exact: true }).click();
+    await modal.getByLabel('压缩摘要', { exact: true }).fill('林舟留在白石城。');
+    await modal.getByRole('button', { name: '确认使用压缩摘要', exact: true }).click();
+    await expect(modal).toHaveCount(0);
+    const confirmed = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    expect(confirmed.state.outline.summaryCompression).toMatchObject({ text: '林舟留在白石城。', chapterIds: initial.state.chapters.map((chapter: any) => chapter.id) });
+    expect(confirmed.state.chapters.map((chapter: any) => chapter.summary)).toEqual(initial.state.chapters.map((chapter: any) => chapter.summary));
+    await tab(page, '世界资料'); await page.getByRole('button', { name: '编辑 林舟', exact: true }).click();
+    await expect(modal.getByLabel('主要角色，写作时始终放入上下文', { exact: true })).toBeChecked();
+    await modal.getByLabel('主要角色，写作时始终放入上下文', { exact: true }).uncheck();
+    await modal.getByRole('button', { name: '保存资料', exact: true }).click();
+    await expect(modal).toHaveCount(0);
+    const saved = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    expect(saved.state.entities.find((entity: any) => entity.name === '林舟').isMain).toBe(false);
+    const settings = await (await page.request.get('/api/settings')).json();
+    expect((await page.request.put('/api/settings', { data: { ...settings, planningModel: 'e2e-noncompact-summary' } })).ok()).toBeTruthy();
+    await tab(page, '剧情与伏笔');
+    await page.getByRole('button', { name: '生成压缩摘要候选', exact: true }).click();
+    await tab(page, '任务');
+    const failed = page.locator('.job-card').filter({ has: page.locator('.status-pill.failed') });
+    await expect(failed).toHaveCount(1);
+    await failed.getByRole('button', { name: '模型输出 / 手工修正', exact: true }).click();
+    await expect(modal.getByRole('textbox', { name: '压缩摘要候选', exact: true })).toContainText('林舟');
+    await expect(modal.getByRole('textbox', { name: '规划章节标题', exact: true })).toHaveCount(0);
+    await modal.getByRole('textbox', { name: '压缩摘要候选', exact: true }).fill('林舟追查城中线索。');
+    const requestsBeforeRepair = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+    await modal.getByRole('button', { name: '保存并校验应用', exact: true }).click();
+    await expect(modal.getByRole('status')).toContainText('候选已修复');
+    const requestsAfterRepair = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+    expect(requestsAfterRepair.modelRequests).toBe(requestsBeforeRepair.modelRequests);
+    expect((await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).state.outline.summaryCompression.text).toBe('林舟留在白石城。');
+    await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+    await tab(page, '剧情与伏笔');
+    await page.getByRole('button', { name: '查看最近压缩候选', exact: true }).click();
+    await expect(modal.getByLabel('压缩摘要', { exact: true })).toHaveValue('林舟追查城中线索。');
+    await modal.getByRole('button', { name: '取消', exact: true }).click();
+  } finally { await page.request.put('/api/settings', { data: originalSettings }); }
 });
 
 test('手动编辑正文后自动整理资料，并保留用户对人物的修正', async ({ page }, testInfo) => {
@@ -175,7 +399,7 @@ test('手动编辑正文后自动整理资料，并保留用户对人物的修�
 test('导入时确认目录，后台整理完成后从资料跳回原文段落', async ({ page }) => {
   await createProject(page, 'E2E 导入小说');
   await importNovel(page);
-  await tab(page, '大纲与伏笔');
+  await tab(page, '剧情与伏笔');
   await expect(page.locator('.plot-summary-list .plot-summary-card')).toHaveCount(2);
   await page.locator('.plot-summary-card').first().locator('summary').click();
   await expect(page.locator('.plot-summary-card').first().locator('p')).toContainText('林舟');
@@ -202,7 +426,7 @@ test('从指定章节建立分支，历史回退同时撤回新资料且主线�
   await modal.getByRole('button', { name: '建立故事线', exact: true }).click();
   await expect(page.getByLabel('当前故事线', { exact: true })).toHaveValue(/.+/);
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(1);
-  await tab(page, '大纲与伏笔');
+  await tab(page, '剧情与伏笔');
   await expect(page.locator('.plot-summary-list .plot-summary-card')).toHaveCount(1);
   await tab(page, '世界资料');
   await page.getByRole('button', { name: '新增资料', exact: true }).click();
@@ -220,7 +444,7 @@ test('从指定章节建立分支，历史回退同时撤回新资料且主线�
   await expect(page.getByRole('heading', { name: '仅存在于修订线的角色', exact: true })).toHaveCount(0);
   await page.getByLabel('当前故事线', { exact: true }).selectOption({ label: '主线' });
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
-  await tab(page, '大纲与伏笔');
+  await tab(page, '剧情与伏笔');
   await expect(page.locator('.plot-summary-list .plot-summary-card')).toHaveCount(2);
 });
 
@@ -265,7 +489,7 @@ test('其他设备更新版本后保留编辑草稿，冲突保存不会覆盖�
   await page.getByLabel('章节正文', { exact: true }).fill(draft);
   const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
   const view = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
-  const changed = await page.request.put(`/api/branches/${branchId}/outline`, { data: { baseRevisionId: view.branch.revisionId, outline: { ...view.state.outline, coarse: '另一台设备刚刚保存的大纲。' } } });
+  const changed = await page.request.put(`/api/branches/${branchId}/outline`, { data: { baseRevisionId: view.branch.revisionId, outline: { ...view.state.outline, worldview: '另一台设备刚刚保存的世界观。' } } });
   expect(changed.ok()).toBeTruthy();
   // Observe one actual polling round instead of relying on an arbitrary sleep.
   await page.waitForResponse(response => response.url().includes('/api/jobs?projectId='));
@@ -658,7 +882,7 @@ test('三任务使用同一模型时参数互不影响，切换恢复且清空�
   await page.goto('/'); await page.getByRole('button', { name: '供应商设置', exact: true }).click();
   let modal = page.getByRole('dialog');
   const writing = modal.getByRole('region', { name: '正文写作模型设置', exact: true });
-  const planning = modal.getByRole('region', { name: '大纲规划模型设置', exact: true });
+  const planning = modal.getByRole('region', { name: '剧情规划模型设置', exact: true });
   const extraction = modal.getByRole('region', { name: '资料提取模型设置', exact: true });
   await expect(modal.locator('.provider-card .provider-parameters')).toHaveCount(0);
   for (const role of [writing, planning, extraction]) await role.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
@@ -724,7 +948,7 @@ test('三任务使用同一模型时参数互不影响，切换恢复且清空�
   await expect(extraction.getByLabel(/^温度（temperature）/)).toHaveValue('0.2');
   for (const [task, role, temperature, maxTokens, effort] of [[planning, 'planning', 0.3, 2048, 'low'], [extraction, 'extraction', 0.2, 16384, 'high']] as const) {
     const testing = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/settings/test');
-    await task.getByRole('button', { name: role === 'planning' ? '大纲规划保存并测试连接' : '资料提取保存并测试连接', exact: true }).click();
+    await task.getByRole('button', { name: role === 'planning' ? '剧情规划保存并测试连接' : '资料提取保存并测试连接', exact: true }).click();
     const response = await testing; const captured = await response.json();
     expect(response.request().postDataJSON().role).toBe(role);
     expect(captured.ok).toBe(true);
