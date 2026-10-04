@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Settings, ProviderConnection } from '../shared/types.js';
 import { connectionOnly, normalizeModelSettings } from '../shared/model-settings.js';
+import { normalizePromptTemplates } from '../shared/prompt-templates.js';
 
 const scrypt = promisify(scryptCallback);
 export async function hashPassword(password: string) {
@@ -20,9 +21,9 @@ export async function verifyPassword(password: string, stored: string) {
   return hash.length === expected.length && timingSafeEqual(hash, expected);
 }
 export const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
-export const defaultSettings = (): Settings => ({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '', writingModel: '', planningModel: '', extractionModel: '', modelParameters: [] });
+export const defaultSettings = (): Settings => ({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '', writingModel: '', planningModel: '', extractionModel: '', modelParameters: [], promptTemplates: normalizePromptTemplates() });
 export function normalizeSettings(settings: Settings): Settings {
-  return normalizeModelSettings(settings);
+  return { ...normalizeModelSettings(settings), promptTemplates: normalizePromptTemplates(settings.promptTemplates) };
 }
 
 export class SettingsStore {

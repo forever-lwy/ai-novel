@@ -166,19 +166,21 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
   const options = providerWireOptions(config);
   const stream = Boolean(request.onTextDelta) || (config.stream ?? false);
   const tools = request.tools ?? [];
+  const messages = request.messages?.length ? request.messages : undefined;
+  const system = messages ? messages.filter(message => message.role === 'system').map(message => message.content).join('\n\n') : request.system;
   if (stream) headers.Accept = 'text/event-stream';
   switch (config.protocol) {
     case 'openai-chat':
       if (key) headers.Authorization = `Bearer ${key}`;
       return { url: endpoint(config.baseUrl, 'chat/completions'), headers, body: {
-        model: config.model, messages: [{ role: 'system', content: request.system }, { role: 'user', content: request.prompt }],
+        model: config.model, messages: messages ? messages.map(message => ({ ...message })) : [{ role: 'system', content: request.system }, { role: 'user', content: request.prompt }],
         ...(tools.length ? { tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) } : {}),
         [config.openaiMaxTokensField ?? 'max_tokens']: tokens, stream, ...(stream ? { stream_options: { include_usage: true } } : {}), ...options,
       } };
     case 'openai-responses':
       if (key) headers.Authorization = `Bearer ${key}`;
       return { url: endpoint(config.baseUrl, 'responses'), headers, body: {
-        model: config.model, instructions: request.system, input: request.prompt, max_output_tokens: tokens, stream, store: false, ...options,
+        model: config.model, ...(messages ? { input: messages.map(message => ({ ...message })) } : { instructions: request.system, input: request.prompt }), max_output_tokens: tokens, stream, store: false, ...options,
         ...(tools.length ? { tools: tools.map(tool => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters, strict: false })) } : {}),
       } };
     case 'gemini':
@@ -186,7 +188,8 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
       const url = endpoint(config.baseUrl, `models/${encodeURIComponent(config.model.replace(/^models\//, ''))}:${stream ? 'streamGenerateContent' : 'generateContent'}`);
       if (stream) url.searchParams.set('alt', 'sse');
       return { url, headers, body: {
-        systemInstruction: { parts: [{ text: request.system }] }, contents: [{ role: 'user', parts: [{ text: request.prompt }] }],
+        ...(!messages || system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+        contents: messages ? messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'model' : 'user', parts: [{ text: message.content }] })) : [{ role: 'user', parts: [{ text: request.prompt }] }],
         generationConfig: { maxOutputTokens: tokens, ...options },
         ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })) }] } : {}),
       } };
@@ -194,7 +197,7 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
       if (key) headers['x-api-key'] = key;
       headers['anthropic-version'] = '2023-06-01';
       return { url: endpoint(config.baseUrl, 'messages'), headers, body: {
-        model: config.model, system: request.system, messages: [{ role: 'user', content: request.prompt }], max_tokens: tokens, stream, ...options,
+        model: config.model, ...(!messages || system ? { system } : {}), messages: messages ? messages.filter(message => message.role !== 'system').map(message => ({ ...message })) : [{ role: 'user', content: request.prompt }], max_tokens: tokens, stream, ...options,
         ...(tools.length ? { tools: tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })) } : {}),
       } };
     default: throw new Error('不支持的模型接口协议。');
@@ -664,8 +667,19 @@ export function parseStructuredText<T>(text: string, validate: (value: unknown) 
   }
 }
 
+const STRUCTURED_OUTPUT_INSTRUCTION = '本次返回必须是符合要求的单个 JSON 对象。不要输出解释文字或 Markdown。';
+
+/** Normalize before budgeting; repeated normalization never duplicates the output constraint. */
+export function structuredRequest(request: ModelRequest): ModelRequest {
+  if (request.messages?.length) {
+    if (request.messages.some(message => message.role === 'system' && message.content.includes(STRUCTURED_OUTPUT_INSTRUCTION))) return request;
+    return { ...request, messages: [...request.messages, { role: 'system', content: STRUCTURED_OUTPUT_INSTRUCTION }] };
+  }
+  return request.system.includes(STRUCTURED_OUTPUT_INSTRUCTION) ? request : { ...request, system: `${request.system}\n\n${STRUCTURED_OUTPUT_INSTRUCTION}` };
+}
+
 export async function generateStructured<T>(config: ProviderConfig, request: ModelRequest, validate: (value: unknown) => T): Promise<{ value: T; inputTokens: number; outputTokens: number }> {
-  const result = await generateText(config, { ...request, system: `${request.system}\n\n本次返回必须是符合要求的单个 JSON 对象。不要输出解释文字或 Markdown。` });
+  const result = await generateText(config, structuredRequest(request));
   try { return { value: parseStructuredText(result.text, validate), inputTokens: result.inputTokens, outputTokens: result.outputTokens }; }
   catch (error) {
     if (error instanceof ModelOutputError) throw new ModelOutputError(redactPayload(error.message, config.apiKey), result, error.issues?.map(issue => ({ ...issue, path: redactPayload(issue.path, config.apiKey), message: redactPayload(issue.message, config.apiKey), ...(issue.quote !== undefined ? { quote: redactPayload(issue.quote, config.apiKey) } : {}), ...(issue.sourceText !== undefined ? { sourceText: redactPayload(issue.sourceText, config.apiKey) } : {}) })));

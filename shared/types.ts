@@ -40,7 +40,12 @@ export interface ProviderConfig extends ModelParameters {
 /** Generation fields and model are accepted only when upgrading older settings. */
 export type ProviderConnection = Omit<ProviderConfig, keyof ModelParameters | 'model'> & Partial<ModelParameters> & { model?: string };
 export interface ProviderModel { id: string; name?: string }
-export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[] }
+export type PromptTask = 'writing' | 'planning' | 'extraction' | 'compression';
+export interface PromptMessage { role: 'system' | 'user' | 'assistant'; content: string }
+export interface PromptBlock extends PromptMessage { id: string; name: string; enabled: boolean; modes?: Mode[] }
+export interface PromptPreset { id: string; name: string; blocks: PromptBlock[]; variables?: Record<string, string> }
+export interface PromptTemplateSettings { presets: Record<PromptTask, PromptPreset[]>; selected: Record<PromptTask, string> }
+export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings }
 export type JobKind = 'import' | 'extract' | 'generate' | 'plan';
 export type JobStatus = 'queued' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled' | 'stale';
 export interface Job { id: string; projectId: string; branchId: string; kind: JobKind; status: JobStatus; baseRevisionId: string; progress: number; total: number; message: string; error?: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean; createdAt: string; updatedAt: string; payload: Record<string, unknown>; generatedChapterId?: string; title?: string; purpose?: 'compress-summary'; generationInput?: Pick<GenerateInput, 'mode' | 'instruction' | 'maxWords' | 'title'> }
@@ -60,7 +65,7 @@ export interface ModelRequestSnapshot { protocol: ProviderProtocol; model: strin
 export interface ModelTransportDiagnostics { elapsedMs: number; responseBytes: number; responseHeaders: Record<string, string>; transport: 'http' | 'network_error' | 'timeout' | 'cancelled' | 'interrupted'; errorCode?: string; modelOutcome?: 'completed' | 'blocked' | 'truncated' | 'empty' | 'error'; finishReason?: string; promptBlockReason?: string }
 export interface CapturedModelResponse { rawResponse: string; text: string; inputTokens: number; outputTokens: number; httpStatus?: number; incomplete?: boolean; request?: ModelRequestSnapshot; diagnostics?: ModelTransportDiagnostics }
 export interface ModelTool { name: string; description: string; parameters: Record<string, unknown>; execute: (arguments_: Record<string, unknown>) => Promise<unknown> | unknown }
-export interface ModelRequest { system: string; prompt: string; signal?: AbortSignal; maxOutputTokens?: number; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[] }
+export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; signal?: AbortSignal; maxOutputTokens?: number; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[] }
 export type OutputStage = 'planning' | 'writing' | 'extraction';
 export interface OutputIssue { path: string; message: string; paragraph?: number; quote?: string; sourceText?: string }
 export interface ModelOutputRecord extends CapturedModelResponse {

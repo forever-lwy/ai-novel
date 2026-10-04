@@ -74,8 +74,8 @@ const modelServer = createServer(async (req, res) => {
       setTimeout(() => { if (res.destroyed) return; res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Deliberate local HTTP 500 fixture' } })); }, 100);
       return;
     }
-    const system = body.messages?.find(message => message.role === 'system')?.content || '';
-    const prompt = body.messages?.find(message => message.role === 'user')?.content || '';
+    const system = body.messages?.filter(message => message.role === 'system').map(message => message.content).join('\n') || '';
+    const prompt = body.messages?.filter(message => message.role === 'user').map(message => message.content).join('\n') || '';
     if (body.model === 'e2e-public-activities') {
       const queried = body.messages?.some(message => message.role === 'tool');
       if (queried && prompt.includes('ACTIVITY_HTTP_FAILURE')) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Deliberate activity-history failure' } })); return; }

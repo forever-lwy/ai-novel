@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+import { defaultPromptTemplates } from '../shared/prompt-templates';
 
 // These tests exercise the real UI/server against a local HTTP model fixture.
 // Passing them is not evidence of real-provider acceptance.
@@ -65,14 +66,15 @@ test('首次设置密码，一个供应商自动获取模型，三个任务各�
   await page.getByLabel('确认密码', { exact: true }).fill(password);
   await page.getByRole('button', { name: '创建私人工作台', exact: true }).click();
   await expect(page.getByRole('heading', { name: /我的作品/ })).toBeVisible();
-  await page.getByRole('button', { name: '供应商设置', exact: true }).click();
-  const modal = page.getByRole('dialog');
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  const modal = page.getByTestId('settings-page');
   await modal.getByRole('button', { name: '添加供应商连接', exact: true }).click();
   await modal.getByLabel('供应商名称', { exact: true }).fill('本地浏览器验收模型');
   await modal.getByLabel('服务地址', { exact: true }).fill(mockUrl);
   await modal.getByLabel(/API 密钥/).fill('e2e-not-a-real-api-key');
   let listRequests = 0;
   page.on('request', request => { if (new URL(request.url()).pathname === '/api/settings/models') listRequests++; });
+  await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   await modal.getByRole('combobox', { name: '正文写作供应商', exact: true }).selectOption({ index: 1 });
   await expect(modal.getByRole('combobox', { name: '正文写作上游模型', exact: true })).toBeEnabled();
   await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('');
@@ -91,6 +93,7 @@ test('首次设置密码，一个供应商自动获取模型，三个任务各�
   await page.setViewportSize({ width: 1440, height: 1000 });
   await modal.getByRole('button', { name: '正文写作保存并测试连接', exact: true }).click();
   await expect(modal.getByRole('status')).toContainText('服务已返回有效文字');
+  await modal.getByRole('button', { name: '供应商连接', exact: true }).click();
   await expect(modal.getByLabel(/API 密钥/)).toHaveValue('');
   const response = await page.request.get('/api/settings');
   const saved = await response.json();
@@ -98,7 +101,128 @@ test('首次设置密码，一个供应商自动获取模型，三个任务各�
   expect(saved.providers).toHaveLength(1);
   expect(saved.providers[0].model).toBeUndefined();
   expect(saved).toMatchObject({ writingModel: 'e2e-fixture', planningModel: 'e2e-planning', extractionModel: 'e2e-custom-extraction' });
-  await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+  await modal.getByRole('button', { name: '返回作品', exact: true }).click();
+});
+
+test('独立设置页面切换分类保留草稿，保存检查隐藏字段，返回可取消或放弃并保留已保存配置', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  const providerId = 'e2e-settings-navigation';
+  try {
+    expect((await page.request.put('/api/settings', { data: {
+      ...previous,
+      providers: [{ id: providerId, name: '设置页面供应商', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }],
+      writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-custom-extraction',
+      modelParameters: [], promptTemplates: defaultPromptTemplates(),
+    } })).ok()).toBeTruthy();
+    const before = await (await page.request.get('/api/settings')).json();
+    await page.goto('/');
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settings = page.getByTestId('settings-page');
+    const providers = settings.getByRole('region', { name: '供应商连接设置', exact: true });
+    const models = settings.getByRole('region', { name: '任务模型设置', exact: true });
+    const prompts = settings.getByRole('region', { name: '提示词编排设置', exact: true });
+    const panel = settings.getByTestId('prompt-templates-panel');
+    await expect(settings).toBeVisible();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: /我的作品/ })).toBeHidden();
+    await expect(providers).toBeVisible();
+    await expect(models).toBeHidden();
+    await expect(prompts).toBeHidden();
+    await page.screenshot({ path: testInfo.outputPath('settings-page-desktop.png'), animations: 'disabled' });
+    await providers.getByLabel('供应商名称', { exact: true }).fill('分类切换保留的供应商草稿');
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await expect(providers).toBeHidden();
+    await expect(models).toBeVisible();
+    await expect(prompts).toBeHidden();
+    await models.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-draft-writing');
+    const writing = models.getByRole('region', { name: '正文写作模型设置', exact: true });
+    await writing.getByLabel('单次最大输出 tokens', { exact: true }).fill('');
+    await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    await expect(providers).toBeHidden();
+    await expect(models).toBeHidden();
+    await expect(prompts).toBeVisible();
+    await panel.getByLabel('提示词预设名称', { exact: true }).fill('分类切换保留的提示词草稿');
+    let saves = 0;
+    page.on('request', request => { if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/settings') saves++; });
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(models).toBeVisible();
+    await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('');
+    await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toBeFocused();
+    expect(saves).toBe(0);
+    expect(await (await page.request.get('/api/settings')).json()).toEqual(before);
+    await writing.getByLabel('单次最大输出 tokens', { exact: true }).fill('4096');
+    await expect(models.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('e2e-draft-writing');
+    await settings.getByRole('button', { name: '供应商连接', exact: true }).click();
+    await expect(providers.getByLabel('供应商名称', { exact: true })).toHaveValue('分类切换保留的供应商草稿');
+    await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('分类切换保留的提示词草稿');
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(settings.getByRole('status')).toContainText('设置已保存');
+    expect(saves).toBe(1);
+    const saved = await (await page.request.get('/api/settings')).json();
+    expect(saved.providers[0].name).toBe('分类切换保留的供应商草稿');
+    expect(saved.writingModel).toBe('e2e-draft-writing');
+    expect(saved.promptTemplates.presets.writing[0].name).toBe('分类切换保留的提示词草稿');
+    await settings.getByRole('button', { name: '返回作品', exact: true }).click();
+    await expect(settings).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: /我的作品/ })).toBeVisible();
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await expect(providers.getByLabel('供应商名称', { exact: true })).toHaveValue('分类切换保留的供应商草稿');
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+    await page.screenshot({ path: testInfo.outputPath('settings-page-mobile.png'), animations: 'disabled' });
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await expect(models.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('e2e-draft-writing');
+    await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('分类切换保留的提示词草稿');
+    await panel.getByLabel('提示词预设名称', { exact: true }).fill('未保存，取消返回时继续保留');
+    const cancelled = page.waitForEvent('dialog');
+    const cancelBack = settings.getByRole('button', { name: '返回作品', exact: true }).click();
+    const cancelDialog = await cancelled;
+    expect(cancelDialog.type()).toBe('confirm');
+    expect(cancelDialog.message()).toContain('尚未保存');
+    await cancelDialog.dismiss(); await cancelBack;
+    await expect(settings).toBeVisible();
+    await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('未保存，取消返回时继续保留');
+    const discarded = page.waitForEvent('dialog');
+    const discardBack = settings.getByRole('button', { name: '返回作品', exact: true }).click();
+    await (await discarded).accept(); await discardBack;
+    await expect(settings).toHaveCount(0);
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('分类切换保留的提示词草稿');
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('从工作台打开独立设置并返回，保留作者视图、当前章节和未保存正文', async ({ page }) => {
+  await createProject(page, 'E2E 设置返回保留工作台');
+  await page.getByRole('button', { name: '手动写第一章', exact: true }).click();
+  await page.getByLabel('章节标题', { exact: true }).fill('第一章 设置前的章节');
+  await page.getByLabel('章节正文', { exact: true }).fill('林舟来到白石城，准备寻找旧钥匙。');
+  await page.getByRole('button', { name: '保存正文', exact: true }).click();
+  await completedJobs(page, 1);
+  await tab(page, '正文');
+  const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  const draft = '林舟来到白石城。\n\nSETTINGS_RETURN_DRAFT：返回设置后仍保留的正文。';
+  await page.getByLabel('章节标题', { exact: true }).fill('第一章 尚未保存的标题');
+  await page.getByLabel('章节正文', { exact: true }).fill(draft);
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  const settings = page.getByTestId('settings-page');
+  await expect(settings).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.workspace-project-title')).toBeHidden();
+  await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+  await settings.getByRole('button', { name: '返回作品', exact: true }).click();
+  await expect(settings).toHaveCount(0);
+  await expect(page.locator('.workspace-project-title')).toContainText('E2E 设置返回保留工作台');
+  await expect(page.getByRole('button', { name: '返回阅读视图', exact: true })).toBeVisible();
+  await expect(page.getByLabel('当前故事线', { exact: true })).toHaveValue(branchId);
+  await expect(page.locator('.chapter-list .chapter-item.selected')).toContainText('第一章 设置前的章节');
+  await expect(page.getByLabel('章节标题', { exact: true })).toHaveValue('第一章 尚未保存的标题');
+  await expect(page.getByLabel('章节正文', { exact: true })).toHaveValue(draft);
+  await expect(page.locator('.draft-badge')).toHaveText('未保存');
+  await expect(page.getByRole('button', { name: '保存正文', exact: true })).toBeEnabled();
 });
 
 test('原创生成保存正文、四章预期规划及隐藏伏笔，阅读接口不返回作者秘密', async ({ page }, testInfo) => {
@@ -724,15 +848,18 @@ test('模型参数与诊断：保留零值、协议专属思考设置，流式�
     providers: [{ id: providerId, name: '参数诊断模拟', protocol: 'openai-chat', baseUrl: mockUrl, model: 'e2e-fixture', apiKey: 'e2e-private-parameter-key', maxOutputTokens: 8192, contextTokens: 64000 }],
     writingProviderId: providerId, planningProviderId: providerId, extractionProviderId: providerId,
   } })).ok()).toBeTruthy();
-  await page.goto('/'); await page.getByRole('button', { name: '供应商设置', exact: true }).click();
-  const modal = page.getByRole('dialog');
+  await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+  const modal = page.getByTestId('settings-page');
+  await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   const writing = modal.getByRole('region', { name: '正文写作模型设置', exact: true });
   await writing.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
   await writing.getByLabel(/^温度（temperature）/).fill('0'); await writing.getByLabel(/^Top P/).fill('0.8');
   await writing.getByLabel(/^随机种子（seed）/).fill('0'); await writing.getByLabel(/^请求超时（秒）/).fill('240');
   await writing.getByLabel(/^返回方式/).selectOption('true');
+  await modal.getByRole('button', { name: '供应商连接', exact: true }).click();
   await modal.getByLabel('接口协议', { exact: true }).selectOption('gemini');
   await expect(modal.getByLabel('服务地址', { exact: true })).toHaveValue(mockUrl);
+  await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   await writing.getByLabel(/^Gemini 思考方式/).selectOption('level'); await writing.getByLabel(/^Gemini 思考等级/).selectOption('low');
   await writing.getByLabel('Gemini 返回思考摘要', { exact: true }).selectOption('true');
   await modal.getByRole('button', { name: '保存设置', exact: true }).click();
@@ -740,7 +867,9 @@ test('模型参数与诊断：保留零值、协议专属思考设置，流式�
   const geminiSaved = await (await page.request.get('/api/settings')).json();
   expect(geminiSaved.modelParameters.find((value: any) => value.role === 'writing' && value.providerId === providerId && value.model === 'e2e-fixture')).toMatchObject({ temperature: 0, seed: 0, stream: true, timeoutMs: 240000, geminiThinking: { mode: 'level', level: 'low' }, geminiIncludeThoughts: true });
   expect(geminiSaved.providers[0]).not.toHaveProperty('temperature');
+  await modal.getByRole('button', { name: '供应商连接', exact: true }).click();
   await modal.getByLabel('接口协议', { exact: true }).selectOption('openai-chat');
+  await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   await writing.getByLabel(/^思考等级（OpenAI）/).selectOption('low');
   await writing.getByLabel(/^输出上限字段（Chat）/).selectOption('max_completion_tokens');
   const tested = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/settings/test');
@@ -773,7 +902,9 @@ test('模型参数与诊断：保留零值、协议专属思考设置，流式�
   await expect(modal).not.toContainText('e2e-private-parameter-key');
   await modal.locator('.request-diagnostics .transport-metadata').scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('model-request-error.png'), animations: 'disabled' });
+  await modal.getByRole('button', { name: '供应商连接', exact: true }).click();
   await modal.getByLabel('接口协议', { exact: true }).selectOption('gemini');
+  await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   await modal.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-fixture');
   await expect(writing.getByLabel('Gemini 返回思考摘要', { exact: true })).toHaveValue('true');
   await modal.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-gemini-blocked');
@@ -807,8 +938,9 @@ test('模型列表失败仍可自定义，刷新后保留自定义名并使用�
   } })).ok()).toBeTruthy();
   const route = '**/api/settings/models';
   await page.route(route, intercepted => intercepted.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: '供应商模型目录暂不可用' }) }));
-  await page.goto('/'); await page.getByRole('button', { name: '供应商设置', exact: true }).click();
-  const modal = page.getByRole('dialog');
+  await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+  const modal = page.getByTestId('settings-page');
+  await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   await expect(modal.locator('.model-list-error')).toContainText('供应商模型目录暂不可用');
   await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('before-custom');
   await modal.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-private-custom-model');
@@ -850,8 +982,9 @@ test('切换供应商清空任务模型，迟到的列表和改地址前的列�
     }
   });
   try {
-    await page.goto('/'); await page.getByRole('button', { name: '供应商设置', exact: true }).click();
-    const modal = page.getByRole('dialog');
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const modal = page.getByTestId('settings-page');
+    await modal.getByRole('button', { name: '任务模型', exact: true }).click();
     await entered;
     await modal.getByRole('combobox', { name: '正文写作供应商', exact: true }).selectOption(newId);
     await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('');
@@ -861,7 +994,9 @@ test('切换供应商清空任务模型，迟到的列表和改地址前的列�
     release(); await delivered;
     await expect(models.locator('option')).toHaveText(['选择上游模型', 'new-provider-model']);
     await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('new-provider-model');
+    await modal.getByRole('button', { name: '供应商连接', exact: true }).click();
     await modal.getByLabel('服务地址', { exact: true }).nth(1).fill(mockUrl + '/changed');
+    await modal.getByRole('button', { name: '任务模型', exact: true }).click();
     await expect(models.locator('option')).toHaveText(['选择上游模型', 'changed-address-model']);
     await modal.getByLabel('正文写作模型名称', { exact: true }).fill('changed-custom-model');
     await modal.getByRole('button', { name: '保存设置', exact: true }).click();
@@ -879,8 +1014,9 @@ test('三任务使用同一模型时参数互不影响，切换恢复且清空�
     providers: [providerId, otherId].map((id, index) => ({ id, name: index ? '另一个供应商' : '模型参数模拟', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' })),
     writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-fixture', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
   } })).ok()).toBeTruthy();
-  await page.goto('/'); await page.getByRole('button', { name: '供应商设置', exact: true }).click();
-  let modal = page.getByRole('dialog');
+  await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+  let modal = page.getByTestId('settings-page');
+  await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   const writing = modal.getByRole('region', { name: '正文写作模型设置', exact: true });
   const planning = modal.getByRole('region', { name: '剧情规划模型设置', exact: true });
   const extraction = modal.getByRole('region', { name: '资料提取模型设置', exact: true });
@@ -938,9 +1074,10 @@ test('三任务使用同一模型时参数互不影响，切换恢复且清空�
   expect((await tested).request().postDataJSON().role).toBe('writing');
   expect(JSON.parse(result.capture.request.body)).toMatchObject({ model: 'e2e-fixture', temperature: 0.6, max_tokens: 8192 });
   expect(JSON.parse(result.capture.request.body)).not.toHaveProperty('top_p');
-  await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
-  await page.getByRole('button', { name: '供应商设置', exact: true }).click();
-  modal = page.getByRole('dialog');
+  await modal.getByRole('button', { name: '返回作品', exact: true }).click();
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  modal = page.getByTestId('settings-page');
+  await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   await writing.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
   await expect(writing.getByLabel(/^Top P/)).toHaveValue('');
   await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('0.6');
@@ -985,8 +1122,9 @@ test('统一上下文限制保留 64000 输出，不再显示或发送任务累�
     writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
   } })).ok()).toBeTruthy();
   await page.goto('/');
-  await page.getByRole('button', { name: '供应商设置', exact: true }).click();
-  const modal = page.getByRole('dialog');
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  const modal = page.getByTestId('settings-page');
+  await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   await expect(modal.getByLabel('每项任务用量上限（tokens）', { exact: true })).toHaveCount(0);
   const extraction = modal.getByRole('region', { name: '资料提取模型设置', exact: true });
   await extraction.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
@@ -1001,7 +1139,7 @@ test('统一上下文限制保留 64000 输出，不再显示或发送任务累�
   expect(saved.modelParameters.find((value: any) => value.role === 'extraction' && value.providerId === providerId && value.model === 'e2e-fixture')).toMatchObject({ maxOutputTokens: 64000, contextTokens: 512000 });
   expect(saved.modelParameters.find((value: any) => value.role === 'writing' && value.providerId === providerId && value.model === 'e2e-fixture')).toMatchObject({ maxOutputTokens: 4096, contextTokens: 64000 });
   expect(saved.providers[0]).not.toHaveProperty('maxOutputTokens');
-  await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+  await modal.getByRole('button', { name: '返回作品', exact: true }).click();
 
   await createProject(page, 'E2E 完整单次输出');
   const before = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
@@ -1103,4 +1241,94 @@ test('书架删除需确认，取消和失败保留小说，处理中不能关�
   await page.reload();
   await expect(page.getByRole('heading', { name: '你的下一部故事，从这里开始', exact: true })).toBeVisible();
   expect(await (await page.request.get('/api/projects')).json()).toEqual([]);
+});
+
+
+test('任务提示词支持编辑编排、变量预览、独立导入导出和保存恢复', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  try {
+    await page.request.put('/api/settings', { data: { ...previous, promptTemplates: defaultPromptTemplates() } });
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const modal = page.getByTestId('settings-page'); const panel = modal.getByTestId('prompt-templates-panel');
+    await modal.getByRole('button', { name: '提示词编排', exact: true }).click();
+    await panel.getByRole('button', { name: '复制预设', exact: true }).click();
+    await panel.getByLabel('提示词预设名称', { exact: true }).fill('我的写作风格');
+    await panel.getByLabel('提示词块 1 内容', { exact: true }).fill('使用风格：{{style}}，作品：{{projectTitle}}。');
+    await expect(panel).toContainText('此任务没有变量 {{style}}');
+    await panel.locator('summary').filter({ hasText: '可用变量与自定义变量' }).click();
+    await panel.getByRole('button', { name: '添加自定义变量', exact: true }).click();
+    await panel.getByLabel('自定义变量 1 名称', { exact: true }).fill('style');
+    await panel.getByLabel('自定义变量 1 值', { exact: true }).fill('克制叙述，重视动作细节');
+    await expect(panel).not.toContainText('此任务没有变量');
+    await panel.locator('summary').filter({ hasText: '编译预览 · 使用示例素材' }).click();
+    await expect(panel.getByLabel('提示词编译预览', { exact: true })).toContainText('使用风格：克制叙述，重视动作细节，作品：雾港来信。');
+    await panel.getByLabel('提示词块 1 角色', { exact: true }).selectOption('assistant');
+    await panel.getByRole('button', { name: '下移提示词块 1', exact: true }).click();
+    const movedBlock = panel.getByTestId('prompt-block').nth(1);
+    if (await movedBlock.getAttribute('open') === null) await movedBlock.locator('summary').click();
+    await expect(panel.getByLabel('提示词块 2 角色', { exact: true })).toHaveValue('assistant');
+    await panel.getByLabel('启用提示词块 2', { exact: true }).uncheck();
+    await expect(panel.getByLabel('提示词编译预览', { exact: true })).not.toContainText('使用风格：');
+    await panel.getByLabel('启用提示词块 2', { exact: true }).check();
+    await panel.getByLabel('提示词块 2 所有写作模式', { exact: true }).uncheck();
+    await panel.locator('summary').filter({ hasText: '编辑示例变量' }).click();
+    await panel.getByLabel('示例变量 mode', { exact: true }).selectOption('rewrite');
+    await expect(panel.getByLabel('提示词编译预览', { exact: true })).not.toContainText('使用风格：');
+    await panel.getByLabel('示例变量 mode', { exact: true }).selectOption('original');
+    await expect(panel.getByLabel('提示词编译预览', { exact: true })).toContainText('克制叙述');
+    await panel.locator('summary').filter({ hasText: '编辑示例变量' }).click();
+    await panel.locator('summary').filter({ hasText: '导入与导出预设 JSON' }).click();
+    const downloadPromise = page.waitForEvent('download');
+    await panel.getByRole('button', { name: '导出当前提示词预设', exact: true }).click();
+    const download = await downloadPromise; const exportPath = testInfo.outputPath('prompt-preset.json');
+    await download.saveAs(exportPath); const exportedText = await readFile(exportPath, 'utf8'); const exported = JSON.parse(exportedText);
+    expect(exported).toMatchObject({ format: 'ai-novel-prompt-preset', version: 1, task: 'writing', preset: { name: '我的写作风格', variables: { style: '克制叙述，重视动作细节' } } });
+    expect(exportedText).not.toContain('providers'); expect(exportedText).not.toContain('apiKey');
+    await panel.getByLabel('导入提示词预设 JSON', { exact: true }).fill(exportedText);
+    await panel.getByRole('button', { name: '从 JSON 新增预设', exact: true }).click();
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(3);
+    for (const label of ['剧情规划', '资料提取', '摘要压缩']) {
+      await panel.getByRole('tab', { name: label, exact: true }).click();
+      await panel.getByLabel('提示词预设名称', { exact: true }).fill(`${label}测试预设`);
+    }
+    await panel.getByRole('tab', { name: '正文写作', exact: true }).click();
+    await modal.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(modal.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
+    const saved = await (await page.request.get('/api/settings')).json();
+    expect(saved.promptTemplates.presets.writing).toHaveLength(3);
+    expect(saved.promptTemplates.presets.writing.at(-1).blocks[1]).toMatchObject({ role: 'assistant', enabled: true, modes: ['original'] });
+    expect(saved.promptTemplates.presets.compression[0].name).toBe('摘要压缩测试预设');
+    await page.screenshot({ path: testInfo.outputPath('prompt-editor-desktop.png'), animations: 'disabled' });
+    await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click();
+    await modal.getByRole('button', { name: '提示词编排', exact: true }).click();
+    await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('我的写作风格');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: testInfo.outputPath('prompt-editor-mobile.png'), animations: 'disabled' });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+    expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth)).toBeTruthy();
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('无效提示词草稿可继续修正，保存和导入失败不会覆盖现有配置', async ({ page }) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  try {
+    await page.request.put('/api/settings', { data: { ...previous, promptTemplates: defaultPromptTemplates() } });
+    const before = await (await page.request.get('/api/settings')).json();
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const modal = page.getByTestId('settings-page'); const panel = modal.getByTestId('prompt-templates-panel');
+    await modal.getByRole('button', { name: '提示词编排', exact: true }).click();
+    await panel.getByLabel('提示词块 1 内容', { exact: true }).fill('{{unknown}}');
+    await modal.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(panel).toContainText('此任务没有变量 {{unknown}}');
+    expect((await (await page.request.get('/api/settings')).json()).promptTemplates).toEqual(before.promptTemplates);
+    await panel.getByLabel('提示词块 1 内容', { exact: true }).fill('修正后的规则');
+    await panel.locator('summary').filter({ hasText: '导入与导出预设 JSON' }).click();
+    await panel.getByLabel('导入提示词预设 JSON', { exact: true }).fill('{"format":"wrong"}');
+    await panel.getByRole('button', { name: '从 JSON 新增预设', exact: true }).click();
+    await expect(panel).toContainText('导入失败');
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(1);
+    await modal.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(modal.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
+    expect((await (await page.request.get('/api/settings')).json()).promptTemplates.presets.writing[0].blocks[0].content).toBe('修正后的规则');
+  } finally { await page.request.put('/api/settings', { data: previous }); }
 });
