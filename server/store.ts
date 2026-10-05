@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { modelOutputSchema, OutputStore } from './output-store.js';
 import { findEntitiesByName, reconcileExtractionEntities } from './entity-resolution.js';
 import { rebuildCharacterProfileDescription, normalizeProfileAttribute } from './extraction.js';
+import { ImageStore, imageBackupSchema, imageEntity, imageReferences, validateImageContent } from './image-store.js';
 import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState, type WritingActivity, type ModelActivityEvent } from '../shared/types.js';
 
 export class HttpError extends Error { constructor(message: string, public statusCode = 400) { super(message); } }
@@ -37,14 +38,15 @@ const citationSchema = z.object({ chapterId: z.string(), paragraph: z.number().i
 const factSchema = z.object({ id: z.string().min(1), text: z.string(), attribute: z.string().optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() });
 const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string(), aliases: z.array(z.string()), description: z.string(), visibility: z.enum(['public', 'secret']), locked: z.boolean(), facts: z.array(factSchema), mergedInto: z.string().optional(), isMain: z.boolean().optional(), isMainSource: z.enum(['author', 'extraction']).optional(), nameStatus: z.enum(['placeholder', 'confirmed']).optional() });
 const refSchema = z.object({ id: z.string().min(1), title: z.string(), sourceId: z.string().optional(), summary: z.string(), status: z.enum(['pending', 'ready', 'failed']), createdAt: z.string() });
-const stateSchema = z.object({ chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
+const stateSchema = z.object({ activeImageIds: z.array(z.string().min(1)).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
 const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
 const writingActivitySchema = z.object({ id: z.string().min(1), kind: z.enum(['thinking', 'tool']), text: z.string().optional(), name: z.string().optional(), arguments: z.record(z.string(), z.unknown()).optional(), result: z.unknown().optional(), status: z.enum(['running', 'completed', 'failed']), error: z.string().optional() });
-const backupSchema = z.object({ version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), createdAt: z.string() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: stateSchema.optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
+const backupSchema = z.object({ images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), createdAt: z.string() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: stateSchema.optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
 
 export class Store {
   readonly db: DatabaseSync;
   readonly outputs: OutputStore;
+  readonly images: ImageStore;
   constructor(public readonly dataDir: string) {
     mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSync(join(dataDir, 'novel.sqlite'));
@@ -61,6 +63,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS job_writing_activities (job_id TEXT NOT NULL, activity_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(job_id,activity_id));
       CREATE INDEX IF NOT EXISTS jobs_branch ON jobs(branch_id,status);`);
     this.outputs = new OutputStore(this.db);
+    this.images = new ImageStore(this.db);
   }
   close() { this.db.close(); }
   listWritingActivities(jobId: string): WritingActivity[] { return this.db.prepare('SELECT data FROM job_writing_activities WHERE job_id=? ORDER BY rowid').all(jobId).map(row => parse<WritingActivity>(row.data)); }
@@ -102,6 +105,7 @@ export class Store {
       }
       for (const row of this.db.prepare('SELECT project_id,chapter_id FROM model_outputs WHERE chapter_id IS NOT NULL').iterate()) collect(row.project_id, String(row.chapter_id));
       this.db.prepare('DELETE FROM model_outputs WHERE project_id=?').run(projectId);
+      this.db.prepare('DELETE FROM image_assets WHERE project_id=?').run(projectId);
       this.db.prepare('DELETE FROM job_import_chapters WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)').run(projectId);
       this.db.prepare('DELETE FROM job_writing_drafts WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)').run(projectId);
       this.db.prepare('DELETE FROM job_writing_activities WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)').run(projectId);
@@ -143,9 +147,12 @@ export class Store {
   view(branchId: string, author = false): BranchView {
     const branch = this.getBranch(branchId); const state = this.state(branchId);
     if (!author) {
+      const visibleImageIds = (state.imageIds ?? []).filter(imageId => { const image = this.images.get(imageId); return image && this.images.visible(image, state, false); });
       state.outline = emptyState().outline; state.foreshadows = []; state.chapters = state.chapters.map(c => ({ ...c, summary: '' }));
       state.entities = state.entities.filter(e => e.visibility === 'public' && !e.mergedInto && (e.locked || e.facts.some(f => f.visibility === 'public' && f.temporal !== 'future'))).map(e => { const facts = e.facts.filter(f => f.visibility === 'public' && f.temporal !== 'future'); return { ...e, description: e.facts.length ? facts.map(f => f.text).join('；') : e.locked ? e.description : '', facts }; });
       const visible = new Set(state.entities.map(e => e.id)); state.relations = state.relations.filter(r => r.visibility === 'public' && visible.has(r.fromId) && visible.has(r.toId));
+      state.imageIds = visibleImageIds;
+      state.activeImageIds = visibleImageIds;
     }
     return { branch, state, revisions: author ? this.history(branchId) : [] };
   }
@@ -364,7 +371,10 @@ export class Store {
     return this.commit(branchId, base, state, complete ? `完成资料整理：${ref.title}` : `整理章节片段：${ref.title}`, checkpoint);
   }
   exportProject(projectId: string): unknown {
-    const project = this.getProject(projectId); const branches = this.listBranches(projectId); const revisionIds = new Set(branches.flatMap(b => this.history(b.id).map(r => r.id)));
+    const project = this.getProject(projectId); const branches = this.listBranches(projectId);
+    // Assets and interrupted jobs may refer to a revision detached by rollback.
+    const revisionIds = new Set(branches.flatMap(branch => this.history(branch.id).map(revision => revision.id)));
+    for (const row of this.db.prepare('SELECT r.id FROM revisions r JOIN branches b ON b.id=r.branch_id WHERE b.project_id=?').iterate(projectId)) revisionIds.add(String(row.id));
     const chapterIds = new Set<string>();
     const revisions = [...revisionIds].map(revisionId => {
       const row = this.db.prepare('SELECT data,state FROM revisions WHERE id=?').get(revisionId)!;
@@ -376,7 +386,7 @@ export class Store {
     const importChapters = this.db.prepare('SELECT c.job_id AS jobId,c.position,c.title,c.text FROM job_import_chapters c JOIN jobs j ON j.id=c.job_id WHERE j.project_id=? ORDER BY c.job_id,c.position').all(projectId);
     const writingDrafts = this.db.prepare('SELECT d.job_id AS jobId,d.text FROM job_writing_drafts d JOIN jobs j ON j.id=d.job_id WHERE j.project_id=?').all(projectId);
     const writingActivities = jobs.filter(job => job.kind === 'generate').map(job => ({ jobId: job.id, activities: this.listWritingActivities(job.id) })).filter(entry => entry.activities.length);
-    return { version: 1, project, branches, revisions, chapters, jobs, importChapters, writingDrafts, writingActivities, outputs: this.outputs.all(projectId) };
+    return { version: 1, project, branches, revisions, chapters, jobs, importChapters, writingDrafts, writingActivities, outputs: this.outputs.all(projectId), images: this.images.export(projectId) };
   }
   restoreProject(input: unknown, sourceIdMap: Record<string, string> = {}, onRestore?: (project: Project) => void): Project {
     const parsed = backupSchema.safeParse(input); if (!parsed.success) throw new HttpError('作品备份格式不正确或缺少正文与世界资料字段');
@@ -387,12 +397,12 @@ export class Store {
       catch { throw new HttpError('备份历史快照损坏、格式不正确或单版本解压后超过 64 MB'); }
     };
     const map = new Map<string, string>(); const register = (value: string) => { if (value && !map.has(value)) map.set(value, id()); };
-    register(data.project.id); for (const b of data.branches) register(b.id); for (const c of data.chapters) register(c.id); for (const job of data.jobs) register(job.id); for (const output of data.outputs) register(output.id);
+    register(data.project.id); for (const b of data.branches) register(b.id); for (const c of data.chapters) register(c.id); for (const job of data.jobs) register(job.id); for (const output of data.outputs) register(output.id); for (const asset of data.images) register(asset.image.id);
     for (const r of data.revisions) { register(r.revision.id); const state = readState(r); for (const e of state.entities) { register(e.id); for (const f of e.facts) register(f.id); } for (const relation of state.relations) register(relation.id); for (const f of state.foreshadows) register(f.id); }
     const remap = (value: unknown, key = ''): unknown => {
       // Process payloads are historical observations, like raw model responses. Only their owning job is remapped.
       if (key === 'writingActivities' && Array.isArray(value)) return value.map(entry => ({ jobId: map.get(entry.jobId) ?? entry.jobId, activities: clone(entry.activities) }));
-      if (typeof value === 'string') { if (key === 'sourceId') return sourceIdMap[value]; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds') return map.get(value) ?? value; return value; }
+      if (typeof value === 'string') { if (key === 'sourceId') return sourceIdMap[value]; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds' || key === 'imageIds' || key === 'activeImageIds' || key === 'imageStartingEntityIds' || key === 'imagesRequestedFor' || key === 'referenceImageIds' || key === 'referenceEntityIds' || key === 'materialEntityIds') return map.get(value) ?? value; return value; }
       if (Array.isArray(value)) return value.map(v => remap(v, key)); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, remap(v, k)])); return value;
     };
     const restored = remap(data) as typeof data;
@@ -400,10 +410,50 @@ export class Store {
     const branchIds = new Set(restored.branches.map(b => b.id)); const revisionIds = new Set(restored.revisions.map(r => r.revision.id)); const chapterIds = new Set(restored.chapters.map(c => c.id));
     if (branchIds.size !== restored.branches.length || revisionIds.size !== restored.revisions.length || chapterIds.size !== restored.chapters.length || !branchIds.has(restored.project.mainBranchId) || restored.branches.some(b => b.projectId !== restored.project.id || !revisionIds.has(b.revisionId) || (b.parentBranchId && !branchIds.has(b.parentBranchId))) || restored.revisions.some(r => !branchIds.has(r.revision.branchId) || (r.revision.parentId && !revisionIds.has(r.revision.parentId)))) throw new HttpError('备份存在无效关联');
     const chapterLookup = new Map(restored.chapters.map(c => [c.id, paragraphs(c.text)]));
+    const imageIds = new Set(restored.images.map(asset => asset.image.id));
+    const imagesById = new Map(restored.images.map(asset => [asset.image.id, asset.image]));
+    if (imageIds.size !== restored.images.length) throw new HttpError('备份图片标识重复');
+    for (const asset of restored.images) {
+      const image = asset.image;
+      const references = imageReferences(image);
+      if (image.projectId !== restored.project.id || !branchIds.has(image.branchId) || !revisionIds.has(image.baseRevisionId) || (image.chapterId && !chapterIds.has(image.chapterId)) || references.some(referenceId => !imageIds.has(referenceId) || referenceId === image.id) || new Set(image.referenceImageIds ?? []).size !== (image.referenceImageIds ?? []).length || new Set(image.referenceEntityIds ?? []).size !== (image.referenceEntityIds ?? []).length || new Set(image.materialEntityIds ?? []).size !== (image.materialEntityIds ?? []).length) throw new HttpError('备份图片关联无效');
+      const imageRevision = restored.revisions.find(entry => entry.revision.id === image.baseRevisionId)!;
+      const baseState = restoredState(restored.revisions.indexOf(imageRevision));
+      if (imageRevision.revision.branchId !== image.branchId || !baseState.imageIds?.includes(image.id) || image.entityId && !baseState.entities.some(entity => entity.id === image.entityId) || image.chapterId && !baseState.chapters.some(chapter => chapter.id === image.chapterId)) throw new HttpError('备份图片起始版本无效');
+      if (references.some(referenceId => !baseState.imageIds?.includes(referenceId) || imagesById.get(referenceId)?.status !== 'completed') || [...(image.materialEntityIds ?? []), ...(image.referenceEntityIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.entityId)].some(entityId => !baseState.entities.some(entity => entity.id === entityId))) throw new HttpError('备份图片参考素材不属于起始版本');
+      if ((image.referenceCharacters ?? []).some(character => { const portrait = imagesById.get(character.imageId); return portrait?.kind !== 'portrait' || !portrait.entityId || imageEntity(baseState, portrait.entityId)?.id !== imageEntity(baseState, character.entityId)?.id; })) throw new HttpError('备份人物参考图与身份不匹配');
+      if (image.kind === 'cg') {
+        const chapter = restored.chapters.find(chapter => chapter.id === image.chapterId);
+        const source = image.selection && chapter ? chapter.text.slice(image.selection.start, image.selection.end) : chapter?.text;
+        if (!chapter || !source?.trim() || source !== image.sourceText || image.selection && (image.selection.start >= image.selection.end || image.selection.end > chapter.text.length)) throw new HttpError('备份 CG 剧情引用无效');
+      }
+      if (image.status === 'completed' && (!asset.contentBase64 || !image.mimeType)) throw new HttpError('备份缺少已完成的图片');
+      if (asset.contentBase64) {
+        const bytes = Buffer.from(asset.contentBase64, 'base64');
+        if (!image.mimeType || bytes.toString('base64') !== asset.contentBase64) throw new HttpError('备份图片内容无效');
+        validateImageContent({ bytes, mimeType: image.mimeType });
+      }
+      if (['queued', 'running'].includes(image.status)) { image.status = 'paused'; image.error = '作品已恢复，请手动重试生图'; }
+    }
+    const validatedImageReferences = new Set<string>();
+    for (const imageId of imageIds) {
+      const pending = [{ id: imageId, finished: false }]; const visiting = new Set<string>();
+      while (pending.length) {
+        const next = pending.pop()!;
+        if (next.finished) { visiting.delete(next.id); validatedImageReferences.add(next.id); continue; }
+        if (validatedImageReferences.has(next.id)) continue;
+        if (visiting.has(next.id)) throw new HttpError('备份图片存在循环参考');
+        visiting.add(next.id); pending.push({ id: next.id, finished: true });
+        for (const referenceId of imageReferences(imagesById.get(next.id)!)) pending.push({ id: referenceId, finished: false });
+      }
+    }
     for (let index = 0; index < restored.revisions.length; index++) {
       const state = restoredState(index);
       if (state.chapters.some(c => !chapterIds.has(c.id)) || restored.revisions[index].revision.chapterCount !== state.chapters.length) throw new HttpError('备份章节版本关联无效');
       const included = new Set(state.chapters.map(c => c.id)); const entities = new Set(state.entities.map(e => e.id));
+      if ((state.imageIds ?? []).some(imageId => !imageIds.has(imageId)) || new Set(state.imageIds ?? []).size !== (state.imageIds ?? []).length) throw new HttpError('备份版本图片引用无效');
+      if ((state.activeImageIds ?? []).some(imageId => !state.imageIds?.includes(imageId)) || new Set(state.activeImageIds ?? []).size !== (state.activeImageIds ?? []).length) throw new HttpError('备份版本启用图片引用无效');
+      for (const imageId of state.imageIds ?? []) { const image = restored.images.find(asset => asset.image.id === imageId)!.image; if ((image.entityId && !entities.has(image.entityId)) || (image.chapterId && !included.has(image.chapterId))) throw new HttpError('备份图片不属于当前资料或章节'); }
       const compression = state.outline.summaryCompression;
       if (compression && (!compression.text.trim() || !compression.chapterIds.length || new Set(compression.chapterIds).size !== compression.chapterIds.length || compression.chapterIds.some(chapterId => !included.has(chapterId)))) throw new HttpError('备份压缩摘要存在无效章节关联');
       const validCitation = (c: { chapterId: string; paragraph: number; quote: string } | undefined) => !c || (included.has(c.chapterId) && chapterLookup.get(c.chapterId)?.[c.paragraph - 1]?.includes(c.quote));
@@ -445,6 +495,7 @@ export class Store {
         }
       }
       for (const output of restored.outputs) this.outputs.insert(output);
+      for (const asset of restored.images) this.images.insert(asset.image, asset.contentBase64 ? { bytes: Buffer.from(asset.contentBase64, 'base64'), mimeType: asset.image.mimeType! } : undefined);
       onRestore?.(restored.project);
       this.db.exec('COMMIT');
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }

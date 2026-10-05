@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered } from 'lucide-react';
-import type { CapturedModelResponse, ModelParameters, ModelRole, ProviderConnection, ProviderModel, ProviderProtocol, Settings } from '../shared/types';
+import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered, Image } from 'lucide-react';
+import type { CapturedModelResponse, ImageSettings, ModelParameters, ModelRole, ProviderConnection, ProviderModel, ProviderProtocol, Settings } from '../shared/types';
 import { defaultModelParameters, getModelParameters, upsertModelParameters } from '../shared/model-settings';
 import { api, post, put } from './api';
 import { Brand, Notice, Spinner } from './ui';
@@ -8,6 +8,8 @@ import { ProviderParameters, parameterError } from './ProviderParameters';
 import { RequestDiagnostics } from './RequestDiagnostics';
 import { PromptTemplatesPanel } from './PromptTemplatesPanel';
 import { validatePromptTemplates } from '../shared/prompt-templates';
+import { normalizeImageSettings } from '../shared/image-settings';
+import { imageModelCapabilities } from '../shared/image-capabilities';
 
 const protocols: Record<ProviderProtocol, { name: string; url: string }> = {
   'openai-chat': { name: 'OpenAI · Chat Completions', url: 'https://api.openai.com/v1' },
@@ -28,6 +30,7 @@ const sections = [
   { id: 'providers', label: '供应商连接', icon: KeyRound, description: '管理服务地址、接口协议和 API 密钥。密钥保存在服务端，作品备份不包含密钥。' },
   { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '为正文写作、剧情规划和资料提取分别选择模型。每个任务独立保存参数，同模型用于不同任务也不共用。' },
   { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '为四类任务管理提示词预设、调整消息顺序，并预览编排后的内容。' },
+  { id: 'images', label: '生图与自动插画', icon: Image, description: '选择图片模型，设置作品画风、新人物立绘与场景 CG 的自动生成。' },
 ] as const;
 type SettingsSection = typeof sections[number]['id'];
 
@@ -136,6 +139,8 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       if (!value) return value;
       const next = { ...value, providers: value.providers.filter(provider => provider.id !== providerId), modelParameters: value.modelParameters?.filter(profile => profile.providerId !== providerId) };
       for (const role of roles) if (next[role.providerKey] === providerId) { next[role.providerKey] = ''; next[role.modelKey] = ''; }
+      if (next.imageSettings?.providerId === providerId) next.imageSettings = { ...next.imageSettings, providerId: '', model: '' };
+      if (next.imageSettings?.promptProviderId === providerId) next.imageSettings = { ...next.imageSettings, promptProviderId: '', promptModel: '' };
       return next;
     });
   }
@@ -153,6 +158,8 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
         showIssue('models', `${role.label}：已选择供应商，请选择或填写模型名称。`, form.current?.querySelector<HTMLInputElement>(`[aria-label="${role.label}模型名称"]`) || undefined); return;
       }
     }
+    const imageConfig = normalizeImageSettings(settings.imageSettings);
+    if (imageConfig.providerId && !imageConfig.model) { showIssue('images', '生图：已选择供应商，请填写图片模型名称。'); return; }
     const field = invalidField();
     if (field) {
       const label = field.field.getAttribute('aria-label') || field.field.closest('label')?.firstChild?.textContent || '此字段';
@@ -226,10 +233,85 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       <div className="settings-section-heading"><h2>提示词编排</h2><p>{sections[2].description}</p></div>
       <fieldset className="settings-section-fields" disabled={busy}><PromptTemplatesPanel embedded settings={settings} disabled={busy} onChange={value => { setMessage(''); setSettings(value); }} /></fieldset>
     </section>
+    <section data-settings-section="images" hidden={section !== 'images'} aria-label="生图与自动插画设置">
+      <div className="settings-section-heading"><h2>生图与自动插画</h2><p>{sections[3].description}</p></div>
+      <fieldset className="settings-section-fields form-stack" disabled={busy}><ImageSettingsEditor settings={settings} onChange={value => { setMessage(''); setSettings(value); }} /></fieldset>
+    </section>
     <div className="settings-feedback" aria-live="polite">{error && <Notice error={error} />}{message && <div className="notice success" role="status"><CheckCircle2 size={17} />{message}</div>}</div>
     <footer className="settings-save-footer"><p className="hint">{dirty ? '有未保存的修改。保存会同时应用所有分类的设置。' : '所有分类共用一份设置，保存后统一生效。'}</p><button type="submit" className="button primary" disabled={busy}><Save size={16} />{busy ? '正在处理…' : '保存设置'}</button></footer>
   </form>}
       </div>
     </div>
   </main>;
+}
+
+const imageNumberFields = [
+  { key: 'temperature', label: '图片模型 Temperature', min: 0, max: 2, step: 0.1 },
+  { key: 'topP', label: '图片模型 Top P', min: 0, max: 1, step: 0.01 },
+  { key: 'topK', label: '图片模型 Top K', min: 1, max: 1000000, step: 1 },
+  { key: 'seed', label: '图片随机种子', min: -2147483648, max: 4294967295, step: 1 },
+  { key: 'maxOutputTokens', label: '图片模型最大输出 Token', min: 1, max: 32768, step: 1 },
+  { key: 'steps', label: '采样步数', min: 1, max: 100, step: 1 },
+  { key: 'guidanceScale', label: '提示词引导强度', min: 0, max: 20, step: 0.1 },
+] as const;
+const imageQualityNames: Record<string, string> = { auto: '自动', low: '低', medium: '中', high: '高', standard: '标准', hd: '高清', xhigh: '很高', max: '最高' };
+const imageThinkingNames: Record<string, string> = { minimal: '最少', low: '低', medium: '中', high: '高' };
+
+export function ImageSettingsEditor({ settings, onChange }: { settings: Settings; onChange: (settings: Settings) => void }) {
+  const image = normalizeImageSettings(settings.imageSettings); const capabilities = imageModelCapabilities(image);
+  const patch = (value: Partial<ImageSettings>) => onChange({ ...settings, imageSettings: { ...image, ...value } });
+  const changeImageModel = (value: Partial<ImageSettings>) => {
+    const candidate: ImageSettings = { ...image, ...value }; const next = imageModelCapabilities(candidate);
+    const common = new Set<keyof ImageSettings>(['providerId', 'model', 'protocol', 'size', 'quality', 'stylePrompt', 'autoPortrait', 'autoCG', 'timeoutMs', 'promptProviderId', 'promptModel', 'promptSystemPrompt', 'useCharacterReferences']);
+    for (const key of Object.keys(candidate) as (keyof ImageSettings)[]) if (!common.has(key) && !next.supportedParams.includes(key)) Object.assign(candidate, { [key]: undefined });
+    if (candidate.aspectRatio && candidate.aspectRatio !== 'auto' && !next.aspectRatios.includes(candidate.aspectRatio)) candidate.aspectRatio = undefined;
+    if (candidate.imageSize && candidate.imageSize !== 'auto' && !next.imageSizes.includes(candidate.imageSize)) candidate.imageSize = undefined;
+    if (candidate.thinkingLevel && !next.thinkingLevels.includes(candidate.thinkingLevel)) candidate.thinkingLevel = undefined;
+    if (candidate.outputFormat && !next.outputFormats.includes(candidate.outputFormat)) candidate.outputFormat = undefined;
+    if (candidate.inputFidelity && !next.inputFidelities.includes(candidate.inputFidelity)) candidate.inputFidelity = undefined;
+    if (!next.qualityOptions.includes(candidate.quality)) candidate.quality = next.qualityOptions.includes('auto') ? 'auto' : (next.qualityOptions[0] || 'auto') as ImageSettings['quality'];
+    if (candidate.size !== 'auto' && !next.sizes.includes(candidate.size) && !next.customSize) candidate.size = 'auto';
+    onChange({ ...settings, imageSettings: candidate });
+  };
+  const supports = (key: keyof ImageSettings) => capabilities.supportedParams.includes(key);
+  const fallbackId = settings.planningProviderId && settings.planningModel ? settings.planningProviderId : settings.writingProviderId;
+  const fallbackName = settings.providers.find(provider => provider.id === fallbackId)?.name;
+  const fallbackModel = settings.planningProviderId && settings.planningModel ? settings.planningModel : settings.writingModel;
+  const pixelSizes = capabilities.sizes.filter(size => size !== 'auto');
+  const currentAspectRatio = image.aspectRatio ?? (image.size === 'auto' ? 'auto' : image.size === '1024x1536' ? '2:3' : image.size === '1536x1024' ? '3:2' : '1:1');
+  return <>
+    <label>生图供应商<select aria-label="生图供应商" value={image.providerId} onChange={event => changeImageModel({ providerId: event.target.value, model: '' })}><option value="">暂不设置</option>{settings.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
+    <label>图片接口<select aria-label="图片接口" value={image.protocol} onChange={event => changeImageModel({ protocol: event.target.value as ImageSettings['protocol'] })}><option value="openai-images">OpenAI 兼容 · Images</option><option value="gemini">Gemini · 图片生成</option><option value="together-images">Together · 图片生成</option></select></label>
+    <label>图片模型名称<input aria-label="图片模型名称" maxLength={300} value={image.model} onChange={event => changeImageModel({ model: event.target.value })} placeholder="填写供应商提供的图片生成模型 ID" /></label>
+    <p className="hint">图片接口复用供应商连接的服务地址和密钥。下方参数与参考图能力按所选协议和型号显示。</p>
+    <section className="image-optimization-settings form-stack"><h3>AI 生图提示词</h3><p className="hint">绘图前，文字 AI 根据剧情、资料、人物参考和画风编写专用提示词。选择“AI 自行决定”时，还会选择适合本次画面的尺寸。</p><div className="form-grid">
+      <label>生图提示词优化供应商<select aria-label="生图提示词优化供应商" value={image.promptProviderId || ''} onChange={event => patch({ promptProviderId: event.target.value, promptModel: '' })}><option value="">自动使用剧情规划或正文写作模型</option>{settings.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
+      <label>生图提示词优化模型<input aria-label="生图提示词优化模型" maxLength={300} value={image.promptModel || ''} onChange={event => patch({ promptModel: event.target.value })} placeholder={image.promptProviderId ? '填写此供应商的文字模型 ID' : fallbackModel || '自动使用已配置的文字模型'} /></label>
+    </div>{!image.promptProviderId && <p className="hint">默认先使用剧情规划模型，再使用正文写作模型。{fallbackName && fallbackModel ? `当前默认：${fallbackName} · ${fallbackModel}。` : '请先配置至少一个文字模型。'}</p>}<label>提示词优化系统要求（可选）<textarea aria-label="提示词优化系统要求" maxLength={10000} rows={3} value={image.promptSystemPrompt || ''} onChange={event => patch({ promptSystemPrompt: event.target.value })} placeholder="例如：按画面主体、构图、服装、环境、光线组织提示词，保留已确认的角色外貌。" /></label></section>
+    <div className="form-grid image-dimension-fields">
+      {capabilities.dimensionMode !== 'aspect-ratio' && <label>图片尺寸<select aria-label="图片尺寸" value={image.size} onChange={event => patch({ size: event.target.value as ImageSettings['size'], ...(capabilities.dimensionMode === 'width-height' ? { width: undefined, height: undefined } : {}) })}><option value="auto">AI 自行决定</option>{pixelSizes.map(size => <option key={size} value={size}>{size.replace('x', ' × ')}</option>)}{image.size !== 'auto' && !pixelSizes.includes(image.size) && <option value={image.size}>自定义 · {image.size.replace('x', ' × ')}</option>}</select></label>}
+      {capabilities.customSize && capabilities.dimensionMode === 'size' && <label>自定义图片尺寸<input aria-label="自定义图片尺寸" pattern="[0-9]+x[0-9]+" value={image.size === 'auto' ? '' : image.size} onChange={event => patch({ size: event.target.value.trim() || 'auto' })} placeholder="例如 2048x2048；留空由 AI 决定" /></label>}
+      {capabilities.dimensionMode === 'aspect-ratio' && <label>画幅比例<select aria-label="画幅比例" value={currentAspectRatio} onChange={event => patch({ aspectRatio: event.target.value, size: 'auto' })}><option value="auto">AI 自行决定</option>{capabilities.aspectRatios.map(ratio => <option key={ratio} value={ratio}>{ratio}</option>)}</select></label>}
+      {supports('imageSize') && capabilities.imageSizes.length > 0 && <label>图片分辨率<select aria-label="图片分辨率" value={image.imageSize || ''} onChange={event => patch({ imageSize: event.target.value ? event.target.value as ImageSettings['imageSize'] : undefined })}><option value="">模型默认</option><option value="auto">AI 自行决定</option>{capabilities.imageSizes.map(size => <option key={size} value={size}>{size}</option>)}</select></label>}
+      {capabilities.qualityOptions.length > 0 && <label>生成质量<select aria-label="生成质量" value={capabilities.qualityOptions.includes(image.quality) ? image.quality : ''} onChange={event => patch({ quality: (event.target.value || 'auto') as ImageSettings['quality'] })}>{!capabilities.qualityOptions.includes(image.quality) && <option value="">模型默认</option>}{capabilities.qualityOptions.map(quality => <option key={quality} value={quality}>{imageQualityNames[quality] || quality}</option>)}</select></label>}
+      {capabilities.dimensionMode === 'width-height' && capabilities.customSize && <><label>自定义图片宽度<input aria-label="自定义图片宽度" type="number" min={capabilities.minDimension} max={capabilities.maxDimension} step={capabilities.dimensionMultiple} value={image.width ?? ''} onChange={event => patch({ width: event.target.value === '' ? undefined : Number(event.target.value) })} placeholder="留空按上方尺寸或 AI 选择" /></label><label>自定义图片高度<input aria-label="自定义图片高度" type="number" min={capabilities.minDimension} max={capabilities.maxDimension} step={capabilities.dimensionMultiple} value={image.height ?? ''} onChange={event => patch({ height: event.target.value === '' ? undefined : Number(event.target.value) })} placeholder="留空按上方尺寸或 AI 选择" /></label></>}
+    </div>
+    {capabilities.customSize && <p className="hint">自定义宽高需为 {capabilities.dimensionMultiple} 的倍数，单边 {capabilities.minDimension}～{capabilities.maxDimension} 像素。{capabilities.minPixels && capabilities.maxPixels ? `总像素 ${capabilities.minPixels.toLocaleString()}～${capabilities.maxPixels.toLocaleString()}。` : ''}{capabilities.maxAspectRatio ? `长边最多为短边的 ${capabilities.maxAspectRatio} 倍。` : ''}</p>}
+    <div className="image-model-parameters form-stack"><h3>图片模型参数</h3><div className="form-grid">
+      {imageNumberFields.filter(field => supports(field.key)).map(field => <label key={field.key}>{field.label}<input aria-label={field.label} type="number" min={field.min} max={field.max} step={field.step} value={image[field.key] ?? ''} onChange={event => patch({ [field.key]: event.target.value === '' ? undefined : Number(event.target.value) })} placeholder="模型默认" /></label>)}
+      {supports('thinkingLevel') && <label>图片模型思考等级<select aria-label="图片模型思考等级" value={image.thinkingLevel || ''} onChange={event => patch({ thinkingLevel: event.target.value ? event.target.value as ImageSettings['thinkingLevel'] : undefined })}><option value="">模型默认</option>{capabilities.thinkingLevels.map(level => <option key={level} value={level}>{imageThinkingNames[level] || level}</option>)}</select></label>}
+      {supports('outputFormat') && <label>图片输出格式<select aria-label="图片输出格式" value={image.outputFormat || ''} onChange={event => patch({ outputFormat: event.target.value ? event.target.value as ImageSettings['outputFormat'] : undefined, ...(!['jpeg', 'webp'].includes(event.target.value) ? { outputCompression: undefined } : {}), ...(event.target.value === 'jpeg' && image.background === 'transparent' ? { background: 'opaque' as const } : {}) })}><option value="">模型默认</option>{capabilities.outputFormats.map(format => <option key={format} value={format}>{format.toUpperCase()}</option>)}</select></label>}
+      {supports('outputCompression') && ['jpeg', 'webp'].includes(image.outputFormat || '') && <label>JPEG／WebP 压缩质量<input aria-label="图片压缩质量" type="number" min={0} max={100} step={1} value={image.outputCompression ?? ''} onChange={event => patch({ outputCompression: event.target.value === '' ? undefined : Number(event.target.value) })} placeholder="模型默认" /></label>}
+      {supports('background') && <label>图片背景<select aria-label="图片背景" value={image.background || 'auto'} onChange={event => patch({ background: event.target.value as ImageSettings['background'] })}>{capabilities.backgroundOptions.filter(background => image.outputFormat !== 'jpeg' || background !== 'transparent').map(background => <option key={background} value={background}>{{ auto: '自动', opaque: '不透明', transparent: '透明' }[background as 'auto' | 'opaque' | 'transparent'] || background}</option>)}</select></label>}
+      {supports('inputFidelity') && <label>参考图保真度<select aria-label="参考图保真度" value={image.inputFidelity || ''} onChange={event => patch({ inputFidelity: event.target.value ? event.target.value as ImageSettings['inputFidelity'] : undefined })}><option value="">模型默认</option>{capabilities.inputFidelities.map(fidelity => <option key={fidelity} value={fidelity}>{fidelity === 'low' ? '低' : '高'}</option>)}</select></label>}
+      {supports('moderation') && <label>图片内容审核<select aria-label="图片内容审核" value={image.moderation || 'auto'} onChange={event => patch({ moderation: event.target.value as ImageSettings['moderation'] })}><option value="auto">自动</option><option value="low">较低</option></select></label>}
+    </div>{supports('systemInstruction') && <label>图片模型系统提示词<textarea aria-label="图片模型系统提示词" maxLength={32000} rows={3} value={image.systemInstruction || ''} onChange={event => patch({ systemInstruction: event.target.value })} placeholder="直接发送给图片模型的系统要求" /></label>}{supports('negativePrompt') && <label>负面提示词<textarea aria-label="负面提示词" maxLength={32000} rows={2} value={image.negativePrompt || ''} onChange={event => patch({ negativePrompt: event.target.value })} placeholder="希望避免出现在画面中的内容" /></label>}{supports('includeThoughts') && <label className="checkbox"><input type="checkbox" checked={!!image.includeThoughts} onChange={event => patch({ includeThoughts: event.target.checked })} />返回图片模型的思考内容</label>}{supports('searchGrounding') && <label className="checkbox"><input type="checkbox" checked={!!image.searchGrounding} onChange={event => patch({ searchGrounding: event.target.checked })} />使用 Google 搜索补充图片资料</label>}{supports('promptUpsampling') && <label className="checkbox"><input type="checkbox" checked={!!image.promptUpsampling} onChange={event => patch({ promptUpsampling: event.target.checked })} />供应商继续增强提示词</label>}{supports('disableSafetyChecker') && <label className="checkbox"><input type="checkbox" checked={!!image.disableSafetyChecker} onChange={event => patch({ disableSafetyChecker: event.target.checked })} />关闭供应商安全检查</label>}</div>
+    <label>统一画风<textarea aria-label="统一画风" maxLength={10000} rows={3} value={image.stylePrompt} onChange={event => patch({ stylePrompt: event.target.value })} /></label>
+    <label>生图超时（毫秒）<input aria-label="生图超时" type="number" min={1000} max={3600000} step={1000} value={image.timeoutMs} onChange={event => patch({ timeoutMs: Number(event.target.value) })} /></label>
+    <label className="checkbox"><input type="checkbox" checked={image.useCharacterReferences !== false} onChange={event => patch({ useCharacterReferences: event.target.checked })} />CG 自动参考出场人物的已有立绘</label>
+    <p className="hint image-reference-capability">{!capabilities.knownModel ? '自定义型号按所选图片协议发送请求，请使用支持对应生图与参考图能力的图片模型。' : capabilities.referenceMode === 'multiple' ? `当前型号支持多张参考图；本工作台最多使用 ${capabilities.maxReferences} 张，其中人物参考最多 ${capabilities.maxCharacterReferences} 人。` : capabilities.referenceMode === 'single' ? '当前型号支持一张参考图；修改已有 CG 时，这个位置用于原图。' : '当前型号不提供人物参考图，CG 根据人物资料绘制。'}AI 从对应场景选择人物，尚未完成的立绘不会作为参考图。</p>
+    <label className="checkbox"><input type="checkbox" checked={image.autoPortrait} onChange={event => patch({ autoPortrait: event.target.checked })} />新人物自动生成立绘</label>
+    <label className="checkbox"><input type="checkbox" checked={image.autoCG} onChange={event => patch({ autoCG: event.target.checked })} />场景变化或大场面时自动生成 CG</label>
+    <p className="hint">插画请求在正文保存和资料整理完成后绑定到人物或剧情。图片独立生成，作者可在图册查看优化后的提示词、实际画幅与人物参考；失败和中断只由作者手动重试。</p>
+  </>;
 }

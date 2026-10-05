@@ -11,7 +11,7 @@ export interface SummaryCompression { text: string; chapterIds: string[] }
 export interface Outline { coarse?: string; worldview?: string; locked: string; fine: { chapter: number; title: string; goal: string }[]; summaryCompression?: SummaryCompression }
 export interface Chapter { id: string; title: string; text: string; sourceId?: string; summary: string; status: 'pending' | 'ready' | 'failed'; createdAt: string }
 export type ChapterRef = Omit<Chapter, 'text'>;
-export interface StoryState { chapters: ChapterRef[]; entities: Entity[]; relations: Relation[]; foreshadows: Foreshadow[]; outline: Outline }
+export interface StoryState { chapters: ChapterRef[]; entities: Entity[]; relations: Relation[]; foreshadows: Foreshadow[]; outline: Outline; imageIds?: string[]; activeImageIds?: string[] }
 export interface Project { id: string; title: string; premise: string; mode: Mode; createdAt: string; updatedAt: string; mainBranchId: string }
 export interface Branch { id: string; projectId: string; name: string; revisionId: string; parentBranchId?: string; forkChapterId?: string; createdAt: string }
 export interface Revision { id: string; branchId: string; parentId?: string; label: string; createdAt: string; chapterCount: number }
@@ -45,7 +45,25 @@ export interface PromptMessage { role: 'system' | 'user' | 'assistant'; content:
 export interface PromptBlock extends PromptMessage { id: string; name: string; enabled: boolean; modes?: Mode[] }
 export interface PromptPreset { id: string; name: string; blocks: PromptBlock[]; variables?: Record<string, string> }
 export interface PromptTemplateSettings { presets: Record<PromptTask, PromptPreset[]>; selected: Record<PromptTask, string> }
-export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings }
+export interface ImageSettings {
+  providerId: string; model: string; protocol: 'openai-images' | 'gemini' | 'together-images'; size: string;
+  quality: 'auto' | 'low' | 'medium' | 'high' | 'standard' | 'hd' | 'xhigh' | 'max'; stylePrompt: string; autoPortrait: boolean; autoCG: boolean; timeoutMs: number;
+  promptProviderId?: string; promptModel?: string; promptSystemPrompt?: string; useCharacterReferences?: boolean;
+  aspectRatio?: string; imageSize?: 'auto' | '512' | '1K' | '2K' | '4K'; systemInstruction?: string;
+  temperature?: number; topP?: number; topK?: number; seed?: number; maxOutputTokens?: number;
+  thinkingLevel?: 'minimal' | 'low' | 'medium' | 'high'; includeThoughts?: boolean; searchGrounding?: boolean;
+  outputFormat?: 'png' | 'jpeg' | 'webp'; outputCompression?: number; background?: 'auto' | 'opaque' | 'transparent'; inputFidelity?: 'low' | 'high'; moderation?: 'auto' | 'low';
+  negativePrompt?: string; steps?: number; guidanceScale?: number; width?: number; height?: number; promptUpsampling?: boolean; disableSafetyChecker?: boolean;
+}
+export interface ImageResolvedParameters { size?: ImageSettings['size']; aspectRatio?: string; imageSize?: Exclude<ImageSettings['imageSize'], 'auto'>; width?: number; height?: number }
+export type ImageGenerationParameters = ImageResolvedParameters & Partial<Omit<ImageSettings, 'providerId' | 'promptProviderId' | 'promptModel' | 'promptSystemPrompt' | 'stylePrompt' | 'autoCG' | 'autoPortrait' | 'useCharacterReferences' | 'timeoutMs'>>;
+export type StoryImageKind = 'portrait' | 'entity' | 'map' | 'cg';
+export type StoryImageStatus = 'queued' | 'running' | 'completed' | 'failed' | 'paused' | 'stale' | 'cancelled';
+export interface StoryImage { id: string; projectId: string; branchId: string; baseRevisionId: string; kind: StoryImageKind; status: StoryImageStatus; title: string; prompt: string; entityId?: string; chapterId?: string; sourceText?: string; selection?: { start: number; end: number }; referenceImageId?: string; automatic: boolean; visibility: Visibility; createdAt: string; updatedAt: string; error?: string; mimeType?: 'image/png' | 'image/jpeg' | 'image/webp'; url?: string; material?: string; instruction?: string; materialEntityIds?: string[]; referenceImageIds?: string[]; referenceEntityIds?: string[]; referenceCharacters?: { entityId: string; imageId: string; name: string }[]; generationParameters?: ImageGenerationParameters; promptStatus?: 'pending' | 'completed'; optimizedAt?: string; active?: boolean }
+export interface ImageGenerateInput { baseRevisionId: string; kind: StoryImageKind; entityId?: string; chapterId?: string; selection?: { start: number; end: number }; instruction?: string; referenceImageId?: string }
+/** Writing tools request illustrations; they bind to saved prose and confirmed entities after extraction. */
+export interface WritingImageRequest { kind: 'portrait' | 'cg'; name?: string; description: string; sourceText?: string }
+export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings }
 export type JobKind = 'import' | 'extract' | 'generate' | 'plan';
 export type JobStatus = 'queued' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled' | 'stale';
 export interface Job { id: string; projectId: string; branchId: string; kind: JobKind; status: JobStatus; baseRevisionId: string; progress: number; total: number; message: string; error?: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean; createdAt: string; updatedAt: string; payload: Record<string, unknown>; generatedChapterId?: string; title?: string; purpose?: 'compress-summary'; generationInput?: Pick<GenerateInput, 'mode' | 'instruction' | 'maxWords' | 'title'> }

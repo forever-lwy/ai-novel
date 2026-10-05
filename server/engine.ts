@@ -7,6 +7,9 @@ import { generateStructured, generateText, estimateModelRequestInputTokens, Mode
 import { HttpError, OutputValidationError, Store } from './store.js';
 import { extractionContext, normalizeExtraction, splitExtractionBlocks as splitBlocks } from './extraction.js';
 import { buildWritingContext } from './writing-context.js';
+import type { ImageService } from './images.js';
+import { normalizeImageSettings } from '../shared/image-settings.js';
+import type { ModelTool, WritingImageRequest } from '../shared/types.js';
 export { extractionSchema } from './extraction.js';
 
 const foreshadowSchema = z.object({ title: z.string().min(1), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedNames: z.array(z.string()) });
@@ -48,7 +51,7 @@ export class StoryEngine {
   private deletingProjects = new Set<string>();
   private started = false;
   private closed = false;
-  constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }) {}
+  constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'>) {}
   start() {
     if (this.started) return; this.started = true;
     // Upgrade pre-release queues once; prose belongs in immutable input rows, never in the hot job record.
@@ -61,7 +64,7 @@ export class StoryEngine {
         delete job.payload.chapters; this.save(job); this.store.db.exec('COMMIT');
       } catch (e) { this.store.db.exec('ROLLBACK'); throw e; }
     }
-    for (const job of this.jobsInternal()) if (job.status === 'running') { job.status = 'paused'; job.message = '服务已重启；已保存整理进度，请手动继续'; this.save(job); }
+    for (const job of this.jobsInternal()) if (job.status === 'running' || job.status === 'completed' && typeof job.payload.pendingIllustrationChapterId === 'string') { job.status = 'paused'; job.message = '服务已重启；已保存整理进度，请手动继续'; this.save(job); }
     this.pump();
   }
   async close() {
@@ -357,6 +360,51 @@ export class StoryEngine {
     const background: Job = { id: randomUUID(), projectId: writing.projectId, branchId: writing.branchId, kind: 'extract', status: paused ? 'paused' : 'queued', baseRevisionId: writing.baseRevisionId, progress: 0, total: 1, message: paused ? '正文已修复；请手动继续后台资料整理' : '正文已保存，等待后台资料整理', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { extractChapterId: chapterId, blockIndex, writingJobId: writing.id } };
     this.save(background);
   }
+  private imageTools(jobId: string): { tools: ModelTool[]; instruction: string } {
+    const config = normalizeImageSettings(this.getSettings().imageSettings);
+    if (!this.images || !config.providerId || !config.model) return { tools: [], instruction: '' };
+    const tools: ModelTool[] = [];
+    const register = (request: WritingImageRequest) => {
+      const live = this.live(jobId);
+      const requests = (live.payload.imageRequests ?? []) as WritingImageRequest[];
+      if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? previous.name === request.name : previous.sourceText === request.sourceText))) return { status: 'requested', message: '同一人物或场景已请求生图，请继续写作。' };
+      if (requests.length >= 12) throw new HttpError('本章最多接受 12 个自动生图请求，请完成正文后由作者补充。');
+      live.payload.imageRequests = [...requests, request]; this.save(live);
+      return { status: 'requested', message: '已登记生图请求；正文保存、资料确认后独立生成并绑定，不影响正文继续写作。' };
+    };
+    if (config.autoPortrait) tools.push({ name: 'generate_character_portrait', description: '新人物在本章首次出场时主动调用，按明确姓名请求生成对应立绘。只使用正文已描述的外观，不推断秘密身份。资料整理后绑定到该人物并展示。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物明确姓名或已有别名' }, description: { type: 'string', description: '正文已描述的外观与衣着' } }, required: ['name', 'description'], additionalProperties: false }, execute: args => {
+      const value = z.object({ name: z.string().trim().min(1).max(300), description: z.string().trim().min(1).max(6000) }).strict().parse(args);
+      return register({ kind: 'portrait', ...value });
+    } });
+    if (config.autoCG) tools.push({ name: 'generate_scene_cg', description: '正文切换到新的场景或出现大场面时主动调用生成场景 CG。sourceText 必须逐字引用本章实际正文片段，图片绑定该剧情。每个场景只请求一次。', parameters: { type: 'object', properties: { description: { type: 'string', description: '场景构图、人物动作、环境与氛围' }, sourceText: { type: 'string', description: '逐字引用本章正文中对应场景的文字，不得编造引用' } }, required: ['description', 'sourceText'], additionalProperties: false }, execute: args => {
+      const value = z.object({ description: z.string().trim().min(1).max(6000), sourceText: z.string().trim().min(1).max(10000) }).strict().parse(args);
+      return register({ kind: 'cg', ...value });
+    } });
+    return { tools, instruction: tools.length ? `\n插画任务：${config.autoPortrait ? '新人物首次出场时主动调用 generate_character_portrait 工具。' : ''}${config.autoCG ? '每次切换场景或出现大场面时主动调用 generate_scene_cg，并逐字引用本章对应正文。' : ''}生图请求和工具结果只展示在生成过程与图册，不要写入小说正文。` : '' };
+  }
+
+  private illustrateChapter(job: Job, chapterId: string) {
+    if (!this.images || !job.payload.writingJobId || job.payload.imagesRequestedFor === chapterId) return;
+    const writing = this.get(String(job.payload.writingJobId));
+    const oldIds = new Set((writing.payload.imageStartingEntityIds ?? []) as string[]);
+    const newIds = this.store.state(job.branchId).entities.filter(entity => entity.kind === 'character' && !entity.mergedInto && !oldIds.has(entity.id)).map(entity => entity.id);
+    try {
+      const checkpoint = (revisionId: string) => {
+        job.baseRevisionId = revisionId; job.payload.imagesRequestedFor = chapterId;
+        delete job.payload.pendingIllustrationChapterId; this.save(job);
+      };
+      // Image references and the extraction checkpoint commit in the same transaction.
+      this.images.generateAutomatic(job.branchId, job.baseRevisionId, chapterId, (writing.payload.imageRequests ?? []) as WritingImageRequest[], newIds, checkpoint);
+      if (job.payload.pendingIllustrationChapterId || job.payload.imagesRequestedFor !== chapterId) checkpoint(this.store.getBranch(job.branchId).revisionId);
+    } catch (error) {
+      // Images must never undo successfully saved prose or force another text-model request.
+      // The SQL transaction may have rolled back after a checkpoint mutated this object.
+      Object.assign(job, this.get(job.id));
+      job.payload.imageError = this.redact(error instanceof Error ? error.message : '自动插画登记失败');
+      delete job.payload.pendingIllustrationChapterId;
+      this.save(job);
+    }
+  }
   private applyCompression(job: Job, output: ModelOutputRecord, text: string) {
     const work = job.payload.compressionWork as CompressionWork | undefined;
     const source = work?.chunks[work.index] ?? String(job.payload.summarySource ?? '');
@@ -434,12 +482,14 @@ export class StoryEngine {
     const value = normalized.value;
     const complete = output.blockIndex === blocks.length - 1;
     let payload: Record<string, unknown> = { ...job.payload, extractChapterId: output.chapterId, blockIndex: output.blockIndex + 1, pendingStage: undefined }; let progress = job.progress; let finished = false;
+    if (complete && this.images && job.payload.writingJobId) payload.pendingIllustrationChapterId = output.chapterId;
     if (local && complete) {
       if (job.kind === 'import') { const next = Number(job.payload.importIndex ?? 0) + 1; progress = next; payload = { ...payload, importIndex: next, importCurrentChapterId: undefined, extractChapterId: undefined, blockIndex: 0 }; finished = next >= job.total; }
       else if (job.kind === 'generate') { progress = job.total; finished = true; }
       else { progress++; finished = this.store.state(job.branchId).chapters.every(c => c.id === output.chapterId || c.status === 'ready'); }
     }
     this.store.applyExtraction(job.branchId, job.baseRevisionId, output.chapterId, value, complete, this.outputCheckpoint(job, output, payload, progress, complete ? '本章资料已保存' : `已保存片段 ${output.blockIndex + 1}/${blocks.length}`, local, finished));
+    if (complete) this.illustrateChapter(job, output.chapterId);
   }
   private async plan(jobId: string, signal: AbortSignal) {
     const job = this.live(jobId); const state = this.store.state(job.branchId); const provider = this.provider('planning'); const next = state.chapters.length + 1;
@@ -489,16 +539,22 @@ export class StoryEngine {
         this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, '');
         this.emitWriting(job.id, this.writingSnapshot(job.id));
         job.message = '正在流式生成正文'; this.save(job);
-        const request = this.budget(job, provider, { ...this.taskPrompt('writing', {
+        job.payload.imageStartingEntityIds = state.entities.map(entity => entity.id); job.payload.imageRequests = []; this.save(job);
+        const illustrations = this.imageTools(jobId);
+        const prompt = this.taskPrompt('writing', {
           ...this.promptVariables(job, state), ...context.variables, context: context.text, mode: input.mode,
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
           writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : `请写第 ${state.chapters.length + 1} 章。`,
-        }), signal: controller.signal, tools: context.tools, onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event) });
+        });
+        const messages = prompt.messages && illustrations.instruction ? [{ role: 'system' as const, content: illustrations.instruction }, ...prompt.messages] : prompt.messages;
+        const request = this.budget(job, provider, { ...prompt, system: prompt.system + illustrations.instruction, messages, signal: controller.signal, tools: [...context.tools, ...illustrations.tools], onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event) });
         const { result, output } = await this.requestCaptured(jobId, 'writing', request, req => this.models.generateText(provider, req), result => result.text);
         this.applyWriting(this.live(jobId), output, result.text, false);
         return;
       }
       if (job.kind === 'extract') {
+        job = this.live(jobId);
+        if (typeof job.payload.pendingIllustrationChapterId === 'string') this.illustrateChapter(job, job.payload.pendingIllustrationChapterId);
         job = this.live(jobId); const pending = this.store.state(job.branchId).chapters.filter(c => c.status !== 'ready');
         for (const chapter of pending) { await this.extractChapter(jobId, chapter.id, controller.signal); job = this.live(jobId); job.progress++; this.save(job); }
       }

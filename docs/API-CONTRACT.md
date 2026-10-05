@@ -2,6 +2,32 @@
 
 所有接口 /api，cookie session。JSON 错误 {error:string}。时间 ISO。共享类型 shared/types.ts。
 
+## 图片接口
+
+- `StoryState.activeImageIds?:string[]` 为当前版本的图片选择，必须是 `imageIds` 的无重复子集；缺省为旧作品兼容选择，按明确关联对象取最新成功图，显式空数组表示全部停用。`StoryImage.active` 为当前故事线投影，不修改历史图片资产。人物／实体按合并后的明确实体 ID 分组，地图一组，CG 按章节及准确选段范围分组，同组最多启用一张。新变体保留旧选择；首次对象的待生成图成功后启用。
+- `PUT /branches/:id/images/:imageId/active?view=author {baseRevisionId,active:boolean} -> {view:BranchView,images:StoryImage[]}`：启用／停用当前故事线图片，启用一张会停用同组其他图片；调用方替换整份图片列表并更新版本。新图片须生成完成才能手动启用；不调用任何模型。
+- `DELETE /branches/:id/images/:imageId?view=author {baseRevisionId} -> {view:BranchView,images:StoryImage[]}`：从当前版本的图册及启用列表移除；历史及其他故事线引用保留像素，不跨版本破坏资料。删除当前图片不自动换用其他图片。排队／运行任务按所属故事线处理取消与迟到输出，删除后不能通过当前线内容 URL 读取。
+- 作者列表包含未启用的暂存图，仍能预览；阅读列表／版本引用／直接内容接口仅返回已启用且通过私密过滤的完成图。未启用或删除的图不会进入提示词优化图片候选、实际图片请求及 CG 参考，显式编辑原图也须启用。优化后参考选择变化则拒绝后续图片请求，显式重试按当前选择重新优化。已生成 CG 的历史引用私密检查不要求源图继续在当前图册或启用，但仍检查秘密、未来事实及档案依赖。
+
+- `GET /branches/:id/images?view=author|reader -> StoryImage[]`：当前快照引用的图片，默认阅读视图。仅返回该故事线可查看的图；完成图带同源、需登录的 `url`。阅读响应隐藏提示词、原文片段、参考图标识及错误，并过滤秘密和未来资料图片。
+- `POST /branches/:id/images?view=author`，请求为 `ImageGenerateInput={baseRevisionId,kind:'portrait'|'entity'|'map'|'cg',entityId?,chapterId?,selection?:{start,end},instruction?,referenceImageId?}`，返回 `{view:BranchView,image:StoryImage}`。登记引用创建一个新版本，独立图片任务随后运行；调用方更新 `view.branch.revisionId`。资料图必须指定当前实体，地图依据地点与地理关系，CG 必须指定当前章，选段为正文 UTF-16 起止索引，结束位置不包含在选段内。图片修改需同一关联对象的已完成参考图与修改要求，使用实际原图输入，不覆盖旧图。
+- `GET /branches/:id/images/:imageId/content?view=author|reader`：只返回快照引用且通过可见性过滤的已完成 PNG、JPEG 或 WebP 图片二进制；跨作品、回退后不再包含及秘密图不可绕过列表直接读取。
+- `POST /branches/:id/images/:imageId/retry?view=author {baseRevisionId}`：显式再次请求，返回新资源和新版本，原记录与原图保留。重试可能再次计费。
+- `POST /branches/:id/images/:imageId/cancel?view=author -> StoryImage`：停止排队或正在生成的图片，拒绝迟到结果。
+- 图片状态为 `queued/running/completed/failed/paused/stale/cancelled`。服务重启或关闭后排队与运行任务转为 `paused`，不自动重复调用；正文或资料版本变化后迟到结果转为 `stale`。图片二进制持久化在 SQLite，单图上限 20 MiB，作品删除和完整备份／恢复包括图片及历史引用，旧版无图片备份继续可用。
+- 手动登记、修改与重试沿用 session、同源、作者视图及起始版本校验；文字任务处于等待、运行或暂停时返回 `409`，防止改变写作起始版本。图片失败不重试文字生成。图片提示词、请求与结果不参与正文保存或 TXT 导出。
+- 设置可保存 `imageSettings={providerId,model,protocol:'openai-images'|'gemini',size,quality,stylePrompt,autoPortrait,autoCG,timeoutMs}`，复用加密供应商密钥。默认新人物自动立绘开启、自动 CG 关闭，未配置图片模型时不暴露写作生图工具。旧设置缺失该字段时采用默认；旧客户端省略字段保存时保留已存在配置。
+- 写作工具 `generate_character_portrait {name,description}` 与 `generate_scene_cg {description,sourceText}` 登记自动插画意图，返回 `requested`；不在写作过程中改变正文版本。资料整理完成后按明确姓名／别名匹配新人物，CG 引用须逐字存在于已保存正文，再批量绑定引用并独立生图。自动新人物立绘按提取资料补充，已有立绘不重复请求；自动 CG 只在开关开启时提供，由写作模型判断触发。本章最多 12 个自动插画。
+- 图片任务分为提示词优化与图片生成：登记时保存 `material/instruction` 和 `promptStatus='pending'`；文字模型返回专用 `prompt`、选择的参考人物和自动尺寸，校验后保存 `promptStatus='completed'/optimizedAt`，再调用图片接口。优化失败时不发图片请求，像素失败重试复用已优化结果；资料、图片型号／协议、固定构图参数或参考开关已变化时重新优化。任一阶段取消、回退、删除或版本变化都阻止后续计费请求及迟到应用。
+- `StoryImage` 可含 `materialEntityIds`（提示词使用的档案依赖）、`referenceImageIds/referenceEntityIds/referenceCharacters:{entityId,imageId,name}[]`、`generationParameters`（本次实际参数）。原 `sourceText/chapterId/selection` 保持剧情证据，不被优化提示词改写；原单一 `referenceImageId` 继续代表编辑原图。阅读响应清除全部优化素材、参数和参考名册；服务端检查档案及所有参考图链当前可见性，不能从直接图片 URL 绕过。
+- `imageSettings` 新增 `promptProviderId/promptModel/promptSystemPrompt/useCharacterReferences`。优化模型默认依次使用已配置的规划和写作模型，读取规划用途的参数；输入加完整输出预留超限时请求前停止。所有优化及图片调用均无自动重试。配置未改变时重试像素不重复支付优化请求；旧图片在再次绘制时进入优化步骤，已有数据继续可读取。
+- 旧 `quality` 必需字段为设置兼容保留，只有 OpenAI Images 将其用于生成；Gemini 通过分辨率控制输出，不发送该字段，Together 也不把它当作图片质量参数。原图任务及旧备份字段仍可读取，新增优化和参考字段均为可选字段。
+- 图片协议新增 `together-images`。`size` 接受 `auto` 或合法 `宽x高`；可设 `aspectRatio`、`imageSize`（`auto/512/1K/2K/4K`），自动值由优化 AI 依据型号能力选择，固定值优先。额外图片参数按已知型号能力校验，含 Gemini 的 `systemInstruction/temperature/topP/topK/seed/maxOutputTokens/thinkingLevel/includeThoughts`，OpenAI 的 `quality/background/outputFormat/outputCompression/inputFidelity/moderation`，Together 的 `width/height/steps/guidanceScale/negativePrompt/promptUpsampling/disableSafetyChecker`。不可用参数在保存或请求前明确报错，不静默丢弃。
+- OpenAI 多图输入为 `images/edits` multipart 的 `image[]`；Gemini 为多条 `inlineData` 及原生 `systemInstruction/generationConfig`；已知 Together 型号为 `/images/generations` JSON，单图 `image_url` 或多图 `reference_images`，响应格式固定 `base64`。CG 仅按已保存剧情和当前版本中的明确人物选择已完成立绘，记录实际参考图对应关系；自动 CG 等同批相关立绘完成或失败后再生成。不支持人物参考的型号按资料绘制。
+- 全部参考图原始字节合计不超过 20 MiB；Gemini 另检查完整内联 JSON 请求（含 Base64、提示词及系统提示）不超过 20,000,000 字节。Together 的 `data:` 私有参考输入已实现并经本地协议模拟验证，官方资料只明确 URL 输入，真实服务接受情况未验收；拒绝时不上传公开地址、不取消参考后偷偷重试。每个任务固定生成一张图片，不提供图片流式分块或搜索工具。能力与设置说明见 [使用指南](USAGE.md#插画与故事图册)。
+
+## 文字与作品接口
+
 - GET /auth/status -> {initialized,authenticated}; POST /auth/setup {password}（首次）; POST /auth/login {password}; POST /auth/logout。
 - GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],sources:Source[]}。GET 默认隐藏 premise（初始作者设定），显式 ?view=author 返回。
 - DELETE /projects/:id（无请求体）-> {ok:true}：永久删除整部作品，包括原文、正文、所有故事线及历史快照、世界资料、剧情规划与伏笔、任务、导入队列、模型输出和搜索索引。先取消该作品未结束的任务、中止模型请求并等待收尾，再在事务中清理数据，迟到结果不能重新写回。删除期间创建、恢复或重试任务返回 409；重复并发删除返回 409，作品不存在或已删除返回 404。沿用 session 和同源校验，无需 baseRevisionId 或作者视图参数；不影响其他作品、登录和供应商设置。原文清理如遇文件占用，会保留在内部待清理目录并在下次服务启动重试。

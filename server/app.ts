@@ -9,6 +9,8 @@ import { join, resolve, basename, dirname } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { Store } from './store.js';
 import { StoryEngine } from './engine.js';
+import { ImageService } from './images.js';
+import { validateImageParameters } from './image-provider.js';
 import { parseNovel } from './importer.js';
 import { generateText, redactModelPayload, validateProviderOptions } from './providers.js';
 import { listProviderModels } from './model-catalog.js';
@@ -36,7 +38,17 @@ const modelParametersSchema = z.object({
 const providerSchema = z.object({ id: z.string().min(1).max(100), name: z.string().min(1).max(100), protocol: z.enum(['openai-chat', 'openai-responses', 'gemini', 'claude']), baseUrl: z.string().url().max(2000).refine(v => { const u = new URL(v); return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password; }, '服务地址必须是 HTTP(S)，不能包含用户名或密码'), model: modelNameSchema.optional(), apiKey: z.string().max(4096).optional(), hasKey: z.boolean().optional(), clearApiKey: z.boolean().optional() }).extend(modelParametersSchema.partial().shape);
 const modelRoleSchema = z.enum(modelRoles);
 const modelProfileSchema = modelParametersSchema.extend({ role: modelRoleSchema.optional(), providerId: z.string().min(1).max(100), model: modelNameSchema.refine(value => Boolean(value), '模型参数需要指定模型名称') }).strict();
-const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional(), promptTemplates: z.unknown().optional() });
+const imageSettingsSchema = z.object({
+  providerId: z.string().max(100), model: modelNameSchema, protocol: z.enum(['openai-images', 'gemini', 'together-images']), size: z.string().max(50).refine(value => value === 'auto' || /^\d{2,4}x\d{2,4}$/.test(value), '图片尺寸需为 auto 或合法的宽x高'),
+  quality: z.enum(['auto', 'low', 'medium', 'high', 'standard', 'hd', 'xhigh', 'max']), stylePrompt: z.string().max(10000), autoPortrait: z.boolean(), autoCG: z.boolean(), timeoutMs: z.number().int().min(1000).max(3600000),
+  promptProviderId: z.string().max(100).optional(), promptModel: modelNameSchema.optional(), promptSystemPrompt: z.string().max(10000).optional(), useCharacterReferences: z.boolean().optional(),
+  aspectRatio: z.string().max(30).optional(), imageSize: z.enum(['auto', '512', '1K', '2K', '4K']).optional(), systemInstruction: z.string().max(32000).optional(),
+  temperature: z.number().min(0).max(2).optional(), topP: z.number().min(0).max(1).optional(), topK: z.number().int().min(1).max(1000000).optional(), seed: z.number().int().min(-2147483648).max(4294967295).optional(), maxOutputTokens: z.number().int().min(1).max(32768).optional(),
+  thinkingLevel: z.enum(['minimal', 'low', 'medium', 'high']).optional(), includeThoughts: z.boolean().optional(), searchGrounding: z.boolean().optional(),
+  outputFormat: z.enum(['png', 'jpeg', 'webp']).optional(), outputCompression: z.number().int().min(0).max(100).optional(), background: z.enum(['auto', 'opaque', 'transparent']).optional(), inputFidelity: z.enum(['low', 'high']).optional(), moderation: z.enum(['auto', 'low']).optional(),
+  negativePrompt: z.string().max(32000).optional(), steps: z.number().int().min(1).max(100).optional(), guidanceScale: z.number().min(0).max(20).optional(), width: z.number().int().min(16).max(8192).optional(), height: z.number().int().min(16).max(8192).optional(), promptUpsampling: z.boolean().optional(), disableSafetyChecker: z.boolean().optional(),
+}).strict();
+const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional(), promptTemplates: z.unknown().optional(), imageSettings: imageSettingsSchema.optional() });
 const citationSchema = z.object({ chapterId: z.string(), paragraph: z.number().int().positive(), quote: z.string().max(10000) });
 const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(200), description: z.string().max(30000), visibility: z.enum(['public', 'secret']), locked: z.boolean(), isMain: z.boolean().optional(), nameStatus: z.enum(['placeholder', 'confirmed']).optional(), mergedInto: z.string().optional(), facts: z.array(z.object({ id: z.string(), text: z.string().max(10000), attribute: z.string().min(1).max(100).optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() })).max(5000) });
 const foreshadowSchema = z.object({ id: z.string().min(1), title: z.string().min(1).max(300), detail: z.string().max(20000), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string().max(20000), relatedEntityIds: z.array(z.string()).max(1000) });
@@ -52,7 +64,8 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   const uploadDir = join(dataDir, 'sources'); mkdirSync(uploadDir, { recursive: true });
   const store = new Store(dataDir);
   const settings = new SettingsStore(store.db, dataDir);
-  const engine = new StoryEngine(store, () => settings.get());
+  const images = new ImageService(store, () => settings.get());
+  const engine = new StoryEngine(store, () => settings.get(), undefined, images);
   store.db.exec(`CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, filename TEXT NOT NULL, format TEXT NOT NULL, chapter_count INTEGER NOT NULL, created_at TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, preview TEXT NOT NULL, storage_name TEXT NOT NULL)`);
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: 128 * 1024 * 1024 });
   const deletionDir = join(dataDir, 'deleted-sources');
@@ -141,7 +154,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.delete('/api/projects/:id', async request => {
     const projectId = param(request); let stagedDirectory: string | undefined;
     try {
-      await engine.deleteProject(projectId, () => {
+      await images.deleteProject(projectId, () => engine.deleteProject(projectId, () => {
         const files = store.db.prepare('SELECT DISTINCT storage_name FROM sources s WHERE project_id=? AND NOT EXISTS (SELECT 1 FROM sources other WHERE other.storage_name=s.storage_name AND other.project_id<>?)').all(projectId, projectId);
         const paths = files.map(file => {
           const path = resolve(uploadDir, String(file.storage_name));
@@ -156,7 +169,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
           }
         }
         store.db.prepare('DELETE FROM sources WHERE project_id=?').run(projectId);
-      });
+      }));
     } catch (error) {
       if (stagedDirectory) finishSourceDeletion(stagedDirectory);
       throw error;
@@ -167,6 +180,14 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     return { ok: true };
   });
   app.get('/api/branches/:id', async request => store.view(param(request), author(request)));
+  const imageInputSchema = z.object({ baseRevisionId: revision, kind: z.enum(['portrait', 'entity', 'map', 'cg']), entityId: z.string().min(1).max(100).optional(), chapterId: z.string().min(1).max(100).optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), instruction: z.string().max(20000).optional(), referenceImageId: z.string().min(1).max(100).optional() }).strict();
+  app.get('/api/branches/:id/images', async request => images.list(param(request), author(request)));
+  app.post('/api/branches/:id/images', async request => { if (!author(request)) fail('请在作者视图中生成图片。', 403); return images.generate(param(request), imageInputSchema.parse(request.body)); });
+  app.get('/api/branches/:id/images/:imageId/content', async (request, reply) => { const content = images.content(param(request), param(request, 'imageId'), author(request)); return reply.type(content.mimeType).header('Content-Disposition', 'inline').send(Buffer.from(content.bytes)); });
+  app.post('/api/branches/:id/images/:imageId/retry', async request => { if (!author(request)) fail('请在作者视图中重试生图。', 403); return images.retry(param(request), param(request, 'imageId'), base(request.body)); });
+  app.post('/api/branches/:id/images/:imageId/cancel', async request => { if (!author(request)) fail('请在作者视图中取消生图。', 403); return images.cancel(param(request), param(request, 'imageId')); });
+  app.put('/api/branches/:id/images/:imageId/active', async request => { if (!author(request)) fail('请在作者视图中选择启用图片。', 403); const input = z.object({ baseRevisionId: revision, active: z.boolean() }).strict().parse(request.body); return images.setActive(param(request), param(request, 'imageId'), input.baseRevisionId, input.active); });
+  app.delete('/api/branches/:id/images/:imageId', async request => { if (!author(request)) fail('请在作者视图中删除图片。', 403); return images.delete(param(request), param(request, 'imageId'), base(request.body)); });
   app.get('/api/branches/:id/chapters/:chapterId', async request => store.chapter(param(request), param(request, 'chapterId')));
   app.post('/api/branches/:id/chapters', async request => {
     const input = z.object({ baseRevisionId: revision, title: z.string().trim().min(1).max(500), text: z.string().max(2000000), chapterId: z.string().optional() }).parse(request.body);
@@ -259,6 +280,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
       try { input.promptTemplates = validatePromptTemplates(input.promptTemplates); }
       catch (error) { fail(error instanceof Error ? error.message : '提示词编排配置无效。'); }
     } else input.promptTemplates = settings.get().promptTemplates;
+    if (input.imageSettings === undefined) input.imageSettings = settings.get().imageSettings;
     const originalProfiles = new Set<string>();
     for (const profile of input.modelParameters ?? []) {
       const key = JSON.stringify([profile.role ?? null, profile.providerId, profile.model]);
@@ -269,6 +291,13 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     if ((b.modelParameters?.length ?? 0) > 3000) fail('按任务展开后的模型参数最多保存 3000 项。');
     const ids = new Set(b.providers.map(p => p.id));
     if (ids.size !== b.providers.length) fail('供应商连接的标识不能重复。');
+    if (b.imageSettings?.providerId && !ids.has(b.imageSettings.providerId)) fail('生图对应的供应商连接不存在。');
+    if (b.imageSettings?.providerId && !b.imageSettings.model) fail('生图需要填写图片模型名称。');
+    if (b.imageSettings?.promptProviderId && !ids.has(b.imageSettings.promptProviderId)) fail('生图提示词优化对应的供应商不存在。');
+    if (b.imageSettings?.promptProviderId && !b.imageSettings.promptModel?.trim()) fail('请填写生图提示词优化的文字模型名称。');
+    if (b.imageSettings?.providerId && b.imageSettings.model) {
+      try { validateImageParameters(b.imageSettings); } catch (error) { fail(error instanceof Error ? error.message : '图片模型参数无效。'); }
+    }
     for (const role of ['writing', 'planning', 'extraction'] as const) {
       const id = b[`${role}ProviderId`];
       if (id && !ids.has(id)) fail('所选任务对应的供应商连接不存在。');
@@ -360,7 +389,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     await app.register(staticFiles, { root: staticDir, prefix: '/' });
     app.setNotFoundHandler((request, reply) => request.url.startsWith('/api/') ? reply.status(404).send({ error: '接口不存在。' }) : reply.sendFile('index.html'));
   }
-  app.addHook('onClose', async () => { await engine.close(); store.close(); });
+  app.addHook('onClose', async () => { await Promise.all([engine.close(), images.close()]); store.close(); });
   if (options.startEngine !== false) engine.start();
-  return { app, store, engine, settings, dataDir };
+  return { app, store, engine, images, settings, dataDir };
 }
