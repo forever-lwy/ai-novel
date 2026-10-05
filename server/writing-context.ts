@@ -5,6 +5,7 @@ export interface WritingContextInput {
   premise?: string;
   chapterText: (chapterId: string) => string;
   recentChapterCount?: number;
+  planningEnabled?: boolean;
 }
 
 const mainRole = /(?:^|[，。；：:\s]|是|为|担任)(?:本书|故事|本作|作品)?(?:的)?(?:男主角|女主角|主人公|主角|男主|女主)(?=$|[，。；：:\s])/;
@@ -39,7 +40,7 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
     ...(compressionApplies ? { authorConfirmedSummary: { text: compression!.text, chapterIds: compression!.chapterIds } } : {}),
     completePlotSummaries: summaries,
     recentCompleteChapters: recent,
-    currentChapterPlan: state.outline.fine.find(plan => plan.chapter === nextChapter) ?? null,
+    currentChapterPlan: input.planningEnabled === false ? null : state.outline.fine.find(plan => plan.chapter === nextChapter) ?? null,
   };
   const tools: ModelTool[] = [
     {

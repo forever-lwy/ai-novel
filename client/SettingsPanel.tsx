@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered, Image } from 'lucide-react';
-import type { CapturedModelResponse, ImageSettings, ModelParameters, ModelRole, ProviderConnection, ProviderModel, ProviderProtocol, Settings } from '../shared/types';
+import type { CapturedModelResponse, ImageSettings, ModelParameters, ModelRole, ProviderConnection, ProviderModel, ProviderProtocol, Settings, TaskSettings } from '../shared/types';
 import { defaultModelParameters, getModelParameters, upsertModelParameters } from '../shared/model-settings';
 import { api, post, put } from './api';
 import { Brand, Notice, Spinner } from './ui';
@@ -10,6 +10,7 @@ import { PromptTemplatesPanel } from './PromptTemplatesPanel';
 import { validatePromptTemplates } from '../shared/prompt-templates';
 import { normalizeImageSettings } from '../shared/image-settings';
 import { imageModelCapabilities } from '../shared/image-capabilities';
+import { normalizeTaskSettings } from '../shared/task-settings';
 
 const protocols: Record<ProviderProtocol, { name: string; url: string }> = {
   'openai-chat': { name: 'OpenAI · Chat Completions', url: 'https://api.openai.com/v1' },
@@ -28,7 +29,7 @@ type ModelRequest = { signature: string; controller: AbortController; timer?: Re
 const connectionSignature = (provider: ProviderConnection) => JSON.stringify([provider.id, provider.protocol, provider.baseUrl, provider.apiKey || '', !!provider.clearApiKey, !!provider.hasKey]);
 const sections = [
   { id: 'providers', label: '供应商连接', icon: KeyRound, description: '管理服务地址、接口协议和 API 密钥。密钥保存在服务端，作品备份不包含密钥。' },
-  { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '为正文写作、剧情规划和资料提取分别选择模型。每个任务独立保存参数，同模型用于不同任务也不共用。' },
+  { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '为各类任务选择模型，设置资料提取自动重试和剧情规划方式。每个任务独立保存参数，同模型用于不同任务也不共用。' },
   { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '为四类任务管理提示词预设、调整消息顺序，并预览编排后的内容。' },
   { id: 'images', label: '生图与自动插画', icon: Image, description: '选择图片模型，设置作品画风、新人物立绘与场景 CG 的自动生成。' },
 ] as const;
@@ -44,6 +45,12 @@ function fieldError(field: HTMLInputElement | HTMLSelectElement | HTMLTextAreaEl
   if (field.validity.rangeOverflow) return `数值不能大于 ${field.getAttribute('max')}。`;
   if (field.validity.stepMismatch) return field.getAttribute('step') === '1' ? '请填写整数。' : '请填写符合精度要求的数值。';
   return '请检查此项内容。';
+}
+
+function TaskNumber({ label, value, max, step = 1, disabled, onChange }: { label: string; value: number; max: number; step?: number; disabled: boolean; onChange: (value: number) => void }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  return <label>{label}<input aria-label={label} type="number" required min={0} max={max} step={step} disabled={disabled} value={text} onChange={event => { setText(event.target.value); if (event.target.value !== '' && event.target.validity.valid) onChange(Number(event.target.value)); }} /></label>;
 }
 
 export function SettingsPage({ onBack }: { onBack: () => void }) {
@@ -133,6 +140,13 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   function updateParameters(role: ModelRole, providerId: string, model: string, patch: Partial<ModelParameters>) {
     setMessage(''); setSettings(value => value && upsertModelParameters(value, role, providerId, model, { ...getModelParameters(value, role, providerId, model), ...patch }));
   }
+  function updateTaskSettings<T extends keyof TaskSettings>(task: T, patch: Partial<TaskSettings[T]>) {
+    setMessage(''); setSettings(value => {
+      if (!value) return value;
+      const tasks = normalizeTaskSettings(value.taskSettings);
+      return { ...value, taskSettings: { ...tasks, [task]: { ...tasks[task], ...patch } } };
+    });
+  }
   function resetParameters(role: ModelRole, providerId: string, model: string) { setMessage(''); setSettings(value => value && upsertModelParameters(value, role, providerId, model, defaultModelParameters())); }
   function deleteProvider(providerId: string) {
     setMessage(''); setSettings(value => {
@@ -185,6 +199,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       else setMessage('设置已保存。');
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
+  const tasks = normalizeTaskSettings(settings?.taskSettings);
   return <main className="settings-page" data-testid="settings-page" aria-label="设置页面">
     <header className="settings-header"><Brand /><button type="button" className="text-button" disabled={busy} onClick={back}><ArrowLeft size={16} />返回作品</button></header>
     <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>设置</h1><p>配置模型服务、任务参数与提示词，让创作按你的习惯运行。</p></div>
@@ -215,6 +230,20 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       const modelName = model.trim();
       return <section className="settings-task-card form-stack" key={role.providerKey} aria-label={`${role.label}模型设置`}>
         <h4>{role.label}</h4>
+        {role.role === 'extraction' && <>
+          <label className="checkbox"><input type="checkbox" aria-label="资料提取自动重试" checked={tasks.extraction.autoRetry} onChange={e => updateTaskSettings('extraction', { autoRetry: e.target.checked })} />资料提取失败后自动重试</label>
+          <div hidden={!tasks.extraction.autoRetry}><div className="form-grid">
+            <TaskNumber label="资料提取最多重试次数" value={tasks.extraction.maxRetries} max={10} disabled={!tasks.extraction.autoRetry} onChange={maxRetries => updateTaskSettings('extraction', { maxRetries })} />
+            <TaskNumber label="资料提取重试间隔（秒）" value={tasks.extraction.retryDelayMs / 1000} max={300} step={0.001} disabled={!tasks.extraction.autoRetry} onChange={seconds => updateTaskSettings('extraction', { retryDelayMs: Math.round(seconds * 1000) })} />
+          </div></div>
+          <p className="hint">只重试资料提取，不重新生成正文。每次重试会再次调用模型，可能产生用量；0 次表示不重试。</p>
+        </>}
+        {role.role === 'planning' && <>
+          <label className="checkbox"><input type="checkbox" aria-label="启用剧情规划" checked={tasks.planning.enabled} onChange={e => updateTaskSettings('planning', { enabled: e.target.checked })} />启用剧情规划</label>
+          <label>剧情规划方式<select aria-label="剧情规划方式" value={tasks.planning.mode} disabled={!tasks.planning.enabled} onChange={e => updateTaskSettings('planning', { mode: e.target.value as TaskSettings['planning']['mode'] })}><option value="separate">独立规划模型</option><option value="tool">写作 AI 工具</option></select></label>
+          <p className="hint">{!tasks.planning.enabled ? '关闭后，写作不使用预期规划，也不会生成新规划。已有规划仍可查看和手动编辑。' : tasks.planning.mode === 'tool' ? '写作 AI 通过 update_plot_plan 直接提交当前章及后 3 章的规划，随正文一起保存，不调用独立规划模型。' : '使用下面配置的模型，通过“让 AI 规划”单独生成预期规划。'}</p>
+          <p className="hint">下面的模型配置同时用于摘要压缩和默认生图提示词优化。关闭规划或切换到工具模式时，配置仍会保留。</p>
+        </>}
         <label>供应商<select aria-label={`${role.label}供应商`} value={settings[role.providerKey]} onChange={e => updateRole(role, e.target.value)}><option value="">暂不设置</option>{settings.providers.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
         {provider && <>
           <label>上游模型<select aria-label={`${role.label}上游模型`} value={list?.models.some(value => value.id === model) ? model : ''} disabled={list?.loading || !list?.models.length} onChange={e => updateModel(role, e.target.value)}><option value="">{list?.loading ? '正在获取模型…' : list?.models.length ? '选择上游模型' : '暂无可选模型'}</option>{list?.models.map(value => <option key={value.id} value={value.id}>{value.name && value.name !== value.id ? `${value.name} · ${value.id}` : value.id}</option>)}</select></label>

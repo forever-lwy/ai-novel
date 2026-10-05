@@ -4,7 +4,7 @@
 
 2026-09-30 核对了官方 AiNiee 的提交 `295d2ff19cd5ea8ce280a405fe4389a0eec411d7`。其[第一阶段](https://github.com/NEKOparapa/AiNiee/blob/295d2ff19cd5ea8ce280a405fe4389a0eec411d7/ModuleFolders/Service/TaskExecutor/AnalysisTask.py#L234-L312)专注人物、术语和禁翻内容，提供完整输入输出示例；[请求与解析](https://github.com/NEKOparapa/AiNiee/blob/295d2ff19cd5ea8ce280a405fe4389a0eec411d7/ModuleFolders/Service/TaskExecutor/AnalysisTask.py#L620-L707)会提取 JSON、检查列表字段并重试，失败时上层可返回空列表。该流程没有我们要求的逐段引文校验，不能用“没有报错”推断完整率或准确率。
 
-本项目借鉴简化输出、示例引导、模型识别与本地整理分开的做法。继续保留失败响应，不采用失败后当空结果完成，也不增加隐式付费重试。没有复制上游实现。
+本项目借鉴简化输出、示例引导、模型识别与本地整理分开的做法。继续保留失败响应，不采用失败后当空结果完成。自动付费重试仅在作者明确开启资料提取重试设置后执行。没有复制上游实现。
 
 2026-10-02 进一步核对了 AiNiee 的 `b01d2481317012bab2b5c3bb35914989b71fe865`：[候选分组](https://github.com/NEKOparapa/AiNiee/blob/b01d2481317012bab2b5c3bb35914989b71fe865/ModuleFolders/Service/TaskExecutor/AnalysisTask.py#L322-L392)汇总同名及可选的长短名称匹配，[第二轮裁决](https://github.com/NEKOparapa/AiNiee/blob/b01d2481317012bab2b5c3bb35914989b71fe865/ModuleFolders/Service/TaskExecutor/AnalysisTask.py#L299-L320)再整理候选，最终按[主名称及别名索引](https://github.com/NEKOparapa/AiNiee/blob/b01d2481317012bab2b5c3bb35914989b71fe865/ModuleFolders/Service/TaskExecutor/AnalysisTask.py#L470-L525)去重。本项目采用跨片段名称对照、明确别名联系和整批归并，不引入额外付费裁决请求，也不按名字包含或相似外貌强行合并人物。
 
@@ -19,6 +19,8 @@
 一次本地规范化不会再调用模型。正文、状态变化和实体关联的内容仍需模型理解，格式处理不能证明语义完全正确。
 
 ## 格式与证据规则
+
+提取自动重试默认关闭，可在“设置 → 任务模型”设置额外请求次数和间隔。每个失败片段独立计数，保留每次响应与用量；已完成的片段和正文不重新生成。网络、超时、HTTP 5xx／408／429、格式或证据校验失败可按设置重试；配置、预算、其他 HTTP 4xx、存储错误、暂停、取消与版本变化会停止。次数耗尽后保留进度，支持手工修正或显式重试。服务重启不自动重复请求。完整操作见 [使用指南](USAGE.md#提取重试与剧情规划)。
 
 - 顶层必须有字符串 `summary` 和数组 `entities`，不能把空对象或服务错误当作成功提取。`relations`、`foreshadows` 可省略为空数组。
 - 实体仍需类型、名称。可省略别名、描述和事实列表；事实需有具体内容及可定位证据，关系需有两端名称、标签及证据。

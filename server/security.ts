@@ -7,6 +7,7 @@ import type { Settings, ProviderConnection } from '../shared/types.js';
 import { connectionOnly, normalizeModelSettings } from '../shared/model-settings.js';
 import { normalizePromptTemplates } from '../shared/prompt-templates.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
+import { normalizeTaskSettings } from '../shared/task-settings.js';
 
 const scrypt = promisify(scryptCallback);
 export async function hashPassword(password: string) {
@@ -22,9 +23,9 @@ export async function verifyPassword(password: string, stored: string) {
   return hash.length === expected.length && timingSafeEqual(hash, expected);
 }
 export const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
-export const defaultSettings = (): Settings => ({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '', writingModel: '', planningModel: '', extractionModel: '', modelParameters: [], promptTemplates: normalizePromptTemplates(), imageSettings: normalizeImageSettings() });
+export const defaultSettings = (): Settings => ({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '', writingModel: '', planningModel: '', extractionModel: '', modelParameters: [], promptTemplates: normalizePromptTemplates(), imageSettings: normalizeImageSettings(), taskSettings: normalizeTaskSettings() });
 export function normalizeSettings(settings: Settings): Settings {
-  return { ...normalizeModelSettings(settings), promptTemplates: normalizePromptTemplates(settings.promptTemplates), imageSettings: normalizeImageSettings(settings.imageSettings) };
+  return { ...normalizeModelSettings(settings), promptTemplates: normalizePromptTemplates(settings.promptTemplates), imageSettings: normalizeImageSettings(settings.imageSettings), taskSettings: normalizeTaskSettings(settings.taskSettings) };
 }
 
 export class SettingsStore {

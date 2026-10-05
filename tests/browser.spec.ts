@@ -1631,3 +1631,135 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
     await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await expect(page.locator('.image-gallery .image-kind-portrait')).toHaveCount(0); await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(1); await expect(page.getByRole('button', { name: '删除图片', exact: true })).toHaveCount(0); expect(viewerErrors).toEqual([]);
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
+
+async function taskSettingsAuthentication(page: Page) {
+  if (!(await (await page.request.get('/api/auth/status')).json()).initialized) {
+    expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  }
+}
+
+const taskSettingsDefaults = {
+  extraction: { autoRetry: false, maxRetries: 2, retryDelayMs: 5000 },
+  planning: { enabled: true, mode: 'separate' },
+};
+
+test('任务控制设置保留数字草稿，校验重试范围并保存秒到毫秒的转换', async ({ page }, testInfo) => {
+  await taskSettingsAuthentication(page);
+  const previous = await (await page.request.get('/api/settings')).json();
+  const providerId = 'e2e-task-controls';
+  const configured = {
+    ...previous,
+    providers: [...previous.providers, { id: providerId, name: '任务控制测试供应商', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: 'loopback-fixture-key' }],
+    planningProviderId: providerId, planningModel: 'e2e-planning', taskSettings: taskSettingsDefaults,
+  };
+  try {
+    expect((await page.request.put('/api/settings', { data: configured })).ok()).toBeTruthy();
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settings = page.getByTestId('settings-page');
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    const extraction = settings.getByRole('region', { name: '资料提取模型设置', exact: true });
+    const planning = settings.getByRole('region', { name: '剧情规划模型设置', exact: true });
+    await expect(extraction.getByRole('checkbox', { name: '资料提取自动重试', exact: true })).not.toBeChecked();
+    await expect(extraction.getByRole('spinbutton', { name: '资料提取最多重试次数', exact: true })).toBeHidden();
+    await extraction.getByRole('checkbox', { name: '资料提取自动重试', exact: true }).check();
+    const retries = extraction.getByRole('spinbutton', { name: '资料提取最多重试次数', exact: true });
+    const delay = extraction.getByRole('spinbutton', { name: '资料提取重试间隔（秒）', exact: true });
+    await expect(retries).toHaveValue('2'); await expect(delay).toHaveValue('5');
+    await retries.fill('11'); await delay.fill('');
+    await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await expect(retries).toHaveValue('11'); await expect(delay).toHaveValue('');
+    let saves = 0;
+    page.on('request', request => { if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/settings') saves++; });
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(settings.locator('.settings-feedback')).toContainText('数值不能大于 10'); expect(saves).toBe(0);
+    await retries.fill('3'); await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(settings.locator('.settings-feedback')).toContainText('请填写此项'); expect(saves).toBe(0);
+    await delay.fill('1.25');
+    await planning.getByRole('combobox', { name: '剧情规划方式', exact: true }).selectOption('tool');
+    await expect(planning).toContainText('update_plot_plan');
+    await expect(planning.getByRole('textbox', { name: '剧情规划模型名称', exact: true })).toHaveValue('e2e-planning');
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(settings.getByRole('status')).toContainText('设置已保存');
+    const saved = await (await page.request.get('/api/settings')).json();
+    expect(saved.taskSettings).toEqual({ extraction: { autoRetry: true, maxRetries: 3, retryDelayMs: 1250 }, planning: { enabled: true, mode: 'tool' } });
+    expect(saved.planningProviderId).toBe(providerId); expect(saved.planningModel).toBe('e2e-planning');
+    await page.screenshot({ path: testInfo.outputPath('task-controls-desktop.png'), animations: 'disabled', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await extraction.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('task-controls-mobile.png'), animations: 'disabled' });
+    await planning.getByRole('checkbox', { name: '启用剧情规划', exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('task-controls-planning-mobile.png'), animations: 'disabled' });
+    expect(await settings.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+    await settings.getByRole('button', { name: '返回作品', exact: true }).click();
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await expect(retries).toHaveValue('3'); await expect(delay).toHaveValue('1.25');
+    await expect(planning.getByRole('combobox', { name: '剧情规划方式', exact: true })).toHaveValue('tool');
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('规划开关和工具模式即时约束独立规划入口，已有规划仍可编辑', async ({ page }) => {
+  await taskSettingsAuthentication(page);
+  const previous = await (await page.request.get('/api/settings')).json();
+  try {
+    expect((await page.request.put('/api/settings', { data: { ...previous, taskSettings: taskSettingsDefaults } })).ok()).toBeTruthy();
+    await createProject(page, '任务控制规划入口验收'); await tab(page, '剧情与伏笔');
+    const plan = page.getByRole('button', { name: '让 AI 规划', exact: true });
+    await expect(plan).toBeEnabled();
+    await page.getByRole('button', { name: '添加章节规划', exact: true }).click();
+    await page.getByRole('textbox', { name: '规划章节标题', exact: true }).fill('保存的作者规划');
+    await page.getByRole('textbox', { name: '本章目标', exact: true }).fill('保留已有规划的内容。');
+    await page.getByRole('button', { name: '保存世界观与预期规划', exact: true }).click();
+    await expect(page.getByRole('button', { name: '保存世界观与预期规划', exact: true })).toBeDisabled();
+
+    const branchId = await page.getByRole('combobox', { name: '当前故事线', exact: true }).inputValue();
+    const branch = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    // Stable task states cover the buttons without restarting any model request.
+    const taskFixtures = [
+      { id: 'separate-failed', status: 'failed', message: '独立规划失败任务' },
+      { id: 'separate-paused', status: 'paused', message: '独立规划暂停任务' },
+      { id: 'summary-failed', status: 'failed', message: '摘要压缩失败任务', purpose: 'compress-summary' },
+      { id: 'summary-paused', status: 'paused', message: '摘要压缩暂停任务', purpose: 'compress-summary' },
+    ].map(task => ({ ...task, kind: 'plan', projectId: branch.branch.projectId, branchId, baseRevisionId: branch.branch.revisionId, progress: 0, total: 1, inputTokens: 0, outputTokens: 0, createdAt: '2026-10-05T00:00:00.000Z', updatedAt: '2026-10-05T00:00:00.000Z', payload: {} }));
+    await page.route(url => url.pathname === '/api/jobs', route => route.fulfill({ json: taskFixtures }));
+    const taskCard = (message: string) => page.locator('.job-card').filter({ hasText: message });
+    async function checkBlockedTaskActions() {
+      await tab(page, '任务');
+      await expect(taskCard('独立规划失败任务').getByRole('button', { name: '重试', exact: true })).toBeDisabled();
+      await expect(taskCard('独立规划暂停任务').getByRole('button', { name: '继续', exact: true })).toBeDisabled();
+      await expect(taskCard('摘要压缩失败任务').getByRole('button', { name: '重试', exact: true })).toBeEnabled();
+      await expect(taskCard('摘要压缩暂停任务').getByRole('button', { name: '继续', exact: true })).toBeEnabled();
+      await tab(page, '剧情与伏笔');
+    }
+    async function changePlanning(enabled: boolean, mode: 'separate' | 'tool') {
+      await page.getByRole('button', { name: '设置', exact: true }).click();
+      const settings = page.getByTestId('settings-page');
+      await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+      const planning = settings.getByRole('region', { name: '剧情规划模型设置', exact: true });
+      await planning.getByRole('checkbox', { name: '启用剧情规划', exact: true }).setChecked(enabled);
+      if (enabled) await planning.getByRole('combobox', { name: '剧情规划方式', exact: true }).selectOption(mode);
+      await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+      await expect(settings.getByRole('status')).toContainText('设置已保存');
+      await settings.getByRole('button', { name: '返回作品', exact: true }).click();
+    }
+    await changePlanning(false, 'separate'); await expect(plan).toBeDisabled();
+    await expect(page.getByText('剧情规划已关闭，写作不使用预期规划。已有规划仍可查看和手动编辑。', { exact: true })).toBeVisible();
+    await checkBlockedTaskActions();
+    await expect(page.getByRole('textbox', { name: '规划章节标题', exact: true })).toHaveValue('保存的作者规划');
+    await page.getByRole('textbox', { name: '本章目标', exact: true }).fill('关闭 AI 规划后仍可修改。');
+    await page.getByRole('button', { name: '保存世界观与预期规划', exact: true }).click();
+    await expect(page.getByRole('button', { name: '保存世界观与预期规划', exact: true })).toBeDisabled();
+    await changePlanning(true, 'tool'); await expect(plan).toBeDisabled();
+    await expect(page.getByText('剧情规划使用写作 AI 工具，由写作 AI 提交当前章及后 3 章的规划，随正文一起保存。', { exact: true })).toBeVisible();
+    await checkBlockedTaskActions();
+    await expect(page.getByRole('textbox', { name: '本章目标', exact: true })).toHaveValue('关闭 AI 规划后仍可修改。');
+    await changePlanning(true, 'separate'); await expect(plan).toBeEnabled();
+    await tab(page, '任务');
+    await expect(taskCard('独立规划失败任务').getByRole('button', { name: '重试', exact: true })).toBeEnabled();
+    await expect(taskCard('独立规划暂停任务').getByRole('button', { name: '继续', exact: true })).toBeEnabled();
+    await tab(page, '剧情与伏笔');
+    await plan.click(); await expect(page.getByRole('dialog')).toContainText('规划下一段故事');
+    await expect(page.getByRole('button', { name: '开始规划', exact: true })).toBeEnabled();
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});

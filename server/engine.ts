@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { CapturedModelResponse, ExtractionResult, GenerateInput, Job, JobKind, ModelActivityEvent, ModelOutputDetail, ModelOutputRecord, ModelOutputSummary, ModelRequest, OutputIssue, OutputStage, PlanningResult, ProviderConfig, Settings, StoryState, WritingActivity, WritingEvent, PromptTask } from '../shared/types.js';
 import { normalizeModelSettings, resolveModelConfig } from '../shared/model-settings.js';
+import { normalizeTaskSettings } from '../shared/task-settings.js';
 import { compilePrompt, normalizePromptTemplates } from '../shared/prompt-templates.js';
-import { generateStructured, generateText, estimateModelRequestInputTokens, ModelOutputError, parseStructuredText, redactModelPayload, unwrapModelOutput, structuredRequest } from './providers.js';
+import { generateStructured, generateText, estimateModelRequestInputTokens, ModelOutputError, parseStructuredText, redactModelPayload, unwrapModelOutput, structuredRequest, validateProviderOptions } from './providers.js';
 import { HttpError, OutputValidationError, Store } from './store.js';
 import { extractionContext, normalizeExtraction, splitExtractionBlocks as splitBlocks } from './extraction.js';
 import { buildWritingContext } from './writing-context.js';
@@ -51,6 +52,8 @@ export class StoryEngine {
   private deletingProjects = new Set<string>();
   private started = false;
   private closed = false;
+  private chargedExtractionErrors = new WeakSet<ModelOutputError>();
+  private nonRetryableExtractionErrors = new WeakSet<Error>();
   constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'>) {}
   start() {
     if (this.started) return; this.started = true;
@@ -177,18 +180,30 @@ export class StoryEngine {
   private async requestCaptured<T extends { inputTokens: number; outputTokens: number }>(jobId: string, stage: OutputStage, request: ModelRequest, invoke: (request: ModelRequest) => Promise<T>, content: (result: T) => string, chapterId?: string, blockIndex?: number): Promise<{ result: T; output: ModelOutputRecord }> {
     const job = this.live(jobId); job.payload.pendingStage = stage;
     if (chapterId) { job.payload.extractChapterId = chapterId; job.payload.blockIndex = blockIndex ?? 0; } this.save(job);
-    let output: ModelOutputRecord | undefined; let received = false; let pending = true;
+    let output: ModelOutputRecord | undefined; let received = false; let pending = true; let captureFailed = false; let failedCaptureUsage: CapturedModelResponse | undefined;
     try {
-      const saveResponse = (response: CapturedModelResponse) => { if (!pending) return; output = output ? this.store.outputs.completeResponse(output.id, this.safeCapture(response)) : this.capture(job, stage, response, chapterId, blockIndex); received = true; };
+      const saveResponse = (response: CapturedModelResponse) => {
+        if (!pending) return;
+        try { output = output ? this.store.outputs.completeResponse(output.id, this.safeCapture(response)) : this.capture(job, stage, response, chapterId, blockIndex); received = true; }
+        catch (error) { captureFailed = true; failedCaptureUsage = response; throw error; }
+      };
       const result = await invoke({ ...request,
-        onRequest: snapshot => { if (pending) output = this.capture(job, stage, { request: snapshot, rawResponse: '', text: '', inputTokens: 0, outputTokens: 0 }, chapterId, blockIndex); },
+        onRequest: snapshot => { if (!pending) return; try { output = this.capture(job, stage, { request: snapshot, rawResponse: '', text: '', inputTokens: 0, outputTokens: 0 }, chapterId, blockIndex); } catch (error) { captureFailed = true; throw error; } },
         onResponse: saveResponse,
       });
       if (!received) saveResponse({ rawResponse: content(result), text: content(result), inputTokens: result.inputTokens, outputTokens: result.outputTokens });
       if (!output) throw new Error('模型输出未能保存');
       if (stage === 'writing') output = this.store.outputs.update(output.id, { normalizedText: this.redact(content(result)) });
       this.charge(jobId, result, content(result)); this.live(jobId); return { result, output };
-    } catch (error) { if (output) { if (stage === 'writing') { const draft = this.store.db.prepare('SELECT text FROM job_writing_drafts WHERE job_id=?').get(jobId); if (draft?.text) this.store.outputs.update(output.id, { normalizedText: this.redact(String(draft.text)) }); } this.failOutput(output, error); } throw error; }
+    } catch (error) {
+      // Providers may wrap a failed persistence callback; retain the response charge and stop extraction retries.
+      if (stage === 'extraction' && captureFailed) {
+        if (failedCaptureUsage && !(error instanceof ModelOutputError)) error = new ModelOutputError(error instanceof Error ? error.message : '保存模型响应失败', failedCaptureUsage);
+        if (error instanceof Error) this.nonRetryableExtractionErrors.add(error);
+      }
+      if (output) { if (stage === 'writing') { const draft = this.store.db.prepare('SELECT text FROM job_writing_drafts WHERE job_id=?').get(jobId); if (draft?.text) this.store.outputs.update(output.id, { normalizedText: this.redact(String(draft.text)) }); } this.failOutput(output, error); }
+      throw error;
+    }
     finally { pending = false; }
   }
   private publicJob(job: Job): Job { return { ...job, usageEstimated: Boolean(job.payload.usageEstimated), generatedChapterId: job.payload.generatedChapterId as string | undefined, title: job.payload.title as string | undefined, generationInput: job.kind === 'generate' ? { mode: job.payload.mode as GenerateInput['mode'], instruction: String(job.payload.instruction ?? ''), maxWords: job.payload.maxWords as number | undefined, title: job.payload.title as string | undefined } : undefined, purpose: job.payload.purpose === 'compress-summary' ? 'compress-summary' : undefined, payload: {} }; }
@@ -229,6 +244,7 @@ export class StoryEngine {
   }
   enqueue(branchId: string, kind: JobKind, payload: Record<string, unknown>, onQueued?: () => void): Job {
     if (this.closed) throw new HttpError('任务服务正在关闭', 503);
+    if (kind === 'plan' && payload.purpose !== 'compress-summary') this.assertSeparatePlanning();
     let branch = this.store.assertVersion(branchId, String(payload.baseRevisionId ?? ''));
     if (this.deletingProjects.has(branch.projectId)) throw new HttpError('作品正在删除，不能创建任务', 409);
     const state = this.store.state(branchId); const rewriting = kind === 'generate' && Boolean(payload.chapterId);
@@ -259,7 +275,7 @@ export class StoryEngine {
         smallPayload.chapterId = undefined; smallPayload.title = payload.title || original.title;
         if (payload.discardBackground) for (const background of backgroundJobs) { background.status = 'cancelled'; background.message = '作者放弃后台整理，已创建重新生成分支'; this.save(background); }
       }
-      if (kind === 'generate' && !smallPayload.title) smallPayload.title = state.outline.fine.find(plan => plan.chapter === state.chapters.length + 1)?.title || `第 ${state.chapters.length + 1} 章`;
+      if (kind === 'generate' && !smallPayload.title) smallPayload.title = (normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled && state.outline.fine.find(plan => plan.chapter === state.chapters.length + 1)?.title) || `第 ${state.chapters.length + 1} 章`;
       job = { id: randomUUID(), projectId: branch.projectId, branchId: branch.id, kind, status: 'queued', baseRevisionId: branch.revisionId, progress: 0, total, message: '已排队', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: structuredClone(smallPayload) };
       if (kind === 'import') {
         const insert = this.store.db.prepare('INSERT INTO job_import_chapters VALUES(?,?,?,?)');
@@ -278,8 +294,10 @@ export class StoryEngine {
       job.status = action === 'pause' ? 'paused' : 'cancelled'; job.message = action === 'pause' ? '已暂停，进度已保存' : '已取消；已经保存的正文和资料保留'; this.save(job); this.controllers.get(job.id)?.abort();
     } else {
       if (!['paused', 'failed'].includes(job.status)) throw new HttpError('只能继续暂停或失败的任务');
+      if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary') this.assertSeparatePlanning();
       this.store.assertVersion(job.branchId, job.baseRevisionId);
       if (this.jobsInternal(undefined, true).some(other => other.id !== job.id && other.branchId === job.branchId)) throw new HttpError('故事线已有其他任务', 409);
+      delete job.payload.extractionRetry;
       job.status = 'queued'; job.error = undefined; job.message = '等待继续'; this.save(job); queueMicrotask(() => this.pump());
     }
     return this.publicJob(job);
@@ -331,28 +349,66 @@ export class StoryEngine {
     if (local) { job.status = completed ? 'completed' : 'paused'; job.error = undefined; }
     return (revisionId: string, branchId: string) => { this.checkpoint(job, payload, completed ? job.total : progress, local && !completed ? `${message}；已暂停，可点击继续` : message)(revisionId, branchId); this.store.outputs.update(output.id, { status: 'applied', error: undefined, issues: [] }); };
   }
-  private applyPlan(job: Job, output: ModelOutputRecord, value: PlanningResult, local: boolean) {
-    const state = this.store.state(job.branchId); const next = state.chapters.length + 1;
+  private assertSeparatePlanning() {
+    const planning = normalizeTaskSettings(this.getSettings().taskSettings).planning;
+    if (!planning.enabled) throw new HttpError('剧情规划已关闭，请先在任务模型设置中开启', 400);
+    if (planning.mode !== 'separate') throw new HttpError('剧情规划当前由写作 AI 通过工具提交，请发起正文写作或切换为独立规划模型', 400);
+  }
+  private updatePlanState(state: StoryState, value: PlanningResult) {
+    const next = state.chapters.length + 1;
     for (let chapter = next; chapter <= next + 3; chapter++) if (!value.fine.some(f => f.chapter === chapter)) throw new OutputValidationError([{ path: 'fine', message: `缺少第 ${chapter} 章预期规划，需提供当前章和接下来三章` }]);
+    if (new Set(value.fine.map(plan => plan.chapter)).size !== value.fine.length) throw new OutputValidationError([{ path: 'fine', message: '章节规划序号不能重复' }]);
     state.outline.fine = value.fine.filter(f => f.chapter >= next && f.chapter <= next + 3);
     for (const [index, item] of value.foreshadows.entries()) {
       const relatedEntityIds = item.relatedNames.map((name, nameIndex) => { const matches = state.entities.filter(e => !e.mergedInto && [e.name, ...e.aliases].includes(name)); if (matches.length !== 1) throw new OutputValidationError([{ path: `foreshadows[${index}].relatedNames[${nameIndex}]`, message: '关联名称必须匹配唯一的已有实体' }]); return matches[0].id; });
       const titleKey = (title: string) => title.normalize('NFKC').trim().toLocaleLowerCase();
       const old = state.foreshadows.find(f => titleKey(f.title) === titleKey(item.title)); if (old) { if (old.status === 'planned') Object.assign(old, { detail: item.detail, dueChapter: item.dueChapter, revealCondition: item.revealCondition, relatedEntityIds }); } else state.foreshadows.push({ id: randomUUID(), title: item.title, detail: item.detail, dueChapter: item.dueChapter, revealCondition: item.revealCondition, relatedEntityIds, status: 'planned' });
     }
+  }
+  private applyPlan(job: Job, output: ModelOutputRecord, value: PlanningResult, local: boolean) {
+    this.assertSeparatePlanning();
+    const state = this.store.state(job.branchId); this.updatePlanState(state, value);
     this.store.commit(job.branchId, job.baseRevisionId, state, '更新未发生剧情的预期规划', this.outputCheckpoint(job, output, { ...job.payload, planned: true, pendingStage: undefined }, job.progress, '预期规划已保存', local, local && job.kind === 'plan'));
+  }
+  private planningTools(jobId: string): { tools: ModelTool[]; instruction: string } {
+    const config = normalizeTaskSettings(this.getSettings().taskSettings).planning;
+    if (!config.enabled || config.mode !== 'tool') return { tools: [], instruction: '' };
+    const next = this.store.state(this.live(jobId).branchId).chapters.length + 1;
+    const tool: ModelTool = {
+      name: 'update_plot_plan', description: `直接编写第 ${next} 章至第 ${next + 3} 章尚未发生的预期剧情及隐藏伏笔。由你提供完整规划内容，不会调用其他模型。校验成功后暂存，随本次正文成功保存到同一个故事版本；同次写作再次调用会替换此前暂存规划。`,
+      parameters: { type: 'object', properties: {
+        fine: { type: 'array', minItems: 4, maxItems: 4, items: { type: 'object', properties: { chapter: { type: 'integer', minimum: next, maximum: next + 3 }, title: { type: 'string' }, goal: { type: 'string' } }, required: ['chapter', 'title', 'goal'], additionalProperties: false } },
+        foreshadows: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, detail: { type: 'string' }, status: { type: 'string', enum: ['planned'] }, dueChapter: { type: 'integer', minimum: next }, revealCondition: { type: 'string' }, relatedNames: { type: 'array', items: { type: 'string' } } }, required: ['title', 'detail', 'status', 'revealCondition', 'relatedNames'], additionalProperties: false } },
+      }, required: ['fine', 'foreshadows'], additionalProperties: false },
+      execute: args => {
+        const job = this.live(jobId);
+        const planning = normalizeTaskSettings(this.getSettings().taskSettings).planning;
+        if (!planning.enabled || planning.mode !== 'tool') return { error: '剧情规划工具已停用，本次内容未暂存。' };
+        try {
+          const value = planningSchema.strict().parse(args);
+          if (value.fine.length !== 4 || value.fine.some(plan => plan.chapter < next || plan.chapter > next + 3)) throw new Error('只提供当前待写章和接下来三章的四项规划。');
+          if (value.foreshadows.some(item => item.status !== 'planned' || item.dueChapter !== undefined && item.dueChapter < next)) throw new Error('只能规划尚未发生的伏笔，status 必须为 planned，预期章节不能早于当前待写章。');
+          this.updatePlanState(this.store.state(job.branchId), value);
+          job.payload.pendingPlotPlan = value; this.save(job);
+          return { status: 'staged', fine: value.fine, message: '预期规划已暂存，正文成功保存时一起生效。继续输出小说正文，不把隐藏规划或工具结果写进正文。' };
+        } catch (error) { return { error: this.redact(error instanceof Error ? error.message : '剧情规划未通过校验，请修正工具参数。') }; }
+      },
+    };
+    return { tools: [tool], instruction: `\n剧情规划使用工具模式：由你直接编写当前第 ${next} 章和接下来三章的预期剧情，在写正文前调用 update_plot_plan 提交 fine 与 foreshadows；不需要请求其他规划模型。遵守作者锁定设定、已有伏笔与本次写作要求，只规划尚未发生的事件。relatedNames 只能使用已有唯一明确的人物或实体名称，新人物留空。规划和工具结果不写入小说正文。` };
   }
   private applyWriting(job: Job, output: ModelOutputRecord, prose: string, local: boolean) {
     if (!prose.trim()) throw new OutputValidationError([{ path: '$', message: '小说正文不能为空' }]);
     const input = job.payload as unknown as GenerateInput; const original = job.payload.sourceChapterId ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined; const state = this.store.state(job.branchId);
     const text = original && input.selection ? String(original.text).slice(0, input.selection.start) + prose + String(original.text).slice(input.selection.end) : prose;
-    this.store.saveChapter(job.branchId, { baseRevisionId: job.baseRevisionId, title: input.title || state.outline.fine.find(f => f.chapter === state.chapters.length + 1)?.title || `第 ${state.chapters.length + 1} 章`, text }, (revisionId, branchId) => {
+    const planning = normalizeTaskSettings(this.getSettings().taskSettings).planning;
+    const pendingPlan = planning.enabled && planning.mode === 'tool' && job.payload.pendingPlotPlan ? planningSchema.parse(job.payload.pendingPlotPlan) : undefined;
+    this.store.saveChapter(job.branchId, { baseRevisionId: job.baseRevisionId, title: input.title || (normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled && state.outline.fine.find(f => f.chapter === state.chapters.length + 1)?.title) || `第 ${state.chapters.length + 1} 章`, text }, (revisionId, branchId) => {
       const saved = this.store.revisionState(revisionId).chapters.at(-1)!;
       job.status = 'completed'; job.error = undefined;
       this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, text);
-      this.outputCheckpoint(job, output, { ...job.payload, generatedChapterId: saved.id, pendingStage: undefined }, job.total, '正文已保存，资料在后台整理', local, true)(revisionId, branchId);
+      this.outputCheckpoint(job, output, { ...job.payload, pendingPlotPlan: undefined, generatedChapterId: saved.id, pendingStage: undefined }, job.total, '正文已保存，资料在后台整理', local, true)(revisionId, branchId);
       this.queueExtraction(job, saved.id, local);
-    });
+    }, pendingPlan ? state => this.updatePlanState(state, pendingPlan) : undefined);
     this.notifyWriting(job);
     queueMicrotask(() => this.pump());
   }
@@ -481,7 +537,7 @@ export class StoryEngine {
     if (!normalized.value) throw new OutputValidationError(normalized.issues);
     const value = normalized.value;
     const complete = output.blockIndex === blocks.length - 1;
-    let payload: Record<string, unknown> = { ...job.payload, extractChapterId: output.chapterId, blockIndex: output.blockIndex + 1, pendingStage: undefined }; let progress = job.progress; let finished = false;
+    let payload: Record<string, unknown> = { ...job.payload, extractChapterId: output.chapterId, blockIndex: output.blockIndex + 1, pendingStage: undefined, extractionRetry: undefined }; let progress = job.progress; let finished = false;
     if (complete && this.images && job.payload.writingJobId) payload.pendingIllustrationChapterId = output.chapterId;
     if (local && complete) {
       if (job.kind === 'import') { const next = Number(job.payload.importIndex ?? 0) + 1; progress = next; payload = { ...payload, importIndex: next, importCurrentChapterId: undefined, extractChapterId: undefined, blockIndex: 0 }; finished = next >= job.total; }
@@ -492,6 +548,7 @@ export class StoryEngine {
     if (complete) this.illustrateChapter(job, output.chapterId);
   }
   private async plan(jobId: string, signal: AbortSignal) {
+    this.assertSeparatePlanning();
     const job = this.live(jobId); const state = this.store.state(job.branchId); const provider = this.provider('planning'); const next = state.chapters.length + 1;
     const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text });
     const request = this.budget(job, provider, { ...this.taskPrompt('planning', { ...this.promptVariables(job, state), ...context.variables, context: context.text, endChapter: String(next + 3) }), signal });
@@ -501,13 +558,66 @@ export class StoryEngine {
   private async extractChapter(jobId: string, chapterId: string, signal: AbortSignal) {
     let job = this.live(jobId); const chapter = this.store.chapter(job.branchId, chapterId); const blocks = splitBlocks(chapter.text); let blockIndex = job.payload.extractChapterId === chapterId ? Number(job.payload.blockIndex ?? 0) : 0;
     for (; blockIndex < blocks.length; blockIndex++) {
-      job = this.live(jobId); const provider = this.provider('extraction'); const state = this.store.state(job.branchId);
-      const context = extractionContext(state, blocks[blockIndex]);
-      job.message = `整理「${chapter.title}」片段 ${blockIndex + 1}/${blocks.length}`; this.save(job);
-      const request = this.budget(job, provider, { ...this.taskPrompt('extraction', { ...this.promptVariables(job, state), chapterNumber: String(state.chapters.findIndex(value => value.id === chapterId) + 1), context, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }), signal });
-      const { result, output } = await this.requestCaptured(jobId, 'extraction', request, req => this.models.generateStructured<unknown>(provider, req, value => value), result => JSON.stringify(result.value), chapterId, blockIndex);
-      this.applyExtracted(this.live(jobId), output, result.value, false);
+      let lastFailure: unknown;
+      for (;;) {
+        job = this.live(jobId); const provider = this.provider('extraction'); const state = this.store.state(job.branchId);
+        const context = extractionContext(state, blocks[blockIndex]);
+        const retry = job.payload.extractionRetry as { chapterId?: string; blockIndex?: number; failedAttempts?: number } | undefined;
+        const failedAttempts = retry?.chapterId === chapterId && retry.blockIndex === blockIndex ? Number(retry.failedAttempts ?? 0) : 0;
+        const retryConfig = normalizeTaskSettings(this.getSettings().taskSettings).extraction;
+        if (failedAttempts && (!retryConfig.autoRetry || failedAttempts > retryConfig.maxRetries)) throw lastFailure ?? new HttpError('资料提取自动重试已关闭或次数已用完，请检查设置后手动继续');
+        const message = `整理「${chapter.title}」片段 ${blockIndex + 1}/${blocks.length}`;
+        job.message = failedAttempts ? `${message}；正在第 ${failedAttempts} 次自动重试` : message; this.save(job);
+        // Configuration and context-budget failures require an author change, not another request.
+        const request = this.budget(job, provider, { ...this.taskPrompt('extraction', { ...this.promptVariables(job, state), chapterNumber: String(state.chapters.findIndex(value => value.id === chapterId) + 1), context, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }), signal });
+        validateProviderOptions(provider, request.maxOutputTokens);
+        let url: URL;
+        try { url = new URL(provider.baseUrl); } catch { throw new HttpError('模型服务地址无效，请填写完整的 HTTP 或 HTTPS 地址。'); }
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new HttpError('模型服务地址仅支持 HTTP/HTTPS，且不能在地址中包含用户名或密码。');
+        const previousOutputId = job.payload.lastOutputId; let receivedResult = false;
+        try {
+          const { result, output } = await this.requestCaptured(jobId, 'extraction', request, req => this.models.generateStructured<unknown>(provider, req, value => value), result => JSON.stringify(result.value), chapterId, blockIndex);
+          receivedResult = true;
+          this.applyExtracted(this.live(jobId), output, result.value, false);
+          break;
+        } catch (error) {
+          lastFailure = error;
+          job = this.get(jobId);
+          // Every returned failure has its own charge, including the final failed attempt.
+          if (error instanceof ModelOutputError) {
+            job.inputTokens += error.inputTokens || Number(job.payload.lastRequestInputEstimate ?? 0); job.outputTokens += error.outputTokens || Number(job.payload.lastRequestOutputLimit ?? 0);
+            if (!error.inputTokens || !error.outputTokens) job.payload.usageEstimated = true;
+            this.chargedExtractionErrors.add(error); this.save(job);
+          }
+          const output = job.payload.lastOutputId && job.payload.lastOutputId !== previousOutputId ? this.store.outputs.get(String(job.payload.lastOutputId)) : undefined;
+          if (output && output.status !== 'applied') this.failOutput(output, error);
+          if (this.closed || signal.aborted || job.status !== 'running') throw error;
+          this.live(jobId);
+          const config = normalizeTaskSettings(this.getSettings().taskSettings).extraction;
+          const attempts = failedAttempts + 1;
+          job.payload.extractionRetry = { chapterId, blockIndex, failedAttempts: attempts }; this.save(job);
+          const nonRetryable = error instanceof HttpError && !(error instanceof OutputValidationError)
+            || error instanceof Error && this.nonRetryableExtractionErrors.has(error)
+            || receivedResult && !(error instanceof OutputValidationError)
+            || error instanceof Error && error.name === 'AbortError'
+            || output?.httpStatus !== undefined && output.httpStatus >= 400 && output.httpStatus < 500 && ![408, 429].includes(output.httpStatus);
+          if (!config.autoRetry || attempts > config.maxRetries || nonRetryable) throw error;
+          job.message = `${message}；等待第 ${attempts}/${config.maxRetries} 次自动重试`; this.save(job);
+          await this.waitExtractionRetry(jobId, signal, config.retryDelayMs);
+          if (!normalizeTaskSettings(this.getSettings().taskSettings).extraction.autoRetry) throw error;
+        }
+      }
     }
+  }
+  private async waitExtractionRetry(jobId: string, signal: AbortSignal, delayMs: number): Promise<void> {
+    if (signal.aborted) throw new DOMException('任务已停止', 'AbortError');
+    await new Promise<void>((resolve, reject) => {
+      const finish = () => { signal.removeEventListener('abort', abort); resolve(); };
+      const timer = setTimeout(finish, delayMs);
+      const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(new DOMException('任务已停止', 'AbortError')); };
+      signal.addEventListener('abort', abort, { once: true });
+    });
+    this.live(jobId);
   }
   private async run(jobId: string, controller: AbortController) {
     let job = this.get(jobId); const startingOutputId = job.payload.lastOutputId; job.status = 'running'; job.message = '正在处理'; this.save(job);
@@ -532,22 +642,24 @@ export class StoryEngine {
         }
         const input = job.payload as unknown as GenerateInput;
         const state = this.store.state(job.branchId); const provider = { ...this.provider('writing'), stream: true };
-        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text });
+        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, planningEnabled: normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled });
         const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
         const selected = original ? input.selection ? String(original.text).slice(input.selection.start, input.selection.end) : String(original.text) : undefined;
         this.store.clearWritingActivities(job.id);
         this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, '');
         this.emitWriting(job.id, this.writingSnapshot(job.id));
         job.message = '正在流式生成正文'; this.save(job);
-        job.payload.imageStartingEntityIds = state.entities.map(entity => entity.id); job.payload.imageRequests = []; this.save(job);
+        job.payload.imageStartingEntityIds = state.entities.map(entity => entity.id); job.payload.imageRequests = []; delete job.payload.pendingPlotPlan; this.save(job);
         const illustrations = this.imageTools(jobId);
+        const planning = this.planningTools(jobId);
         const prompt = this.taskPrompt('writing', {
           ...this.promptVariables(job, state), ...context.variables, context: context.text, mode: input.mode,
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
           writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : `请写第 ${state.chapters.length + 1} 章。`,
         });
-        const messages = prompt.messages && illustrations.instruction ? [{ role: 'system' as const, content: illustrations.instruction }, ...prompt.messages] : prompt.messages;
-        const request = this.budget(job, provider, { ...prompt, system: prompt.system + illustrations.instruction, messages, signal: controller.signal, tools: [...context.tools, ...illustrations.tools], onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event) });
+        const instruction = illustrations.instruction + planning.instruction;
+        const messages = prompt.messages && instruction ? [{ role: 'system' as const, content: instruction }, ...prompt.messages] : prompt.messages;
+        const request = this.budget(job, provider, { ...prompt, system: prompt.system + instruction, messages, signal: controller.signal, tools: [...context.tools, ...illustrations.tools, ...planning.tools], onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event) });
         const { result, output } = await this.requestCaptured(jobId, 'writing', request, req => this.models.generateText(provider, req), result => result.text);
         this.applyWriting(this.live(jobId), output, result.text, false);
         return;
@@ -575,7 +687,7 @@ export class StoryEngine {
     } catch (error) {
       if (this.closed) return;
       job = this.get(jobId);
-      if (error instanceof ModelOutputError) { job.inputTokens += error.inputTokens || Number(job.payload.lastRequestInputEstimate ?? 0); job.outputTokens += error.outputTokens || Number(job.payload.lastRequestOutputLimit ?? 0); if (!error.inputTokens || !error.outputTokens) job.payload.usageEstimated = true; this.save(job); }
+      if (error instanceof ModelOutputError && !this.chargedExtractionErrors.has(error)) { job.inputTokens += error.inputTokens || Number(job.payload.lastRequestInputEstimate ?? 0); job.outputTokens += error.outputTokens || Number(job.payload.lastRequestOutputLimit ?? 0); if (!error.inputTokens || !error.outputTokens) job.payload.usageEstimated = true; this.save(job); }
       const lastOutput = job.payload.lastOutputId && job.payload.lastOutputId !== startingOutputId ? this.store.outputs.get(String(job.payload.lastOutputId)) : undefined;
       if (lastOutput && lastOutput.status !== 'applied') this.failOutput(lastOutput, error);
       if (job.status !== 'running') return;

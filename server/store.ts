@@ -231,7 +231,7 @@ export class Store {
     branch.revisionId = this.insertRevision(branch, state, `创建故事线：${branch.name}`, boundary?.id).id;
     this.db.prepare('INSERT INTO branches VALUES(?,?,?)').run(branch.id, branch.projectId, JSON.stringify(branch)); return this.view(branch.id, true);
   }
-  saveChapter(branchId: string, input: { baseRevisionId: string; title: string; text: string; chapterId?: string }, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
+  saveChapter(branchId: string, input: { baseRevisionId: string; title: string; text: string; chapterId?: string }, checkpoint?: (revisionId: string, branchId: string) => void, prepareState?: (state: StoryState) => void): BranchView {
     let branch = this.assertVersion(branchId, input.baseRevisionId); let state = this.state(branchId);
     if (!input.text.trim()) throw new HttpError('正文不能为空');
     if (input.chapterId) {
@@ -254,6 +254,8 @@ export class Store {
       }
       state = previous;
     } else if (state.chapters.some(c => c.status !== 'ready')) throw new HttpError('上一章资料尚未整理完成，请先重试整理', 409);
+    // Writing tools can stage a plan; include it in the same revision as their completed prose.
+    prepareState?.(state);
     const chapter = this.putChapter(input.title, input.text); state.chapters.push(chapter);
     state.outline.fine = state.outline.fine.filter(plan => plan.chapter > state.chapters.length);
     return this.commit(branch.id, branch.revisionId, state, input.chapterId ? '修订正文，等待资料整理' : '保存正文，等待资料整理', checkpoint);

@@ -63,7 +63,11 @@ export interface StoryImage { id: string; projectId: string; branchId: string; b
 export interface ImageGenerateInput { baseRevisionId: string; kind: StoryImageKind; entityId?: string; chapterId?: string; selection?: { start: number; end: number }; instruction?: string; referenceImageId?: string }
 /** Writing tools request illustrations; they bind to saved prose and confirmed entities after extraction. */
 export interface WritingImageRequest { kind: 'portrait' | 'cg'; name?: string; description: string; sourceText?: string }
-export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings }
+export interface TaskSettings {
+  extraction: { autoRetry: boolean; maxRetries: number; retryDelayMs: number };
+  planning: { enabled: boolean; mode: 'separate' | 'tool' };
+}
+export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings; taskSettings?: TaskSettings }
 export type JobKind = 'import' | 'extract' | 'generate' | 'plan';
 export type JobStatus = 'queued' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled' | 'stale';
 export interface Job { id: string; projectId: string; branchId: string; kind: JobKind; status: JobStatus; baseRevisionId: string; progress: number; total: number; message: string; error?: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean; createdAt: string; updatedAt: string; payload: Record<string, unknown>; generatedChapterId?: string; title?: string; purpose?: 'compress-summary'; generationInput?: Pick<GenerateInput, 'mode' | 'instruction' | 'maxWords' | 'title'> }
