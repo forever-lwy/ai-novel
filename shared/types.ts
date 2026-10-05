@@ -1,4 +1,8 @@
-export type Mode = 'original' | 'continuation' | 'fanfiction' | 'rewrite';
+export type Mode = 'original' | 'continuation' | 'fanfiction' | 'rewrite' | 'rpg';
+export interface RpgCharacter { kind: 'original' | 'existing'; name: string; description: string; entityId?: string }
+export interface RpgSetup { character: RpgCharacter; entryChapterId?: string; entryInstruction?: string }
+export interface RpgSession { character: RpgCharacter; entryChapterId?: string; entryInstruction: string }
+export interface RpgChoice { id: string; question: string; options: { id: string; label: string; description?: string }[] }
 export type Visibility = 'public' | 'secret';
 export type KnowledgeKind = 'character' | 'faction' | 'location' | 'item' | 'ability' | 'rule' | 'event';
 export interface Citation { chapterId: string; paragraph: number; quote: string }
@@ -11,7 +15,7 @@ export interface SummaryCompression { text: string; chapterIds: string[] }
 export interface Outline { coarse?: string; worldview?: string; locked: string; fine: { chapter: number; title: string; goal: string }[]; summaryCompression?: SummaryCompression }
 export interface Chapter { id: string; title: string; text: string; sourceId?: string; summary: string; status: 'pending' | 'ready' | 'failed'; createdAt: string }
 export type ChapterRef = Omit<Chapter, 'text'>;
-export interface StoryState { chapters: ChapterRef[]; entities: Entity[]; relations: Relation[]; foreshadows: Foreshadow[]; outline: Outline; imageIds?: string[]; activeImageIds?: string[] }
+export interface StoryState { chapters: ChapterRef[]; entities: Entity[]; relations: Relation[]; foreshadows: Foreshadow[]; outline: Outline; imageIds?: string[]; activeImageIds?: string[]; rpg?: RpgSession }
 export interface Project { id: string; title: string; premise: string; mode: Mode; createdAt: string; updatedAt: string; mainBranchId: string }
 export interface Branch { id: string; projectId: string; name: string; revisionId: string; parentBranchId?: string; forkChapterId?: string; createdAt: string }
 export interface Revision { id: string; branchId: string; parentId?: string; label: string; createdAt: string; chapterCount: number }
@@ -70,11 +74,11 @@ export interface TaskSettings {
 export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings; taskSettings?: TaskSettings }
 export type JobKind = 'import' | 'extract' | 'generate' | 'plan';
 export type JobStatus = 'queued' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled' | 'stale';
-export interface Job { id: string; projectId: string; branchId: string; kind: JobKind; status: JobStatus; baseRevisionId: string; progress: number; total: number; message: string; error?: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean; createdAt: string; updatedAt: string; payload: Record<string, unknown>; generatedChapterId?: string; title?: string; purpose?: 'compress-summary'; generationInput?: Pick<GenerateInput, 'mode' | 'instruction' | 'maxWords' | 'title'> }
+export interface Job { id: string; projectId: string; branchId: string; kind: JobKind; status: JobStatus; baseRevisionId: string; progress: number; total: number; message: string; error?: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean; createdAt: string; updatedAt: string; payload: Record<string, unknown>; generatedChapterId?: string; title?: string; purpose?: 'compress-summary'; generationInput?: Pick<GenerateInput, 'mode' | 'instruction' | 'maxWords' | 'title' | 'rpg'>; pendingChoice?: RpgChoice }
 export type ModelActivityEvent = { type: 'thinking'; id: string; text: string } | { type: 'thinking_done'; id: string } | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown> } | { type: 'tool_result'; id: string; name: string; result?: unknown; error?: string };
 export interface WritingActivity { id: string; kind: 'thinking' | 'tool'; text?: string; name?: string; arguments?: Record<string, unknown>; result?: unknown; status: 'running' | 'completed' | 'failed'; error?: string }
 export type WritingEvent = { type: 'snapshot'; text: string; title: string; job: Job; chapterId?: string; activities?: WritingActivity[] } | { type: 'delta'; text: string } | { type: 'activity'; activity: WritingActivity } | { type: 'status'; job: Job; chapterId?: string };
-export interface GenerateInput { baseRevisionId: string; mode: Mode; instruction: string; title?: string; chapterId?: string; selection?: { start: number; end: number }; maxWords?: number; regenerate?: boolean; discardBackground?: boolean }
+export interface GenerateInput { baseRevisionId: string; mode: Mode; instruction: string; title?: string; chapterId?: string; selection?: { start: number; end: number }; maxWords?: number; regenerate?: boolean; discardBackground?: boolean; rpg?: RpgSetup }
 export interface ExtractionResult {
   summary: string;
   entities: { kind: KnowledgeKind; name: string; aliases: string[]; description: string; visibility: Visibility; isMain?: boolean; nameStatus?: 'placeholder' | 'confirmed'; facts: { text: string; attribute?: string; temporal: Fact['temporal']; certainty: Fact['certainty']; visibility: Visibility; paragraph: number; quote: string }[] }[];
@@ -82,12 +86,19 @@ export interface ExtractionResult {
   foreshadows: { title: string; detail: string; status: Foreshadow['status']; dueChapter?: number; revealCondition: string; relatedNames: string[] }[];
 }
 export interface PlanningResult { coarse?: string; fine: Outline['fine']; foreshadows: ExtractionResult['foreshadows'] }
-export interface ModelResult { text: string; inputTokens: number; outputTokens: number }
+export interface ModelResult { text: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean }
 export interface ModelRequestSnapshot { protocol: ProviderProtocol; model: string; url: string; method: 'POST'; headers: Record<string, string>; body: string; startedAt: string; timeoutMs: number; stream: boolean }
 export interface ModelTransportDiagnostics { elapsedMs: number; responseBytes: number; responseHeaders: Record<string, string>; transport: 'http' | 'network_error' | 'timeout' | 'cancelled' | 'interrupted'; errorCode?: string; modelOutcome?: 'completed' | 'blocked' | 'truncated' | 'empty' | 'error'; finishReason?: string; promptBlockReason?: string }
 export interface CapturedModelResponse { rawResponse: string; text: string; inputTokens: number; outputTokens: number; httpStatus?: number; incomplete?: boolean; request?: ModelRequestSnapshot; diagnostics?: ModelTransportDiagnostics }
 export interface ModelTool { name: string; description: string; parameters: Record<string, unknown>; execute: (arguments_: Record<string, unknown>) => Promise<unknown> | unknown }
-export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; signal?: AbortSignal; maxOutputTokens?: number; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[] }
+export interface ModelToolCall { id: string; name: string; arguments: unknown }
+/** Wire history is preserved verbatim so tool calls and signed model content survive a user decision. */
+export interface ModelToolContinuation {
+  protocol: ProviderProtocol; model: string; body: Record<string, unknown>; text: string;
+  inputTokens: number; outputTokens: number; round: number; callCount: number; usageEstimated?: boolean;
+  pending?: { data: Record<string, unknown>; calls: ModelToolCall[]; results: { call: ModelToolCall; output: string }[]; nextIndex: number };
+}
+export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
 export type OutputStage = 'planning' | 'writing' | 'extraction';
 export interface OutputIssue { path: string; message: string; paragraph?: number; quote?: string; sourceText?: string }
 export interface ModelOutputRecord extends CapturedModelResponse {

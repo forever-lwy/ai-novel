@@ -7,7 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, existsSync, writeFileSync, readFileSync, unlinkSync, renameSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve, basename, dirname } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { Store } from './store.js';
+import { Store, rpgSetupSchema } from './store.js';
 import { StoryEngine } from './engine.js';
 import { ImageService } from './images.js';
 import { validateImageParameters } from './image-provider.js';
@@ -21,7 +21,7 @@ import { validatePromptTemplates } from '../shared/prompt-templates.js';
 import { parseTaskSettings } from '../shared/task-settings.js';
 
 const revision = z.string().min(1).max(100);
-const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite']);
+const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']);
 const passwordBody = z.object({ password: z.string().min(8, '密码至少 8 位').max(256) });
 const outlineSchema = z.object({ worldview: z.string().max(100000).optional(), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000) });
 const modelNameSchema = z.string().trim().max(300).refine(value => !/[\u0000-\u001f\u007f]/.test(value), '模型名称不能包含控制字符');
@@ -232,10 +232,10 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     });
     return job;
   });
-  app.post('/api/branches/:id/generate', async request => { const b = z.object({ baseRevisionId: revision, mode, instruction: z.string().max(30000), title: z.string().max(500).optional(), chapterId: z.string().optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), maxWords: z.number().int().min(100).max(20000).optional(), regenerate: z.boolean().optional(), discardBackground: z.boolean().optional() }).parse(request.body); return engine.enqueue(param(request), 'generate', b); });
+  app.post('/api/branches/:id/generate', async request => { const b = z.object({ baseRevisionId: revision, mode, instruction: z.string().max(30000), title: z.string().max(500).optional(), chapterId: z.string().optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), maxWords: z.number().int().min(100).max(20000).optional(), regenerate: z.boolean().optional(), discardBackground: z.boolean().optional(), rpg: rpgSetupSchema.optional() }).parse(request.body); if (b.mode === 'rpg' || b.rpg) requireAuthor(request); return engine.enqueue(param(request), 'generate', b); });
   app.post('/api/branches/:id/plan', async request => { const b = z.object({ baseRevisionId: revision, instruction: z.string().max(30000).optional() }).parse(request.body); return engine.enqueue(param(request), 'plan', b); });
   app.post('/api/branches/:id/extract', async request => engine.enqueue(param(request), 'extract', { baseRevisionId: base(request.body) }));
-  const jobView = (job: Job, asAuthor: boolean): Job => ({ ...job, title: asAuthor ? job.title : undefined, generationInput: asAuthor ? job.generationInput : undefined, payload: {}, message: asAuthor ? job.message : ({ queued: '任务等待中', running: '任务进行中', paused: '任务已暂停', failed: '任务未完成', completed: '任务已完成', cancelled: '任务已取消', stale: '起始版本已变化' })[job.status], error: asAuthor ? job.error : job.error ? '请进入作者视图查看具体原因。' : undefined });
+  const jobView = (job: Job, asAuthor: boolean): Job => ({ ...job, pendingChoice: asAuthor ? job.pendingChoice : undefined, title: asAuthor ? job.title : undefined, generationInput: asAuthor ? job.generationInput : undefined, payload: {}, message: asAuthor ? job.message : ({ queued: '任务等待中', running: '任务进行中', paused: '任务已暂停', failed: '任务未完成', completed: '任务已完成', cancelled: '任务已取消', stale: '起始版本已变化' })[job.status], error: asAuthor ? job.error : job.error ? '请进入作者视图查看具体原因。' : undefined });
   app.get('/api/jobs', async request => { const { projectId } = z.object({ projectId: z.string().optional() }).parse(request.query); return engine.listJobs(projectId).map(job => jobView(job, author(request))); });
   // Model outputs can contain unrevealed plot details; never expose them in reader requests.
   const requireAuthor = (request: unknown) => { if (!author(request)) fail('请在作者视图查看或修正模型输出。', 403); };
@@ -273,6 +273,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     const body = z.object({ text: z.string().min(1).max(16 * 1024 * 1024), baseRevisionId: revision }).parse(request.body);
     return jobView(engine.applyOutput(param(request), param(request, 'outputId'), body), true);
   });
+  app.post('/api/jobs/:id/choice', async request => { requireAuthor(request); const input = z.object({ choiceId: z.string().min(1).max(100), optionId: z.string().min(1).max(100).optional(), customText: z.string().trim().min(1).max(10000).optional() }).strict().parse(request.body); return jobView(engine.choose(param(request), input), true); });
   app.post('/api/jobs/:id/:action', async request => jobView(engine.action(param(request), z.enum(['pause', 'resume', 'retry', 'cancel']).parse((request.params as any).action)), author(request)));
   app.get('/api/settings', async () => settings.public());
   app.put('/api/settings', async request => {

@@ -65,6 +65,21 @@ describe('editable task prompt templates', () => {
     expect(() => validatePromptTemplates(settings)).toThrow('只适用于正文写作');
   });
 
+  it('preserves older mode-limited presets for RPG and accepts explicit RPG blocks', () => {
+    const settings = defaultPromptTemplates();
+    const blocks = settings.presets.writing[0].blocks = [
+      { ...messageBlock('old', 'user', '保留原要求，模式 {{mode}}'), modes: ['original', 'continuation', 'fanfiction', 'rewrite'] },
+    ];
+    const before = structuredClone(settings);
+    expect(compilePrompt(settings, 'writing', { mode: 'rpg' }).prompt).toBe('保留原要求，模式 rpg');
+    expect(settings).toEqual(before);
+    blocks.push({ ...messageBlock('rpg', 'user', '角色体验 {{mode}}'), modes: ['rpg'] });
+    expect(compilePrompt(settings, 'writing', { mode: 'rpg' }).prompt).toBe('角色体验 rpg');
+    expect(compilePrompt(settings, 'writing', { mode: 'continuation' }).prompt).toBe('保留原要求，模式 continuation');
+    blocks[1].enabled = false;
+    expect(() => validatePromptTemplates(settings)).toThrow('rpg');
+  });
+
   it.each<PromptTask>(['writing', 'planning', 'extraction', 'compression'])('rejects duplicate blocks, presets, missing selections and unavailable variables for %s', task => {
     const settings = defaultPromptTemplates();
     settings.presets[task][0].blocks.push({ ...settings.presets[task][0].blocks[0] });

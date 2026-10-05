@@ -5,7 +5,7 @@ import { activePromptPreset, compilePrompt, defaultPromptTemplates, promptPreset
 import { Notice } from './ui';
 
 const roleLabels = { system: '系统', user: '用户', assistant: '助手' };
-const modeLabels: Record<Mode, string> = { original: '原创', continuation: '续写', fanfiction: '同人', rewrite: '改写' };
+const modeLabels: Record<Mode, string> = { original: '原创', continuation: '续写', fanfiction: '同人', rewrite: '改写', rpg: '穿越小说 · RPG' };
 const modes = Object.keys(modeLabels) as Mode[];
 
 function sampleValue(key: string) {

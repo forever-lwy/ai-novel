@@ -23,7 +23,10 @@ export const PLAN_SYSTEM = `${BASE_SYSTEM}\n仅输出 JSON：{"fine":[{"chapter"
 
 export const promptTasks = ['writing', 'planning', 'extraction', 'compression'] as const satisfies readonly PromptTask[];
 export const promptTaskLabels: Record<PromptTask, string> = { writing: '正文写作', planning: '剧情规划', extraction: '资料提取', compression: '摘要压缩' };
-const writingModes = ['original', 'continuation', 'fanfiction', 'rewrite'] as const satisfies readonly Mode[];
+const writingModes = ['original', 'continuation', 'fanfiction', 'rewrite', 'rpg'] as const satisfies readonly Mode[];
+// Older presets can restrict all four previous modes. Reuse their continuation
+// blocks until the author explicitly configures RPG, without rewriting drafts.
+const presetMode = (preset: PromptPreset, mode?: string) => mode === 'rpg' && !preset.blocks.some(value => value.modes?.includes('rpg')) ? 'continuation' : mode;
 export interface PromptVariable { key: string; label: string }
 const commonVariables: PromptVariable[] = [
   { key: 'projectTitle', label: '作品标题' }, { key: 'premise', label: '创作前提' },
@@ -78,7 +81,7 @@ const identifier = z.string().min(1).max(100).refine(value => !/[\u0000-\u001f\u
 const promptBlockSchema = z.object({
   id: identifier, name: nonEmptyName, role: z.enum(['system', 'user', 'assistant']), enabled: z.boolean(),
   content: z.string().max(100000, '单个提示词块最多 100000 字符'),
-  modes: z.array(z.enum(writingModes)).max(4).refine(values => new Set(values).size === values.length, '创作模式不能重复').optional(),
+  modes: z.array(z.enum(writingModes)).max(5).refine(values => new Set(values).size === values.length, '创作模式不能重复').optional(),
 }).strict();
 const promptPresetSchema = z.object({
   id: identifier, name: nonEmptyName, blocks: z.array(promptBlockSchema).min(1).max(80, '每个预设最多 80 个提示词块'),
@@ -122,7 +125,7 @@ export const promptTemplateSchema = templateShape.superRefine((settings, context
           if (!validVariables.has(key)) addIssue([...blockPath, 'content'], `此任务没有变量 {{${key}}}`);
         }
       }
-      const userAvailable = (mode?: string) => preset.blocks.some(value => value.enabled && value.role === 'user' && value.content.trim() && appliesToMode(value, mode));
+      const userAvailable = (mode?: string) => preset.blocks.some(value => value.enabled && value.role === 'user' && value.content.trim() && appliesToMode(value, presetMode(preset, mode)));
       if (task === 'writing') {
         for (const mode of writingModes) if (!userAvailable(mode)) addIssue([...path, 'blocks'], `创作模式 ${mode} 至少需要一个启用的非空 user 消息块`);
       } else if (!userAvailable()) addIssue([...path, 'blocks'], '每个预设至少需要一个启用的非空 user 消息块');
@@ -179,7 +182,7 @@ export function promptPresetVariables(task: PromptTask, preset?: PromptPreset): 
 export function compilePrompt(config: PromptTemplateSettings | undefined, task: PromptTask, variables: Record<string, string | number | undefined>): { system: string; prompt: string; messages: PromptMessage[] } {
   const preset = activePromptPreset(normalizePromptTemplates(config), task);
   const values: Record<string, string | number | undefined> = { ...preset.variables, ...variables };
-  const messages = preset.blocks.filter(value => value.enabled && (task !== 'writing' || appliesToMode(value, String(variables.mode ?? 'original'))))
+  const messages = preset.blocks.filter(value => value.enabled && (task !== 'writing' || appliesToMode(value, presetMode(preset, String(variables.mode ?? 'original')))))
     .map(value => ({ role: value.role, content: value.content.replace(variablePattern, (_match, key: string) => Object.hasOwn(values, key.trim()) ? String(values[key.trim()] ?? '') : '') }))
     .filter(message => message.content.trim());
   if (!messages.some(message => message.role === 'user')) throw new Error(`${promptTaskLabels[task]}的提示词变量展开后没有非空 user 消息，请检查启用状态、模式条件和变量值。`);

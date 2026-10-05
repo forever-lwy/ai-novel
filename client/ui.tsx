@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { LoaderCircle, X, Feather } from 'lucide-react';
 
 export function Brand({ small = false }: { small?: boolean }) {
@@ -9,10 +9,11 @@ export function Empty({ icon, title, children, action }: { icon: ReactNode; titl
   return <div className="empty-state"><span className="empty-icon">{icon}</span><h3>{title}</h3><p>{children}</p>{action}</div>;
 }
 export function Modal({ title, children, onClose, wide = false, closeDisabled = false }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean; closeDisabled?: boolean }) {
+  const titleId = useId();
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => { ref.current?.showModal(); const el = ref.current; return () => el?.close(); }, []);
-  return <dialog ref={ref} className={`modal ${wide ? 'modal-wide' : ''}`} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target === ref.current) onClose(); }}>
-    <div className="modal-heading"><h2>{title}</h2><button className="icon-button" aria-label="关闭对话框" disabled={closeDisabled} onClick={onClose}><X size={20} /></button></div>
+  return <dialog ref={ref} aria-labelledby={titleId} className={`modal ${wide ? 'modal-wide' : ''}`} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target === ref.current) onClose(); }}>
+    <div className="modal-heading"><h2 id={titleId}>{title}</h2><button className="icon-button" aria-label="关闭对话框" disabled={closeDisabled} onClick={onClose}><X size={20} /></button></div>
     <div className="modal-body">{children}</div>
   </dialog>;
 }

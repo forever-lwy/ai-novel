@@ -451,3 +451,16 @@
 .editor-toolbar>.row:last-child{justify-content:flex-end}
 @media(max-width:1100px){.workspace-tabs{overflow-x:auto}.workspace-tabs>button{flex-shrink:0}.workspace-tabs>.view-indicator{flex-shrink:0}.editor-toolbar{align-items:flex-start;gap:15px;flex-wrap:wrap}.editor-toolbar>.row:last-child{flex:1;min-width:250px}}
 @media(max-width:760px){.story-image-grid,.story-image-grid.compact{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:11px}.story-image-info{padding:11px}.story-image-info>.row{gap:7px;flex-wrap:wrap}.story-image-info>h4{font-size:12px}.story-image-actions{gap:7px}.story-image-actions>.text-button{font-size:10px}.chapter-images{padding:22px 20px;margin-bottom:25px}.chapter-images>.row{gap:12px;align-items:flex-start}.chapter-images h3{font-size:14px}.chapter-images>.row>.text-button{font-size:10px}.editor-toolbar>.row:last-child{justify-content:flex-start;min-width:0;flex-basis:100%}.editor-toolbar .button{font-size:10px;padding:8px}.entity-images .button{font-size:10px}.map-images{margin-bottom:21px}}
+.rpg-setup{padding:16px;border:1px solid #dfe7d6;border-radius:8px;background:#f8faf3;min-width:0}
+.rpg-setup>.notice{margin:0;font-size:12px;line-height:1.8}
+.rpg-choice-question{font-size:16px;line-height:1.9;color:#34553e;white-space:pre-wrap;margin:0}
+.rpg-choice-options{border:0;padding:0;margin:0;display:flex;flex-direction:column;gap:10px;min-width:0}
+.rpg-choice-options>legend{font-size:12px;color:#75896a;margin-bottom:12px}
+.rpg-choice-options>.rpg-choice-option{display:flex;flex-direction:row;align-items:flex-start;gap:11px;padding:14px;border:1px solid #dce5d7;border-radius:8px;cursor:pointer;background:#fffefa;min-width:0}
+.rpg-choice-options>.rpg-choice-option.selected{border-color:#729571;background:#eef5e7}
+.rpg-choice-option>input{width:16px!important;height:16px;margin:3px 0 0;flex-shrink:0;accent-color:var(--green)}
+.rpg-choice-option>span{display:flex;flex-direction:column;gap:6px;min-width:0;line-height:1.7}
+.rpg-choice-option strong{font-size:13px;font-weight:500;color:#34553e}
+.rpg-choice-option small{font-size:12px;color:#78916e;white-space:pre-wrap}
+.rpg-waiting{align-items:center;background:#eef5e7}
+@media(max-width:760px){.rpg-setup{padding:12px}.rpg-choice-question{font-size:14px}.rpg-choice-options>.rpg-choice-option{padding:12px}.rpg-choice-option strong{font-size:12px}.rpg-choice-option small{font-size:11px}.rpg-choice .row>.button{font-size:11px;padding:9px 11px}.rpg-waiting .button{font-size:10px;padding:7px 9px}}

@@ -1,5 +1,5 @@
 import { ZodError } from 'zod';
-import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequestSnapshot, ModelResult, ModelTransportDiagnostics, OutputIssue, ProviderConfig } from '../shared/types.js';
+import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequestSnapshot, ModelResult, ModelToolCall, ModelToolContinuation, ModelTransportDiagnostics, OutputIssue, ProviderConfig } from '../shared/types.js';
 import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions } from './provider-options.js';
 import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream } from './model-stream.js';
 export { validateProviderOptions } from './provider-options.js';
@@ -20,6 +20,17 @@ export class ModelOutputError extends Error {
     this.inputTokens = tokens.inputTokens;
     this.outputTokens = tokens.outputTokens;
     this.issues = issues;
+  }
+}
+
+/** A completed tool turn is waiting for a human answer, without an open request. */
+export class ModelInteractionPause extends Error {
+  inputTokens = 0;
+  outputTokens = 0;
+  usageEstimated?: boolean;
+  constructor(message = '等待用户选择。') {
+    super(message);
+    this.name = 'ModelInteractionPause';
   }
 }
 
@@ -272,7 +283,7 @@ function requestSnapshot(config: ProviderConfig, wire: ReturnType<typeof request
 
 /** Build a redacted, non-billable preview using exactly the same wire mapping. */
 export function buildRequestSnapshot(config: ProviderConfig, request: ModelRequest): ModelRequestSnapshot {
-  return requestSnapshot(config, requestBody(config, request));
+  return requestSnapshot(config, continuationWire(config, request));
 }
 
 async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
@@ -453,8 +464,7 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
   }
 }
 
-type ToolCall = { id: string; name: string; arguments: unknown };
-function responseToolCalls(protocol: ProviderConfig['protocol'], data: JsonObject): ToolCall[] {
+function responseToolCalls(protocol: ProviderConfig['protocol'], data: JsonObject): ModelToolCall[] {
   if (protocol === 'openai-chat') return objects(data.choices?.[0]?.message?.tool_calls).map(call => ({ id: call.id, name: call.function?.name, arguments: call.function?.arguments }));
   if (protocol === 'openai-responses') return objects(data.output).filter(item => item.type === 'function_call').map(call => ({ id: call.call_id, name: call.name, arguments: call.arguments }));
   if (protocol === 'gemini') return objects(data.candidates?.[0]?.content?.parts).filter(part => object(part.functionCall)).map((part, index) => ({ id: part.functionCall.id ?? `call_${index}`, name: part.functionCall.name, arguments: part.functionCall.args }));
@@ -465,7 +475,19 @@ const estimateTokens = (text: string) => Math.ceil([...text].reduce((sum, char) 
 
 /** Same first-round estimate as the tool loop, including tool declarations and protocol framing. */
 export function estimateModelRequestInputTokens(config: ProviderConfig, request: ModelRequest): number {
-  return estimateTokens(JSON.stringify(requestBody(config, request).body));
+  return estimateTokens(JSON.stringify(continuationWire(config, request).body));
+}
+
+function continuationWire(config: ProviderConfig, request: ModelRequest): ReturnType<typeof requestBody> {
+  const state = request.continuation;
+  if (state && (state.protocol !== config.protocol || state.model !== config.model)) throw new Error('等待选择的模型协议或型号已改变，请恢复原模型设置后继续。');
+  const wire = requestBody(config, request);
+  if (state) {
+    if (!object(state.body) || typeof state.text !== 'string' || !Number.isSafeInteger(state.round) || state.round < 1 || state.round > 24 || !Number.isSafeInteger(state.callCount) || state.callCount < 0 || state.callCount > 96 || ![state.inputTokens, state.outputTokens].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error('保存的模型续接记录不完整，无法继续本次选择。');
+    if (state.pending && (!object(state.pending.data) || !Array.isArray(state.pending.calls) || !Array.isArray(state.pending.results) || !Number.isSafeInteger(state.pending.nextIndex) || state.pending.nextIndex < 0 || state.pending.nextIndex > state.pending.calls.length || state.pending.results.length !== state.pending.nextIndex)) throw new Error('保存的工具续接记录不完整，无法继续本次选择。');
+    wire.body = structuredClone(state.body) as typeof wire.body;
+  }
+  return wire;
 }
 
 /** Redact whole normalized events, including credential fields inside tool objects and thought JSON. */
@@ -497,33 +519,54 @@ function activityEmitter(config: ProviderConfig, request: ModelRequest, round: n
 
 /** Explicit tool continuations are new turns; failed billable requests are never retried. */
 export async function generateText(config: ProviderConfig, request: ModelRequest): Promise<ModelResult> {
-  const wire = requestBody(config, request);
+  const wire = continuationWire(config, request);
   const body = wire.body as JsonObject;
   const tools = request.tools ?? [];
-  const tokens = { inputTokens: 0, outputTokens: 0 };
-  let text = '';
-  let callCount = 0;
+  const maxRounds = Number.isSafeInteger(request.maxToolRounds) && request.maxToolRounds! > 0 ? Math.min(24, request.maxToolRounds!) : 6;
+  const saved = request.continuation;
+  const tokens = { inputTokens: saved?.inputTokens ?? 0, outputTokens: saved?.outputTokens ?? 0 };
+  let text = saved?.text ?? '';
+  let callCount = saved?.callCount ?? 0;
+  let round = saved?.round ?? 0;
+  let usageEstimated = saved?.usageEstimated ?? false;
+  let pending = saved?.pending ? structuredClone(saved.pending) : undefined;
+  const checkpoint = async () => {
+    if (request.onContinuation) await request.onContinuation(structuredClone({ protocol: config.protocol, model: config.model, body, text, ...tokens, round, callCount, ...(usageEstimated ? { usageEstimated: true } : {}), ...(pending ? { pending } : {}) } satisfies ModelToolContinuation));
+  };
   try {
-    for (let round = 0; round < 6; round++) {
+    while (round < maxRounds || pending) {
       if (request.signal?.aborted) throw new Error('模型请求已取消。');
-      if (tools.length) {
-        // Include wire messages, tool schemas, signatures and retrieved material
-        // in each round's estimate without borrowing from earlier token usage.
-        const inputEstimate = estimateTokens(JSON.stringify(body));
-        const reserved = request.maxOutputTokens ?? config.maxOutputTokens;
-        if (inputEstimate + reserved > config.contextTokens) throw new Error(`写作上下文预计需要 ${inputEstimate} 个输入 token，加上 ${reserved} 个输出 token，超过 ${config.contextTokens} 的上下文上限；请减少检索内容、提高上下文上限或确认压缩剧情摘要。`);
+      if (!pending) {
+        if (tools.length) {
+          // Each request reserves its complete output allowance; historical usage
+          // never reduces that allowance, including after a human decision.
+          const inputEstimate = estimateTokens(JSON.stringify(body));
+          const reserved = config.protocol === 'gemini' ? body.generationConfig.maxOutputTokens : config.protocol === 'openai-responses' ? body.max_output_tokens : body.max_completion_tokens ?? body.max_tokens;
+          if (inputEstimate + reserved > config.contextTokens) throw new Error(`写作上下文预计需要 ${inputEstimate} 个输入 token，加上 ${reserved} 个输出 token，超过 ${config.contextTokens} 的上下文上限；请减少检索内容、提高上下文上限或确认压缩剧情摘要。`);
+        }
+        const emitActivity = activityEmitter(config, request, round);
+        const { data, result } = await sendModelRequest(config, { ...request, onActivity: request.onActivity ? emitActivity : undefined }, wire);
+        const inputTokens = request.onContinuation && !result.inputTokens ? estimateTokens(JSON.stringify(body)) : result.inputTokens;
+        const outputTokens = request.onContinuation && !result.outputTokens ? estimateTokens(JSON.stringify(data)) : result.outputTokens;
+        if (request.onContinuation && (!result.inputTokens || !result.outputTokens)) usageEstimated = true;
+        tokens.inputTokens += inputTokens; tokens.outputTokens += outputTokens;
+        text += result.text;
+        round++;
+        const calls = responseToolCalls(config.protocol, data);
+        if (!calls.length) return { text: text.trim(), ...tokens, ...(usageEstimated ? { usageEstimated: true } : {}) };
+        callCount += calls.length;
+        if (round === maxRounds || callCount > maxRounds * 4) throw new Error('模型检索次数超过上限，请缩小本次写作范围后手动重试。');
+        pending = { data, calls, results: [], nextIndex: 0 };
+        // Persist the full response, signatures and billed usage before any tool
+        // can pause or change the story. Completed tools are saved separately.
+        await checkpoint();
       }
-      const emitActivity = activityEmitter(config, request, round);
-      const { data, result } = await sendModelRequest(config, { ...request, onActivity: request.onActivity ? emitActivity : undefined }, wire);
-      tokens.inputTokens += result.inputTokens; tokens.outputTokens += result.outputTokens;
-      text += result.text;
-      const calls = responseToolCalls(config.protocol, data);
-      if (!calls.length) return { text: text.trim(), ...tokens };
-      callCount += calls.length;
-      if (round === 5 || callCount > 24) throw new Error('模型检索次数超过上限，请缩小本次写作范围后手动重试。');
-      const results: { call: ToolCall; output: string }[] = [];
-      for (const [index, call] of calls.entries()) {
+      const emitActivity = activityEmitter(config, request, round - 1);
+      const { calls, results } = pending;
+      const data = pending.data as JsonObject;
+      for (let index = pending.nextIndex; index < calls.length; index++) {
         if (request.signal?.aborted) throw new Error('模型请求已取消。');
+        const call = calls[index];
         const tool = tools.find(value => value.name === call.name);
         if (!tool || typeof call.name !== 'string' || typeof call.id !== 'string' || !call.id) throw new Error('模型请求了未提供的资料检索工具。');
         let args: unknown;
@@ -532,14 +575,19 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         if (!object(args)) throw new Error('资料检索工具参数必须是 JSON 对象。');
         const activityId = `tool:${index}:${call.id}`;
         emitActivity({ type: 'tool_call', id: activityId, name: call.name, arguments: args });
+        let output: string;
         try {
-          const output = JSON.stringify(await tool.execute(args)) ?? 'null';
+          output = JSON.stringify(await tool.execute(args)) ?? 'null';
           if (request.signal?.aborted) throw new Error('模型请求已取消。');
-          const result: unknown = JSON.parse(output);
-          const error = object(result) && typeof result.error === 'string' && result.error.trim() ? result.error : undefined;
-          emitActivity({ type: 'tool_result', id: activityId, name: call.name, result, ...(error ? { error } : {}) });
-          results.push({ call, output });
-        } catch (error) { emitActivity({ type: 'tool_result', id: activityId, name: call.name, error: error instanceof Error ? error.message : '资料检索失败。' }); throw error; }
+        } catch (error) {
+          if (!(error instanceof ModelInteractionPause)) emitActivity({ type: 'tool_result', id: activityId, name: call.name, error: error instanceof Error ? error.message : '资料检索失败。' });
+          throw error;
+        }
+        results.push({ call, output }); pending.nextIndex = index + 1;
+        await checkpoint();
+        const result: unknown = JSON.parse(output);
+        const error = object(result) && typeof result.error === 'string' && result.error.trim() ? result.error : undefined;
+        emitActivity({ type: 'tool_result', id: activityId, name: call.name, result, ...(error ? { error } : {}) });
       }
       if (config.protocol === 'openai-chat') {
         body.messages.push({ role: 'assistant', ...data.choices[0].message });
@@ -556,9 +604,16 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         body.messages.push({ role: 'assistant', content: data.content });
         body.messages.push({ role: 'user', content: results.map(({ call, output }) => ({ type: 'tool_result', tool_use_id: call.id, content: output })) });
       }
+      pending = undefined;
+      await checkpoint();
     }
     throw new Error('模型未在资料检索后完成正文。');
   } catch (error) {
+    if (error instanceof ModelInteractionPause) {
+      error.inputTokens = tokens.inputTokens; error.outputTokens = tokens.outputTokens;
+      if (usageEstimated) error.usageEstimated = true;
+      throw error;
+    }
     const current = error instanceof ModelOutputError ? error : undefined;
     if (tokens.inputTokens || tokens.outputTokens) throw new ModelOutputError((error as Error).message, { inputTokens: tokens.inputTokens + (current?.inputTokens ?? 0), outputTokens: tokens.outputTokens + (current?.outputTokens ?? 0) }, current?.issues);
     throw error;

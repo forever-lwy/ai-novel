@@ -2,6 +2,16 @@
 
 所有接口 /api，cookie session。JSON 错误 {error:string}。时间 ISO。共享类型 shared/types.ts。
 
+## RPG 与剧情选择
+
+- `Mode` 新增 `rpg`，作品创建与提示词模式条件接受该值。`StoryState.rpg` 保存体验角色及入场要求，跟随故事版本、分支与完整作品备份；阅读投影隐藏此作者配置。
+- `POST /branches/:id/generate?view=author` 的 `GenerateInput` 可带 `rpg:{character:{kind:'original'|'existing',name,description,entityId?},entryChapterId?,entryInstruction?}`。首次入场按指定章节结尾或当前结尾建立独立 RPG 线，返回 `Job.branchId` 为新线。原创角色须有姓名；已有角色按起点资料中未合并的 character 实体确认，以服务端姓名与资料为准。起点章节须已完成整理。继续体验使用 `mode:'rpg'` 并省略 `rpg`，要求当前版本已有体验配置。RPG 不接受 `chapterId`、选段改写或 `regenerate`。
+- RPG 正文工具 `ask_user({question,options:[{id,label,description?}]})` 提供 2–6 个唯一标识的选项。调用后保存工具对话与已收到正文，将任务设为 `paused`，作者 `Job.pendingChoice={id,question,options}` 返回待选节点，SSE 状态消息后关闭连接。等待期间没有在途模型请求，不自行选择或继续；客户端断线不丢节点。询问内容与回答作为工具记录，不混入小说正文。
+- `POST /jobs/:id/choice?view=author {choiceId,optionId?:string,customText?:string} -> Job`：必须且只能提交一种回答。`optionId` 须属于当前节点，`customText` 为非空自由行动。检查待选状态、节点标识与任务起始版本，重复回答、取消或过期返回 409；选择后排队，沿保存的原工具对话继续，不清空已有正文、不重复已执行工具。再次订阅事件接口可读取完整快照。
+- 等待节点禁止用普通 resume/retry 绕过。服务重启或恢复备份后保持手动恢复，直接回答仍待选的节点即可。模型／协议／供应商配置与保存对话不匹配时拒绝续接；用户需恢复原配置。失败的模型请求不会被隐式重试。每段真实返回用量只累计一次。
+- 每章 RPG 至少须发生一次有效询问；模型完全不调用 `ask_user` 时任务失败，保留草稿与模型输出，不保存成章。RPG 单章最多 24 个模型回合／96 次工具调用，等待用户本身不占新回合；普通写作仍为 6／24。每次请求保留完整输出上限，缺失用量按对应回合估算并标记 `usageEstimated`。
+- 阅读任务列表不返回待选节点、角色设定或内部对话，所有 `payload` 仍为空；完整备份保留内部对话，且不含供应商凭据。RPG 的关键节点识别及人物行为由模型生成，程序只验证选择结构、等待与版本边界；没有骰子、战斗或背包数值规则。
+
 ## 图片接口
 
 - `StoryState.activeImageIds?:string[]` 为当前版本的图片选择，必须是 `imageIds` 的无重复子集；缺省为旧作品兼容选择，按明确关联对象取最新成功图，显式空数组表示全部停用。`StoryImage.active` 为当前故事线投影，不修改历史图片资产。人物／实体按合并后的明确实体 ID 分组，地图一组，CG 按章节及准确选段范围分组，同组最多启用一张。新变体保留旧选择；首次对象的待生成图成功后启用。
@@ -63,10 +73,10 @@
 - `Settings.taskSettings` 为 `{extraction:{autoRetry:boolean,maxRetries:number,retryDelayMs:number},planning:{enabled:boolean,mode:'separate'|'tool'}}`。重试默认关闭、最多额外 2 次、间隔 5000 毫秒；次数为 0–10 整数，间隔为 0–300000 整数毫秒。规划默认开启并使用 separate。旧配置缺字段时补默认，旧 PUT 省略整个 taskSettings 保留已保存值；传入时必须完整且拒绝未知字段及非法范围。
 - 自动重试按提取任务的章节／片段计数，导入与独立 extract 共用；失败次数持久化，成功片段的资料、进度及计数清理同事务提交。网络、超时、HTTP 5xx／408／429、输出格式与证据校验失败按设置重试，其他 HTTP 4xx、配置／预算错误、存储错误、停止与版本变化不重试。等待期间 status=running，message 显示次数；每次输出留档、用量累计，耗尽后 failed，人工 resume/retry 重置失败次数。重启或恢复备份转暂停，仍需手动操作；不重发正文、规划、压缩、连接测试或生图请求。
 - planning.mode=tool 且 enabled=true 时，正文请求提供 `update_plot_plan({fine,foreshadows})`：fine 必须为当前待写章及后面三章的四项唯一规划，foreshadows 仅允许 planned，关联名称须匹配唯一已有实体。工具直接接受写作模型提供的内容，不调用 planning 模型；返回 staged 或可修正的 error。有效规划暂存于写作任务，正文成功保存时一起写入同一版本并清除暂存；失败、暂停及取消不先应用规划，手工修复正文可一起恢复，重新生成清除旧暂存。保存前关闭规划或离开工具模式会丢弃暂存规划。关闭规划保留已有数据但正文上下文 currentChapterPlan 为 null；独立规划按钮停用，人工编辑仍可用。
-- `Settings.promptTemplates` 保存全局任务提示词编排：`{presets:{writing:PromptPreset[],planning:PromptPreset[],extraction:PromptPreset[],compression:PromptPreset[]},selected:{writing:string,planning:string,extraction:string,compression:string}}`。`PromptPreset` 为 `{id,name,blocks,variables?:Record<string,string>}`，块为 `{id,name,role:'system'|'user'|'assistant',enabled:boolean,content:string,modes?:('original'|'continuation'|'fanfiction'|'rewrite')[]}`；`modes` 仅正文写作使用，缺省或空数组适用于所有模式。自定义变量名以字母开头，仅含字母、数字和下划线，不能覆盖内置变量。模板用 `{{变量名}}` 一次展开，不递归解释素材或自定义变量值。
+- `Settings.promptTemplates` 保存全局任务提示词编排：`{presets:{writing:PromptPreset[],planning:PromptPreset[],extraction:PromptPreset[],compression:PromptPreset[]},selected:{writing:string,planning:string,extraction:string,compression:string}}`。`PromptPreset` 为 `{id,name,blocks,variables?:Record<string,string>}`，块为 `{id,name,role:'system'|'user'|'assistant',enabled:boolean,content:string,modes?:('original'|'continuation'|'fanfiction'|'rewrite'|'rpg')[]}`；`modes` 仅正文写作使用，缺省或空数组适用于所有模式。自定义变量名以字母开头，仅含字母、数字和下划线，不能覆盖内置变量。模板用 `{{变量名}}` 一次展开，不递归解释素材或自定义变量值。
 - 四类任务分别选择预设，压缩沿用 planning 模型。内置变量列表由 `shared/prompt-templates.ts` 的 `promptVariables` 定义，包含任务对应的上下文、当前输入及作品信息；写作和规划可使用完整 `context` 或单独选择世界观、规则、人物、伏笔、摘要与最近正文。提取 `context` 只包含已有名称对照和已埋未揭晓伏笔。空白消息不发送；展开后须有非空 user 消息，写作每种模式都须至少有一个启用的 user 块。
 - 每任务 1–20 份预设，每份 1–80 块；单块内容最多 100000 字符，自定义变量最多 100 项，全局文本合计最多 700000 UTF-8 字节。无效变量、重复标识、选中预设不存在、无有效 user 块等返回 400，整份设置不保存。旧存储缺省时补默认预设；旧 PUT 请求省略 `promptTemplates` 时保留已保存编排，不重置。预设独立导出格式为 `{format:'ai-novel-prompt-preset',version:1,task,preset}`，不含连接信息；单作品备份不含全局提示词配置。
-- 启用消息按数组顺序展开，OpenAI Chat/Responses 保留全部角色和顺序；Gemini/Claude 将 system 块按出现顺序合并到原生系统区，user/assistant 顺序保留。结构化任务在预算检查前补单个 JSON 输出要求，仍按既有格式、证据和版本校验；所有编排消息及工具结构计入单次上下文预估。摘要压缩按当前模板实际占用（包括重复变量）分段，超限不缩减输出上限。每次后续请求读取当前已保存预设，已发请求与历史结果不受修改影响。连接测试继续使用固定短测试提示词，不执行任务预设。
+- 启用消息按数组顺序展开，OpenAI Chat/Responses 保留全部角色和顺序；Gemini/Claude 将 system 块按出现顺序合并到原生系统区，user/assistant 顺序保留。结构化任务在预算检查前补单个 JSON 输出要求，仍按既有格式、证据和版本校验；所有编排消息及工具结构计入单次上下文预估。摘要压缩按当前模板实际占用（包括重复变量）分段，超限不缩减输出上限。新任务读取当前已保存预设，已发请求与历史结果不受修改影响。RPG 续接沿用已保存的工具对话与请求参数，修改后的预设在下一章或新体验中生效。连接测试继续使用固定短测试提示词，不执行任务预设。
 - `Settings.providers` 为供应商连接，只保存协议、地址和密钥等连接信息。任务分别保存 `writingProviderId/writingModel`、`planningProviderId/planningModel`、`extractionProviderId/extractionModel`。选中供应商时必须指定非空模型名，可使用列表外的自定义名称；未选供应商时对应模型清空。兼容旧连接的 `model` 输入及已有存储，缺少任务模型字段时按各任务原供应商的模型迁移；新返回与保存格式使用任务模型字段。
 - `Settings.modelParameters` 为模型参数数组，每项以 `{role,providerId,model}` 唯一标识，`role` 为 `writing/planning/extraction`，包含 `maxOutputTokens/contextTokens` 和可选生成、思考、超时及流式参数。不同任务即使使用同一供应商与模型也各自保存；同一任务的不同模型或供应商分别保存。旧连接的参数和上限迁移到各任务已分配模型；旧无 `role` 的模型参数复制到三个任务，已有显式任务参数优先，历史未选模型保留。新返回与保存格式包含 `role` 并移除连接内的生成字段。新模型缺少记录时使用温度 `1`、Top P `1`、重复惩罚 `0`、输出 `4096`、上下文 `64000`、超时 `180000` 毫秒、非流式；已有记录的可选字段省略表示不发送，显式 `0/false` 保留。
 - 每个模型的 `maxOutputTokens` 为单次输出上限，按保存值发送；`contextTokens` 为单次请求预估输入与完整预留输出的合计上限。超出上下文上限时在发送前停止、保留进度并允许手动重试，不缩减输出上限。`Settings` 不再包含累计任务限额 `taskTokenLimit`；旧存储或旧 PUT 请求中的该字段会被忽略，新返回与保存格式移除该字段，保留原有模型限额、密钥和任务分配。
@@ -79,6 +89,6 @@
 
 人物 Entity 可含 isMain?:boolean 与 nameStatus?:'placeholder'|'confirmed'。isMainSource 记录 author/extraction 来源，作者显式主次选择优先，未人工指定的角色可随剧情重新识别；有明确名称或别名身份桥时可将暂称升级为真名，锁定身份不覆盖。人物事实优先为资料字段和重大经历，普通行动进入剧情摘要。
 
-正文上下文完整保留世界观、规则、主要人物、未揭晓伏笔、最近三章全文及所有剧情摘要。作者确认的压缩摘要只替代其覆盖章节，后续章节仍用原摘要。search_story/read_entity/read_chapter 工具读取构建时的章节与资料快照；每轮模型工具调用独立检查完整输入加预留输出，累计用量只用于统计。最多六轮、二十四次工具调用，失败不隐式重试。
+正文上下文完整保留世界观、规则、主要人物、未揭晓伏笔、最近三章全文及所有剧情摘要。作者确认的压缩摘要只替代其覆盖章节，后续章节仍用原摘要。search_story/read_entity/read_chapter 工具读取构建时的章节与资料快照；每轮模型工具调用独立检查完整输入加预留输出，累计用量只用于统计。普通写作最多六轮、二十四次工具调用；RPG 最多二十四轮、九十六次工具调用，失败均不隐式重试。
 
 search_story 推荐传 `{keywords:["林舟","老吴"],scope?:"all"|"entities"|"chapters"}`，各词使用 OR（任一命中）匹配。兼容 query 字符串按空格、逗号、顿号、分号、换行或竖线拆词；整串为已知名称、别名或章标题时保留完整词。keywords 每项按完整短语匹配；同时传 query 和 keywords 时合并去重。至少提供一个非空词，错误类型、空白数组项或无效范围返回工具 error。检索经过 NFKC 和大小写规范化，只匹配名称、别名、描述、事实文字或各章标题/摘要/正文，不匹配内部 ID 与 JSON 字段名，各文本字段分别匹配；仍绑定起始版本，每类最多返回20条且不会重复同一条目。

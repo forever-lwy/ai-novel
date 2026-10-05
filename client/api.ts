@@ -44,7 +44,7 @@ export async function streamJob<T>(jobId: string, signal: AbortSignal, onEvent: 
   } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
 }
 
-export const modeNames = { original: '原创', continuation: '续写', fanfiction: '同人', rewrite: '改写' };
+export const modeNames = { original: '原创', continuation: '续写', fanfiction: '同人', rewrite: '改写', rpg: '穿越小说 · RPG' };
 export const kindNames = { character: '人物', faction: '组织势力', location: '地点', item: '物品', ability: '能力体系', rule: '世界规则', event: '剧情事件' };
 export const statusNames = { queued: '等待中', running: '进行中', paused: '已暂停', failed: '失败', completed: '已完成', cancelled: '已取消', stale: '版本已变化' };
 export const jobNames = { import: '整理原作', extract: '更新世界资料', generate: '创作正文', plan: '剧情规划' };

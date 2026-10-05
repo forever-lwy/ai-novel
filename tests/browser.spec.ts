@@ -17,11 +17,6 @@ test.beforeEach(async ({ page }) => {
   }
 });
 
-test.afterAll(async () => {
-  // Gracefully end only our isolated fixture; avoid Windows process-tree teardown hangs.
-  await fetch(`${mockUrl.slice(0, -3)}/__e2e/shutdown`, { method: 'POST' });
-});
-
 async function createProject(page: Page, title: string) {
   await page.goto('/');
   await page.getByRole('button', { name: '新建作品', exact: true }).click();

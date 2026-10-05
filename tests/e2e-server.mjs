@@ -112,6 +112,23 @@ const modelServer = createServer(async (req, res) => {
       setTimeout(() => { if (res.destroyed) return; res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Deliberate local HTTP 500 fixture' } })); }, 100);
       return;
     }
+    if (body.model === 'e2e-rpg') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const answers = body.messages?.filter(message => message.role === 'tool').flatMap(message => {
+        try { const value = JSON.parse(message.content); return value.text ? [value.text] : value.answer ? [value.answer] : value.customText ? [value.customText] : value.label ? [value.label] : []; } catch { return []; }
+      }) || [];
+      const asked = body.messages?.some(message => message.role === 'assistant' && message.tool_calls?.some(call => call.function?.name === 'ask_user'));
+      const frame = delta => res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+      if (!asked) {
+        frame({ content: '你站在白石城门前，石碑上的纹路隐约发亮。\n\n' });
+        frame({ tool_calls: [{ index: 0, id: 'rpg-decision', type: 'function', function: { name: 'ask_user', arguments: JSON.stringify({ question: '城门前出现两条道路，你准备怎么做？', options: [{ id: 'investigate', label: '查看石碑', description: '先调查石碑上的纹路。' }, { id: 'enter', label: '进入城中', description: '走进城门寻找线索。' }] }) } }] });
+        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 15 } })}\n\n`);
+      } else {
+        frame({ content: `你选择了「${answers.at(-1) || '继续探索'}」，眼前的故事随之展开。` });
+        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 30, completion_tokens: 20 } })}\n\n`);
+      }
+      res.end('data: [DONE]\n\n'); return;
+    }
     if (body.model === 'e2e-images' && !body.messages?.some(message => message.role === 'tool')) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const sourceText = '林舟来到白石城，发现城门下藏着一把旧钥匙。';
