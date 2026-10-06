@@ -38,6 +38,7 @@ const contextVariables: PromptVariable[] = [
   { key: 'mainCharacters', label: '主要人物' }, { key: 'mainCharacterRelations', label: '主要人物关系' },
   { key: 'unrevealedForeshadows', label: '未揭晓伏笔' }, { key: 'plotSummaries', label: '全部剧情摘要' },
   { key: 'recentChapters', label: '最近章节原文' }, { key: 'currentChapterPlan', label: '当前章预期规划' },
+  { key: 'originalReference', label: '原作参考摘要与资料目录' },
 ];
 export const promptVariables: Record<PromptTask, PromptVariable[]> = {
   writing: [...commonVariables, ...contextVariables, { key: 'mode', label: '创作模式' }, { key: 'maxWords', label: '目标字数' }, { key: 'sourceText', label: '待改写原文' }, { key: 'writingTarget', label: '写作目标与范围' }],

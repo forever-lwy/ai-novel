@@ -27,6 +27,7 @@ function fixtureReply(system, prompt) {
       entities: [
         ...(person ? [{ kind: 'character', name: '林舟', nameStatus: 'confirmed', isMain: true, aliases: ['小舟'], description: '来到白石城的旅人。', visibility: 'public', facts: [fact(person, '林舟正在白石城调查。', 'location')] }] : []),
         ...(place ? [{ kind: 'location', name: '白石城', aliases: [], description: '故事中出现的城池。', visibility: 'public', facts: [fact(place, '白石城是本章出现的地点。', 'identity')] }] : []),
+        ...(paragraphs.find(p => p.quote.includes('FUTURE_REFERENCE_SENTINEL')) ? [{ kind: 'item', name: '星钥', aliases: [], description: '原作后续出现的钥匙。', visibility: 'public', facts: [fact(paragraphs.find(p => p.quote.includes('FUTURE_REFERENCE_SENTINEL')), '星钥能够照亮星门。', 'ability')] }] : []),
       ],
       relations: person && place ? [{ from: '林舟', to: '白石城', label: '身处', visibility: 'public', ...place }] : [],
       foreshadows: [],
@@ -112,6 +113,30 @@ const modelServer = createServer(async (req, res) => {
     if (body.model === 'e2e-http500') {
       setTimeout(() => { if (res.destroyed) return; res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Deliberate local HTTP 500 fixture' } })); }, 100);
       return;
+    }
+    if (body.model === 'e2e-original-reference') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const outputs = body.messages?.filter(message => message.role === 'tool') || [];
+      const call = (id, name, args) => ({ index: 0, id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+      const frame = delta => res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+      let finishReason = 'tool_calls';
+      if (!outputs.length) {
+        frame({ tool_calls: [
+          call('reference-list', 'list_text_files', { collection: 'original' }),
+          { ...call('reference-search', 'search_text', { collection: 'original', keywords: ['FUTURE_REFERENCE_SENTINEL'], contextLines: 1 }), index: 1 },
+          { ...call('reference-read', 'read_text_file', { path: 'original/000002.txt', startLine: 3, endLine: 3 }), index: 2 },
+          { ...call('reference-entities', 'search_story', { collection: 'original', keywords: ['星钥'], scope: 'entities' }), index: 3 },
+        ] });
+      } else if (!body.messages?.some(message => message.role === 'assistant' && message.tool_calls?.some(value => value.function?.name === 'ask_user'))) {
+        frame({ content: '你站在白石城门前，守门人正等待你的回应。\n\n' });
+        const entities = outputs.flatMap(message => { try { return JSON.parse(message.content).entities || []; } catch { return []; } });
+        frame({ tool_calls: [
+          call('reference-entity', 'read_entity', { collection: 'original', id: entities.find(entity => entity.name === '星钥')?.id || 'missing-original-item' }),
+          { ...call('reference-choice', 'ask_user', { question: '守门人向你询问来意，你准备如何回应？', options: [{ id: 'greet', label: '友好问候' }, { id: 'wait', label: '先观察周围' }] }), index: 1 },
+        ] });
+      } else { frame({ content: '你按自己的选择回应守门人，故事开始发生变化。' }); finishReason = 'stop'; }
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 30, completion_tokens: 15 } })}\n\n`);
+      res.end('data: [DONE]\n\n'); return;
     }
     if (body.model === 'e2e-rpg') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });

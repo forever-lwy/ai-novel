@@ -169,8 +169,8 @@ describe('author-confirmed plot summary compression', () => {
     const restored = ctx.store.restoreProject(ctx.store.exportProject(ctx.project.id)); const recovered = ctx.store.state(restored.mainBranchId);
     expect(recovered.outline.summaryCompression).toEqual({ text: proposal.text, chapterIds: recovered.chapters.map(chapter => chapter.id) });
     expect(recovered.chapters[0].id).not.toBe(proposal.chapterIds[0]);
-    const corrupted = structuredClone(ctx.store.exportProject(ctx.project.id)) as { revisions: { state?: unknown; snapshot: string }[] };
-    const { gunzipSync, gzipSync } = await import('node:zlib'); const entry = corrupted.revisions[0]; const state = JSON.parse(gunzipSync(Buffer.from(entry.snapshot, 'base64')).toString());
+    const corrupted = structuredClone(ctx.store.exportProject(ctx.project.id));
+    const { gunzipSync, gzipSync } = await import('node:zlib'); const entry = corrupted.revisions.find(revision => revision.revision.id === confirmed.branch.revisionId)!; const state = JSON.parse(gunzipSync(Buffer.from(entry.snapshot, 'base64')).toString());
     state.outline.summaryCompression.chapterIds = ['missing-chapter']; entry.snapshot = gzipSync(JSON.stringify(state)).toString('base64');
     expect(() => ctx.store.restoreProject(corrupted)).toThrow('压缩摘要存在无效章节关联');
     expect(() => ctx.engine.confirmSummaryCompression(ctx.project.mainBranchId, { baseRevisionId: confirmed.branch.revisionId, jobId: compression.id, text: proposal.text })).toThrow('版本已变化');

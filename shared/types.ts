@@ -15,7 +15,10 @@ export interface SummaryCompression { text: string; chapterIds: string[] }
 export interface Outline { coarse?: string; worldview?: string; locked: string; fine: { chapter: number; title: string; goal: string }[]; summaryCompression?: SummaryCompression }
 export interface Chapter { id: string; title: string; text: string; sourceId?: string; summary: string; status: 'pending' | 'ready' | 'failed'; createdAt: string }
 export type ChapterRef = Omit<Chapter, 'text'>;
-export interface StoryState { chapters: ChapterRef[]; entities: Entity[]; relations: Relation[]; foreshadows: Foreshadow[]; outline: Outline; imageIds?: string[]; activeImageIds?: string[]; rpg?: RpgSession }
+export interface StoryReference { branchId: string; revisionId: string; sourceIds?: string[] }
+export interface StoryState { chapters: ChapterRef[]; entities: Entity[]; relations: Relation[]; foreshadows: Foreshadow[]; outline: Outline; imageIds?: string[]; activeImageIds?: string[]; rpg?: RpgSession; sourceReference?: StoryReference }
+/** Author reference material remains separate from events in the active story. */
+export interface OriginalReferenceData { reference: StoryReference; state: StoryState; chapters: Chapter[]; sources: { sourceId: string; filename: string; chapters: { title: string; text: string }[] }[] }
 export interface Project { id: string; title: string; premise: string; mode: Mode; createdAt: string; updatedAt: string; mainBranchId: string }
 export interface Branch { id: string; projectId: string; name: string; revisionId: string; parentBranchId?: string; forkChapterId?: string; createdAt: string }
 export interface Revision { id: string; branchId: string; parentId?: string; label: string; createdAt: string; chapterCount: number }

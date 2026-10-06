@@ -2,6 +2,17 @@
 
 所有接口 /api，cookie session。JSON 错误 {error:string}。时间 ISO。共享类型 shared/types.ts。
 
+## 原作参考与文本查询工具
+
+- `StoryState.sourceReference?:{branchId,revisionId,sourceIds?:string[]}` 绑定同作品的原作故事线版本和已确认源文件。派生故事线保留当前起点状态，另存完整来源版本；嵌套分支继承该引用。新正文／独立规划任务在排队时固定参考，包括“没有参考”的状态。旧派生线根据来源任务、父线及创建时的历史版本追溯，不读取原线后来的改动。阅读投影删除该字段，内部任务 payload 不经 HTTP 返回。
+- 写作与独立规划的 `originalReference` 上下文单列原作完整剧情摘要、世界观／规则、人物与物品等轻量目录，完整档案和后续正文可通过只读工具获取。原作已有有效作者确认压缩摘要时，使用 `authorConfirmedSummary` 加未覆盖章节摘要；覆盖不属于参考版本或为空时退回逐章摘要。默认实体目录最多 100 项、别名 3 项，提供 `entityDirectoryTotal/entityDirectoryTruncated/aliasesTruncated`，工具仍检索完整档案及全部别名。原作里的未来是作者参考，不合并到当前 `state.entities`、当前摘要或玩家知识；提取仍仅处理当前正文。参考引用随版本保存，完整作品恢复时校验来源关联、映射版本／源文件 ID；缺失或跨作品关联不能静默恢复。
+- 原作文本来自固定参考版本的章节正文，以及已确认导入目录。目录中的未整理章节可读全文，但不存在的摘要／人物资料不会补造。虚拟路径为 `story/000001.txt`、`original/000001.txt`、`original/sources/0001/000001.txt`，章节顺序从 1 开始；路径不包含数据库 ID，恢复后可继续使用。只在本次捕获的语料中解析路径，不访问任意文件系统。
+- `list_text_files({collection?:'story'|'original'|'all',query?,offset?,limit?})`：按路径、标题或源文件名筛选，返回 `files,total,offset,truncated,nextOffset?`。默认 20 项，`limit` 为 1–100；每个文件含路径、标题、总行数及 `collection/reference/source` 标记。
+- `search_text({keywords?:string[],query?,collection?,path?,offset?,limit?,contextLines?})`：文字关键词 OR 检索，支持完整短语，返回 `matches,total,offset,truncated,nextOffset?`。`path` 需为目录中的精确路径，不能在错误 collection 下读取。默认 20 个命中行，`limit` 为 1–100，附近行默认 2、可设 0–10；命中包含路径、行号、命中列、附近文字与裁剪偏移。分页 offset 按命中行计算，空结果正常返回；关键词空白或非法参数返回工具 error。
+- `read_text_file({path,startLine?,endLine?,startOffset?})`：起止行从 1 开始，保留空白行；`startOffset` 为起始行内从 0 开始的 UTF-16 字符偏移。返回 `lines[{line,text,startOffset,endOffset,truncated?}],totalLines,startLine,endLine,truncated,nextLine?,nextOffset?`。每次最多 200 行，结果约 20000 字符；长行分片时 `nextLine` 不变，继续传该行及 `nextOffset`。正文裁剪均有标记，不能把部分内容当成完整原文。
+- 原有 `search_story`、`read_entity`、`read_chapter` 增加 `collection`；省略时搜索两套资料，单条读取先查当前故事、再查原作，同 ID 可明确指定 `original`。返回的原作结果标为 `reference:true`。原始源文件的搜索结果使用虚拟 path 作为 chapterId，旧 `read_chapter` 也接受目录返回的全部有效虚拟路径，范围限制保持。`read_chapter` 不传范围继续返回完整 `text`，传 `startLine/endLine` 或 `startParagraph/endParagraph` 可分片；两种范围不混用，段号按去掉首尾空白的非空行计算，段落分片用 `nextParagraph/nextOffset` 续读。若转为原始行读取，使用额外返回的 `nextLine/nextLineOffset`，不能把段号当行号。
+- 查询和目录工具结果只进入作者模型过程／请求记录，不直接修改世界资料或正文。模型从参考中获知后续剧情，并不代表玩家角色知情；如何安排剧情与避免剧透仍依赖模型。更新前暂停的 RPG 保留旧 wire，现有查询工具兼容原作参考，新增工具声明在新生成请求提供。
+
 ## 登录与安全边界
 
 - 初始密码通过服务启动环境的 `INITIAL_PASSWORD` 设置，只对没有密码的数据目录生效。新密码 12～256 字符，去除首尾空白后仍须至少 12 位，拒绝全空白、重复单字符及常见弱密码；只保存带版本及参数的 scrypt 哈希。首次启动缺失、为空或不合规则时停止启动，错误不包含密码；已有数据库密码不被此变量覆盖。
@@ -106,6 +117,6 @@
 
 人物 Entity 可含 isMain?:boolean 与 nameStatus?:'placeholder'|'confirmed'。isMainSource 记录 author/extraction 来源，作者显式主次选择优先，未人工指定的角色可随剧情重新识别；有明确名称或别名身份桥时可将暂称升级为真名，锁定身份不覆盖。人物事实优先为资料字段和重大经历，普通行动进入剧情摘要。
 
-正文上下文完整保留世界观、规则、主要人物、未揭晓伏笔、最近三章全文及所有剧情摘要。作者确认的压缩摘要只替代其覆盖章节，后续章节仍用原摘要。search_story/read_entity/read_chapter 工具读取构建时的章节与资料快照；每轮模型工具调用独立检查完整输入加预留输出，累计用量只用于统计。普通写作最多六轮、二十四次工具调用；RPG 最多二十四轮、九十六次工具调用，失败均不隐式重试。
+正文上下文完整保留世界观、规则、主要人物、未揭晓伏笔、最近三章全文及所有剧情摘要。作者确认的压缩摘要只替代其覆盖章节，后续章节仍用原摘要。search_story/read_entity/read_chapter 及虚拟文本工具读取构建时捕获的当前故事／原作参考快照；每轮模型工具调用独立检查完整输入加预留输出，累计用量只用于统计。普通写作最多六轮、二十四次工具调用；RPG 最多二十四轮、九十六次工具调用，失败均不隐式重试。
 
-search_story 推荐传 `{keywords:["林舟","老吴"],scope?:"all"|"entities"|"chapters"}`，各词使用 OR（任一命中）匹配。兼容 query 字符串按空格、逗号、顿号、分号、换行或竖线拆词；整串为已知名称、别名或章标题时保留完整词。keywords 每项按完整短语匹配；同时传 query 和 keywords 时合并去重。至少提供一个非空词，错误类型、空白数组项或无效范围返回工具 error。检索经过 NFKC 和大小写规范化，只匹配名称、别名、描述、事实文字或各章标题/摘要/正文，不匹配内部 ID 与 JSON 字段名，各文本字段分别匹配；仍绑定起始版本，每类最多返回20条且不会重复同一条目。
+search_story 推荐传 `{keywords:["林舟","老吴"],scope?:"all"|"entities"|"chapters"}`，各词使用 OR（任一命中）匹配。兼容 query 字符串按空格、逗号、顿号、分号、换行或竖线拆词；整串为已知名称、别名或章标题时保留完整词。keywords 每项按完整短语匹配；同时传 query 和 keywords 时合并去重。至少提供一个非空词，错误类型、空白数组项或无效范围返回工具 error。检索经过 NFKC 和大小写规范化，只匹配名称、别名、描述、事实文字或各章标题/摘要/正文，不匹配内部 ID 与 JSON 字段名，各文本字段分别匹配；当前故事与原作参考分别绑定固定版本，每类最多返回20条；不同 collection 或 snapshot／source 的同名结果分别标明归属。

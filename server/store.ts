@@ -8,7 +8,7 @@ import { modelOutputSchema, OutputStore } from './output-store.js';
 import { findEntitiesByName, reconcileExtractionEntities } from './entity-resolution.js';
 import { rebuildCharacterProfileDescription, normalizeProfileAttribute } from './extraction.js';
 import { ImageStore, imageBackupSchema, imageEntity, imageReferences, validateImageContent } from './image-store.js';
-import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState, type WritingActivity, type ModelActivityEvent, type RpgSetup } from '../shared/types.js';
+import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState, type WritingActivity, type ModelActivityEvent, type RpgSetup, type StoryReference, type OriginalReferenceData } from '../shared/types.js';
 
 export class HttpError extends Error { constructor(message: string, public statusCode = 400) { super(message); } }
 export class OutputValidationError extends HttpError { constructor(public issues: OutputIssue[], message = '模型输出未通过校验，请在作者输出记录中查看具体位置并修正') { super(message, 422); } }
@@ -65,7 +65,8 @@ const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character'
 const refSchema = z.object({ id: z.string().min(1), title: z.string(), sourceId: z.string().optional(), summary: z.string(), status: z.enum(['pending', 'ready', 'failed']), createdAt: z.string() });
 export const rpgSetupSchema = z.object({ character: z.object({ kind: z.enum(['original', 'existing']), name: z.string().trim().max(300).default(''), description: z.string().max(30000).default(''), entityId: z.string().min(1).max(100).optional() }).strict(), entryChapterId: z.string().min(1).max(100).optional(), entryInstruction: z.string().max(10000).default('') }).strict();
 const rpgSessionSchema = rpgSetupSchema.extend({ character: rpgSetupSchema.shape.character.extend({ name: z.string(), description: z.string() }) });
-const stateSchema = z.object({ rpg: rpgSessionSchema.optional(), activeImageIds: z.array(z.string().min(1)).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
+const sourceReferenceSchema = z.object({ branchId: z.string().min(1), revisionId: z.string().min(1), sourceIds: z.array(z.string().min(1)).refine(values => new Set(values).size === values.length).optional() }).strict();
+const stateSchema = z.object({ sourceReference: sourceReferenceSchema.optional(), rpg: rpgSessionSchema.optional(), activeImageIds: z.array(z.string().min(1)).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
 const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
 const writingActivitySchema = z.object({ id: z.string().min(1), kind: z.enum(['thinking', 'tool']), text: z.string().optional(), name: z.string().optional(), arguments: z.record(z.string(), z.unknown()).optional(), result: z.unknown().optional(), status: z.enum(['running', 'completed', 'failed']), error: z.string().optional() });
 const backupSchema = z.object({ images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), createdAt: z.string() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: z.unknown().optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1).max(RESTORE_MAX_REVISIONS), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
@@ -211,6 +212,7 @@ export class Store {
     const branch = this.getBranch(branchId); const state = this.state(branchId);
     if (!author) {
       delete state.rpg;
+      delete state.sourceReference;
       const visibleImageIds = (state.imageIds ?? []).filter(imageId => { const image = this.images.get(imageId); return image && this.images.visible(image, state, false); });
       state.outline = emptyState().outline; state.foreshadows = []; state.chapters = state.chapters.map(c => ({ ...c, summary: '' }));
       state.entities = state.entities.filter(e => e.visibility === 'public' && !e.mergedInto && (e.locked || e.facts.some(f => f.visibility === 'public' && f.temporal !== 'future'))).map(e => { const facts = e.facts.filter(f => f.visibility === 'public' && f.temporal !== 'future'); return { ...e, description: e.facts.length ? facts.map(f => f.text).join('；') : e.locked ? e.description : '', facts }; });
@@ -255,6 +257,65 @@ export class Store {
     const index = this.state(branchId).chapters.findIndex(c => c.id === chapterId);
     if (index < 0) throw new HttpError('改写的章节不存在');
     return this.atBoundary(branchId, index);
+  }
+  private hasSources(): boolean { return Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sources'").get()); }
+  private captureSourceReference(branch: Branch, revisionId = branch.revisionId, cutoff?: string): StoryReference {
+    const state = this.revisionState(revisionId); const candidates = new Set(state.chapters.flatMap(chapter => chapter.sourceId ? [chapter.sourceId] : []));
+    for (const row of this.db.prepare("SELECT json_extract(data,'$.payload.sourceId') AS source_id,json_extract(data,'$.createdAt') AS created_at FROM jobs WHERE branch_id=? AND json_extract(data,'$.kind')='import' ORDER BY rowid").all(branch.id)) if (typeof row.source_id === 'string' && (!cutoff || String(row.created_at) <= cutoff)) candidates.add(row.source_id);
+    const sourceIds = this.hasSources() ? (this.db.prepare('SELECT id FROM sources WHERE project_id=? AND confirmed=1').all(branch.projectId).map(row => String(row.id)).filter(sourceId => candidates.has(sourceId))) : [];
+    return { branchId: branch.id, revisionId, sourceIds };
+  }
+  /** Resolve legacy lineage without changing the story or following another project's branch. */
+  resolveSourceReference(branchId: string): StoryReference | undefined {
+    const owner = this.getBranch(branchId); let branch = owner; let cutoff: string | undefined; let fence: number | undefined; let derived = false; const visited = new Set<string>();
+    // Current exports preserve creation order. Older backups inserted history in
+    // reverse order; ancestry detects that case so their rowids are never a clock.
+    const ordered = !this.db.prepare('SELECT 1 FROM revisions c JOIN revisions p ON p.id=c.parent_id JOIN branches b ON b.id=c.branch_id WHERE b.project_id=? AND p.rowid>=c.rowid LIMIT 1').get(owner.projectId);
+    while (!visited.has(branch.id)) {
+      visited.add(branch.id); let revisionId = branch.revisionId;
+      if (cutoff) {
+        const rows = new Map(this.db.prepare('SELECT id,rowid AS sequence FROM revisions WHERE branch_id=?').all(branch.id).map(row => [String(row.id), Number(row.sequence)]));
+        const historical = this.history(branch.id).find(revision => revision.branchId === branch.id && (ordered ? revision.createdAt <= cutoff! && (fence === undefined || rows.get(revision.id)! < fence) : revision.createdAt < cutoff!));
+        if (!historical) return undefined; revisionId = historical.id;
+      }
+      const state = this.revisionState(revisionId);
+      if (state.sourceReference) { this.assertSourceReference(owner.projectId, state.sourceReference); return clone(state.sourceReference); }
+      let sourceBranchId: string | undefined;
+      for (const row of this.db.prepare("SELECT json_extract(data,'$.payload.sourceBranchId') AS source_branch_id,json_extract(data,'$.createdAt') AS created_at FROM jobs WHERE branch_id=? AND json_extract(data,'$.kind')='generate' ORDER BY rowid").all(branch.id)) if ((!cutoff || String(row.created_at) <= cutoff) && typeof row.source_branch_id === 'string' && row.source_branch_id !== branch.id) { sourceBranchId = row.source_branch_id; break; }
+      sourceBranchId ??= branch.parentBranchId;
+      if (sourceBranchId) {
+        const row = this.db.prepare('SELECT data FROM branches WHERE id=? AND project_id=?').get(sourceBranchId, owner.projectId);
+        if (!row) return undefined;
+        const firstRevision = Number(this.db.prepare('SELECT MIN(rowid) AS sequence FROM revisions WHERE branch_id=?').get(branch.id)!.sequence);
+        fence = fence === undefined ? firstRevision : Math.min(fence, firstRevision);
+        derived = true; cutoff = cutoff && cutoff < branch.createdAt ? cutoff : branch.createdAt; branch = parse<Branch>(row.data); continue;
+      }
+      const reference = this.captureSourceReference(branch, revisionId, cutoff);
+      return derived || reference.sourceIds?.length ? reference : undefined;
+    }
+    return undefined;
+  }
+  private assertSourceReference(projectId: string, reference: StoryReference) {
+    const parsed = sourceReferenceSchema.safeParse(reference);
+    if (!parsed.success) throw new HttpError('原作参考记录格式不正确', 409);
+    const branch = this.getBranch(reference.branchId); const revision = this.revision(reference.revisionId);
+    if (branch.projectId !== projectId || revision.branchId !== branch.id) throw new HttpError('原作参考版本不属于本作品或故事线', 409);
+    for (const sourceId of reference.sourceIds ?? []) if (!this.hasSources() || !this.db.prepare('SELECT 1 FROM sources WHERE id=? AND project_id=? AND confirmed=1').get(sourceId, projectId)) throw new HttpError('原作参考文件不属于本作品或尚未确认', 409);
+  }
+  originalReference(branchId: string, reference: StoryReference): OriginalReferenceData {
+    const owner = this.getBranch(branchId); this.assertSourceReference(owner.projectId, reference);
+    const state = this.revisionState(reference.revisionId);
+    const chapters = state.chapters.map(chapter => {
+      const row = this.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(chapter.id);
+      if (!row) throw new HttpError('原作参考章节正文不存在', 409);
+      return { ...chapter, text: String(row.text) };
+    });
+    const sources = (reference.sourceIds ?? []).map(sourceId => {
+      const row = this.hasSources() ? this.db.prepare('SELECT filename,preview FROM sources WHERE id=? AND project_id=? AND confirmed=1').get(sourceId, owner.projectId) : undefined;
+      if (!row) throw new HttpError('原作参考文件不存在或尚未确认，请从完整作品备份恢复', 409);
+      return { sourceId, filename: String(row.filename), chapters: parse<{ title: string; text: string }[]>(row.preview) };
+    });
+    return { reference: clone(reference), state, chapters, sources };
   }
   /** Re-generation always forks before its target, including the latest unfinished chapter. */
   forkForGeneration(branchId: string, base: string, chapterId: string): BranchView {
@@ -309,6 +370,7 @@ export class Store {
     return this.createFork(original, state, `RPG · ${setup.character.name}`, setup.entryChapterId ?? state.chapters.at(-1)?.id);
   }
   private createFork(original: Branch, state: StoryState, name: string, forkChapterId?: string): BranchView {
+    state.sourceReference ??= clone(this.state(original.id).sourceReference ?? this.captureSourceReference(original));
     const branch: Branch = { id: id(), projectId: original.projectId, name: name.trim() || '新故事线', revisionId: '', parentBranchId: original.id, forkChapterId, createdAt: now() };
     // Link to the actual boundary revision so historical edits on a fork can find older snapshots.
     const boundary = this.history(original.id).find(r => r.chapterCount === state.chapters.length && (!state.chapters.length || this.revisionState(r.id).chapters.at(-1)?.id === state.chapters.at(-1)?.id));
@@ -321,6 +383,7 @@ export class Store {
     if (input.chapterId) {
       const index = state.chapters.findIndex(c => c.id === input.chapterId); if (index < 0) throw new HttpError('要修改的章节不存在');
       const previous = this.atBoundary(branchId, index);
+      previous.sourceReference ??= clone(state.sourceReference ?? this.captureSourceReference(branch));
       if (index < state.chapters.length - 1) { const fork = this.createFork(branch, this.cleanBoundary(previous), `修订 · ${state.chapters[index].title}`, state.chapters[index - 1]?.id); branch = fork.branch; }
       else {
         // Keep deliberate human constraints when replacing the latest draft. AI discoveries are reverted.
@@ -463,14 +526,13 @@ export class Store {
   exportProject(projectId: string) {
     const project = this.getProject(projectId); const branches = this.listBranches(projectId);
     // Assets and interrupted jobs may refer to a revision detached by rollback.
-    const revisionIds = new Set(branches.flatMap(branch => this.history(branch.id).map(revision => revision.id)));
-    for (const row of this.db.prepare('SELECT r.id FROM revisions r JOIN branches b ON b.id=r.branch_id WHERE b.project_id=?').iterate(projectId)) revisionIds.add(String(row.id));
     const chapterIds = new Set<string>();
-    const revisions = [...revisionIds].map(revisionId => {
-      const row = this.db.prepare('SELECT data,state FROM revisions WHERE id=?').get(revisionId)!;
+    // Preserve global creation order across branches, including millisecond ties.
+    const revisions: { revision: Revision; snapshot: string }[] = [];
+    for (const row of this.db.prepare('SELECT r.data,r.state FROM revisions r JOIN branches b ON b.id=r.branch_id WHERE b.project_id=? ORDER BY r.rowid').iterate(projectId)) {
       for (const chapter of unpack(row.state).chapters) chapterIds.add(chapter.id);
-      return { revision: parse<Revision>(row.data), snapshot: Buffer.from(row.state as Uint8Array).toString('base64') };
-    });
+      revisions.push({ revision: parse<Revision>(row.data), snapshot: Buffer.from(row.state as Uint8Array).toString('base64') });
+    }
     const chapters = [...chapterIds].map(chapterId => { const row = this.db.prepare('SELECT data,text FROM chapter_texts WHERE id=?').get(chapterId)!; return { ...parse<ChapterRef>(row.data), text: String(row.text) }; });
     const jobs = this.db.prepare('SELECT data FROM jobs WHERE project_id=?').all(projectId).map(r => parse<Job>(r.data));
     const importChapters = this.db.prepare('SELECT c.job_id AS jobId,c.position,c.title,c.text FROM job_import_chapters c JOIN jobs j ON j.id=c.job_id WHERE j.project_id=? ORDER BY c.job_id,c.position').all(projectId);
@@ -490,6 +552,10 @@ export class Store {
     const remap = (value: unknown, key = ''): unknown => {
       // Process payloads are historical observations, like raw model responses. Only their owning job is remapped.
       if (key === 'rpgContinuation') return clone(value);
+      if (key === 'sourceIds' && Array.isArray(value)) return value.map(sourceId => {
+        if (typeof sourceId !== 'string' || !Object.hasOwn(sourceIdMap, sourceId) || typeof sourceIdMap[sourceId] !== 'string' || !sourceIdMap[sourceId]) throw new HttpError('备份原作参考缺少原文件映射，请使用包含原文件的完整作品备份');
+        return sourceIdMap[sourceId];
+      });
       if (key === 'writingActivities' && Array.isArray(value)) return value.map(entry => ({ jobId: map.get(entry.jobId) ?? entry.jobId, activities: clone(entry.activities) }));
       if (typeof value === 'string') { if (key === 'sourceId') return Object.hasOwn(sourceIdMap, value) ? sourceIdMap[value] : undefined; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds' || key === 'imageIds' || key === 'activeImageIds' || key === 'imageStartingEntityIds' || key === 'imagesRequestedFor' || key === 'referenceImageIds' || key === 'referenceEntityIds' || key === 'materialEntityIds') return map.get(value) ?? value; return value; }
       if (Array.isArray(value)) return value.map(v => remap(v, key)); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, remap(v, k)])); return value;
@@ -499,6 +565,13 @@ export class Store {
     const restoredState = (index: number) => states[index];
     const branchIds = new Set(restored.branches.map(b => b.id)); const revisionIds = new Set(restored.revisions.map(r => r.revision.id)); const chapterIds = new Set(restored.chapters.map(c => c.id));
     if (branchIds.size !== restored.branches.length || revisionIds.size !== restored.revisions.length || chapterIds.size !== restored.chapters.length || !branchIds.has(restored.project.mainBranchId) || restored.branches.some(b => b.projectId !== restored.project.id || !revisionIds.has(b.revisionId) || (b.parentBranchId && !branchIds.has(b.parentBranchId))) || restored.revisions.some(r => !branchIds.has(r.revision.branchId) || (r.revision.parentId && !revisionIds.has(r.revision.parentId)))) throw new HttpError('备份存在无效关联');
+    const referenceRevisionOwners = new Map(restored.revisions.map(entry => [entry.revision.id, entry.revision.branchId]));
+    const checkReference = (reference: unknown) => {
+      const parsed = sourceReferenceSchema.safeParse(reference);
+      if (!parsed.success || !branchIds.has(parsed.data.branchId) || referenceRevisionOwners.get(parsed.data.revisionId) !== parsed.data.branchId) throw new HttpError('备份原作参考版本关联无效');
+    };
+    for (const state of states) if (state.sourceReference) checkReference(state.sourceReference);
+    for (const job of restored.jobs) if (job.payload.sourceReference !== undefined) checkReference(job.payload.sourceReference);
     const chapterLookup = new Map(restored.chapters.map(c => [c.id, paragraphs(c.text)]));
     const imageIds = new Set(restored.images.map(asset => asset.image.id));
     const imagesById = new Map(restored.images.map(asset => [asset.image.id, asset.image]));
@@ -558,7 +631,7 @@ export class Store {
     for (const job of restored.jobs) {
       if (job.payload.rpgContinuation) {
         const previous = (job.payload.rpgLookupAliases ?? {}) as Record<string, string>;
-        job.payload.rpgLookupAliases = { ...Object.fromEntries(Object.entries(previous).map(([oldId, target]) => [oldId, map.get(target) ?? target])), ...Object.fromEntries(map) };
+        job.payload.rpgLookupAliases = { ...Object.fromEntries(Object.entries(previous).map(([oldId, target]) => [oldId, map.get(target) ?? (Object.hasOwn(sourceIdMap, target) ? sourceIdMap[target] : target)])), ...Object.fromEntries(map), ...sourceIdMap };
       }
       for (const field of ['blockIndex', 'importIndex']) if (job.payload[field] !== undefined && (!Number.isInteger(job.payload[field]) || Number(job.payload[field]) < 0)) throw new HttpError('备份任务进度无效');
       for (const field of ['generatedChapterId', 'extractChapterId', 'importCurrentChapterId', 'chapterId']) if (job.payload[field] && !chapterIds.has(String(job.payload[field]))) throw new HttpError('备份任务章节不存在');
@@ -592,6 +665,12 @@ export class Store {
       for (const output of restored.outputs) this.outputs.insert(output);
       for (const asset of restored.images) this.images.insert(asset.image, asset.contentBase64 ? { bytes: Buffer.from(asset.contentBase64, 'base64'), mimeType: asset.image.mimeType! } : undefined);
       onRestore?.(restored.project);
+      const references = [...states.flatMap(state => state.sourceReference ? [state.sourceReference] : []), ...restored.jobs.flatMap(job => job.payload.sourceReference ? [job.payload.sourceReference as StoryReference] : [])];
+      const confirmedSources = new Set<string>();
+      for (const reference of references) for (const sourceId of reference.sourceIds ?? []) if (!confirmedSources.has(sourceId)) {
+        if (!this.hasSources() || !this.db.prepare('SELECT 1 FROM sources WHERE id=? AND project_id=? AND confirmed=1').get(sourceId, restored.project.id)) throw new HttpError('备份原作参考文件不存在、不属于恢复作品或尚未确认');
+        confirmedSources.add(sourceId);
+      }
       this.db.exec('COMMIT');
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
     return restored.project;

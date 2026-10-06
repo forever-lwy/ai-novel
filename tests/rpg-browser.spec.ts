@@ -24,10 +24,10 @@ test.afterEach(async ({ page }) => { await page.request.put('/api/settings', { d
 async function branch(page: Page, id: string): Promise<BranchView> { return (await page.request.get(`/api/branches/${id}?view=author`)).json(); }
 async function jobs(page: Page, projectId: string): Promise<Job[]> { return (await page.request.get(`/api/jobs?projectId=${projectId}&view=author`)).json(); }
 async function waitReady(page: Page, id: string, count: number) { await expect.poll(async () => (await branch(page, id)).state.chapters.filter(chapter => chapter.status === 'ready').length).toBe(count); }
-async function seedNovel(page: Page, title: string) {
+async function seedNovel(page: Page, title: string, laterText = '林舟在白石城找到一盏旧灯。') {
   const response = await page.request.post('/api/projects', { data: { title, mode: 'continuation', premise: '林舟来到白石城。' } });
   expect(response.ok()).toBeTruthy(); const project: Project = await response.json();
-  for (const [index, text] of ['林舟来到白石城，城门下有一块石碑。', '林舟在白石城找到一盏旧灯。'].entries()) {
+  for (const [index, text] of ['林舟来到白石城，城门下有一块石碑。', laterText].entries()) {
     const current = await branch(page, project.mainBranchId);
     expect((await page.request.post(`/api/branches/${project.mainBranchId}/chapters`, { data: { baseRevisionId: current.branch.revisionId, title: index ? '第二章 灯火' : '第一章 起点', text } })).ok()).toBeTruthy();
     await waitReady(page, project.mainBranchId, index + 1);
@@ -131,4 +131,48 @@ test('新建作品支持 RPG，稍后决定与切线不会答题，任务页可�
   await page.getByRole('button', { name: '停止生成', exact: true }).click(); await expect(page.getByRole('button', { name: '退出生成', exact: true })).toBeVisible(); await expect(choice).toHaveCount(0);
   expect(choiceRequests).toBe(0);
   await page.locator('.workspace-tabs').getByRole('button', { name: /^任务/ }).click(); await expect(page.locator('.job-card .status-pill.cancelled')).toHaveCount(1);
+});
+
+test('从早期章节穿越，AI 读取原作后续摘要、未来物品及指定行原文，当前剧情不提前继承', async ({ page }) => {
+  const project = await seedNovel(page, 'E2E 原作未来参考', '林舟在白石城找到一盏旧灯。\n\nFUTURE_REFERENCE_SENTINEL：林舟发现星钥，其能力是照亮星门。');
+  const original = await branch(page, project.mainBranchId);
+  const config: Settings = await (await page.request.get('/api/settings')).json();
+  expect((await page.request.put('/api/settings', { data: { ...config, writingModel: 'e2e-original-reference' } })).ok()).toBeTruthy();
+  await openProject(page, project);
+  await page.getByRole('button', { name: '穿越体验', exact: true }).click();
+  const setup = page.getByRole('dialog');
+  await setup.getByLabel('角色姓名', { exact: true }).fill('顾星');
+  await setup.getByLabel('进入小说的起点', { exact: true }).selectOption(original.state.chapters[0].id);
+  await setup.getByRole('button', { name: '开始体验', exact: true }).click();
+  const choice = page.getByRole('dialog', { name: '决定接下来的剧情', exact: true });
+  await expect(choice).toBeVisible();
+  const experienceId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+  const experience = await branch(page, experienceId);
+  expect(experience.state.chapters).toHaveLength(1);
+  expect(experience.state.entities.some(entity => entity.name === '星钥')).toBeFalsy();
+  expect(experience.state.sourceReference).toMatchObject({ branchId: project.mainBranchId, revisionId: original.branch.revisionId });
+  const writing = (await jobs(page, project.id)).find(job => job.branchId === experienceId && job.pendingChoice)!;
+  const activities = await (await page.request.get(`/api/jobs/${writing.id}/activities?view=author`)).json();
+  for (const name of ['list_text_files', 'search_text', 'read_text_file', 'search_story', 'read_entity']) {
+    const activity = activities.find((value: { name: string }) => value.name === name);
+    expect(activity, name).toMatchObject({ status: 'completed' });
+    expect(activity.result).not.toHaveProperty('error');
+  }
+  const fileRead = activities.find((value: { name: string }) => value.name === 'read_text_file');
+  expect(JSON.stringify(fileRead.result)).toContain('FUTURE_REFERENCE_SENTINEL');
+  expect(JSON.stringify(fileRead.result)).not.toContain('旧灯');
+  expect(JSON.stringify(activities.find((value: { name: string }) => value.name === 'read_entity').result)).toContain('照亮星门');
+  const outputs = await (await page.request.get(`/api/jobs/${writing.id}/outputs?view=author`)).json();
+  const request = await (await page.request.get(`/api/jobs/${writing.id}/outputs/${outputs[0].id}?view=author`)).json();
+  expect(request.output.request.body).toContain('原作');
+  expect(request.output.request.body).toContain('星钥');
+  const reader = await (await page.request.get(`/api/branches/${experienceId}?view=reader`)).json();
+  expect(JSON.stringify(reader)).not.toContain('FUTURE_REFERENCE_SENTINEL');
+  expect(reader.state).not.toHaveProperty('sourceReference');
+  await choice.getByRole('radio', { name: '友好问候', exact: true }).check();
+  await choice.getByRole('button', { name: '确认选择并继续', exact: true }).click();
+  await expect(choice).toHaveCount(0);
+  await waitReady(page, experienceId, 2);
+  await expect(page.locator('.manuscript .prose')).toContainText('你按自己的选择回应守门人');
+  expect((await branch(page, project.mainBranchId)).state.chapters.map(chapter => chapter.id)).toEqual(original.state.chapters.map(chapter => chapter.id));
 });

@@ -10,7 +10,7 @@ import { extractionContext, normalizeExtraction, splitExtractionBlocks as splitB
 import { buildWritingContext } from './writing-context.js';
 import type { ImageService } from './images.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
-import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, RpgSession } from '../shared/types.js';
+import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, RpgSession, StoryReference } from '../shared/types.js';
 export { extractionSchema } from './extraction.js';
 
 const foreshadowSchema = z.object({ title: z.string().min(1), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedNames: z.array(z.string()) });
@@ -291,6 +291,12 @@ export class StoryEngine {
         smallPayload.chapterId = undefined; smallPayload.title = payload.title || original.title;
         if (payload.discardBackground) for (const background of backgroundJobs) { background.status = 'cancelled'; background.message = '作者放弃后台整理，已创建重新生成分支'; this.save(background); }
       }
+      if (kind === 'generate' || kind === 'plan' && payload.purpose !== 'compress-summary') {
+        const reference = this.store.resolveSourceReference(branch.id);
+        if (reference && !(kind === 'generate' && payload.mode === 'original' && !reference.sourceIds?.length)) smallPayload.sourceReference = reference;
+        else delete smallPayload.sourceReference;
+        smallPayload.sourceReferenceCaptured = true;
+      }
       if (kind === 'generate' && !smallPayload.title) smallPayload.title = (normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled && state.outline.fine.find(plan => plan.chapter === state.chapters.length + 1)?.title) || `第 ${state.chapters.length + 1} 章`;
       job = { id: randomUUID(), projectId: branch.projectId, branchId: branch.id, kind, status: 'queued', baseRevisionId: branch.revisionId, progress: 0, total, message: '已排队', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: structuredClone(smallPayload) };
       if (kind === 'import') {
@@ -387,6 +393,17 @@ export class StoryEngine {
     const project = this.store.getProject(job.projectId);
     return { projectTitle: project.title, premise: project.premise || '', chapterNumber: String(state.chapters.length + 1), instruction: String(job.payload.instruction ?? '') };
   }
+  private writingReference(job: Job) {
+    let reference = job.payload.sourceReference as StoryReference | undefined;
+    // Old jobs and derived lines acquire a reference without rewriting historical states.
+    if (!reference && !job.payload.sourceReferenceCaptured) {
+      reference = this.store.resolveSourceReference(job.branchId);
+      if (reference && job.kind === 'generate' && job.payload.mode === 'original' && !reference.sourceIds?.length) reference = undefined;
+      if (reference) job.payload.sourceReference = reference;
+      job.payload.sourceReferenceCaptured = true; this.save(job);
+    }
+    return reference && !(job.kind === 'generate' && job.payload.mode === 'original' && !reference.sourceIds?.length) ? this.store.originalReference(job.branchId, reference) : undefined;
+  }
   private taskPrompt(task: PromptTask, variables: Record<string, string>): ModelRequest {
     const request = compilePrompt(normalizePromptTemplates(this.getSettings().promptTemplates), task, variables);
     return task === 'writing' ? request : structuredRequest(request);
@@ -422,6 +439,7 @@ export class StoryEngine {
   private applyPlan(job: Job, output: ModelOutputRecord, value: PlanningResult, local: boolean) {
     this.assertSeparatePlanning();
     const state = this.store.state(job.branchId); this.updatePlanState(state, value);
+    if (job.payload.sourceReference) state.sourceReference = structuredClone(job.payload.sourceReference as StoryReference);
     this.store.commit(job.branchId, job.baseRevisionId, state, '更新未发生剧情的预期规划', this.outputCheckpoint(job, output, { ...job.payload, planned: true, pendingStage: undefined }, job.progress, '预期规划已保存', local, local && job.kind === 'plan'));
   }
   private planningTools(jobId: string): { tools: ModelTool[]; instruction: string } {
@@ -467,7 +485,7 @@ export class StoryEngine {
         job.status = 'paused'; job.message = '剧情停在选择节点，等待你的决定'; job.error = undefined; this.save(job);
         throw new ModelInteractionPause('剧情等待用户选择。');
       },
-    }], instruction: `\nRPG 穿越体验：用户扮演${session.character.kind === 'existing' ? '原作已有角色' : '原创角色'}“${session.character.name}”。角色设定：${session.character.description}\n穿越场景与要求：${session.entryInstruction || '从当前故事边界进入小说世界。'}\n你担任剧情主持，描写用户角色眼前的环境、其他角色和已选择行动的后果。用户角色的自主行动、台词和选择由用户决定。所有关键剧情节点，以及需要玩家行动或回应时，必须调用 ask_user 给出不同选项并暂停，等真实工具结果返回再继续；不能在调用前替玩家选择，不能自行编造工具结果。工具不写入正文，选项仅体现当前已知情况，不泄露未来规划或角色不知道的秘密。尊重原作已发生的事实，体验线之后的剧情由用户选择发展；原创设定是用户确认内容，你临时补充的细节不能冒充用户设定。` };
+    }], instruction: `\nRPG 穿越体验：用户扮演${session.character.kind === 'existing' ? '原作已有角色' : '原创角色'}“${session.character.name}”。角色设定：${session.character.description}\n穿越场景与要求：${session.entryInstruction || '从当前故事边界进入小说世界。'}\n你担任剧情主持，描写用户角色眼前的环境、其他角色和已选择行动的后果。用户角色的自主行动、台词和选择由用户决定。所有关键剧情节点，以及需要玩家行动或回应时，必须调用 ask_user 给出不同选项并暂停，等真实工具结果返回再继续；不能在调用前替玩家选择，不能自行编造工具结果。允许通过原作参考工具查询后续剧情、人物、物品与伏笔来安排世界；原作后续属于主持人参考，不代表体验线已经发生或玩家已经知道，不能强制照搬原作或用参考推翻玩家选择。工具不写入正文，选项仅体现角色当前已知情况，不向玩家泄露未来规划或角色不知道的秘密。尊重原作在穿越起点之前已发生的事实，体验线之后的剧情以本线正文和用户选择为准；原创设定是用户确认内容，你临时补充的细节不能冒充用户设定。` };
   }
   private applyWriting(job: Job, output: ModelOutputRecord, prose: string, local: boolean) {
     if (!prose.trim()) throw new OutputValidationError([{ path: '$', message: '小说正文不能为空' }]);
@@ -482,7 +500,10 @@ export class StoryEngine {
       this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, text);
       this.outputCheckpoint(job, output, { ...job.payload, pendingPlotPlan: undefined, generatedChapterId: saved.id, pendingStage: undefined }, job.total, '正文已保存，资料在后台整理', local, true)(revisionId, branchId);
       this.queueExtraction(job, saved.id, local);
-    }, pendingPlan ? state => this.updatePlanState(state, pendingPlan) : undefined);
+    }, state => {
+      if (job.payload.sourceReference) state.sourceReference = structuredClone(job.payload.sourceReference as StoryReference);
+      if (pendingPlan) this.updatePlanState(state, pendingPlan);
+    });
     this.notifyWriting(job);
     queueMicrotask(() => this.pump());
   }
@@ -624,8 +645,9 @@ export class StoryEngine {
   private async plan(jobId: string, signal: AbortSignal) {
     this.assertSeparatePlanning();
     const job = this.live(jobId); const state = this.store.state(job.branchId); const provider = this.provider('planning'); const next = state.chapters.length + 1;
-    const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text });
-    const request = this.budget(job, provider, { ...this.taskPrompt('planning', { ...this.promptVariables(job, state), ...context.variables, context: context.text, endChapter: String(next + 3) }), signal });
+    const original = this.writingReference(job);
+    const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original });
+    const request = this.budget(job, provider, { ...this.taskPrompt('planning', { ...this.promptVariables(job, state), ...context.variables, context: context.text, endChapter: String(next + 3) }), signal, ...(original ? { tools: context.tools } : {}) });
     const { result, output } = await this.requestCaptured(jobId, 'planning', request, req => this.models.generateStructured<PlanningResult>(provider, req, value => planningSchema.parse(value)), result => JSON.stringify(result.value));
     this.applyPlan(this.live(jobId), output, result.value, false);
   }
@@ -716,7 +738,7 @@ export class StoryEngine {
         }
         const input = job.payload as unknown as GenerateInput;
         const state = this.store.state(job.branchId); const provider = { ...this.provider('writing'), stream: true };
-        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, planningEnabled: normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled });
+        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, planningEnabled: normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled, original: this.writingReference(job) });
         const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
         const selected = original ? input.selection ? String(original.text).slice(input.selection.start, input.selection.end) : String(original.text) : undefined;
         const continuation = input.mode === 'rpg' ? job.payload.rpgContinuation as ModelToolContinuation | undefined : undefined;
