@@ -453,6 +453,9 @@
 @media(max-width:760px){.story-image-grid,.story-image-grid.compact{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:11px}.story-image-info{padding:11px}.story-image-info>.row{gap:7px;flex-wrap:wrap}.story-image-info>h4{font-size:12px}.story-image-actions{gap:7px}.story-image-actions>.text-button{font-size:10px}.chapter-images{padding:22px 20px;margin-bottom:25px}.chapter-images>.row{gap:12px;align-items:flex-start}.chapter-images h3{font-size:14px}.chapter-images>.row>.text-button{font-size:10px}.editor-toolbar>.row:last-child{justify-content:flex-start;min-width:0;flex-basis:100%}.editor-toolbar .button{font-size:10px;padding:8px}.entity-images .button{font-size:10px}.map-images{margin-bottom:21px}}
 .rpg-setup{padding:16px;border:1px solid #dfe7d6;border-radius:8px;background:#f8faf3;min-width:0}
 .rpg-setup>.notice{margin:0;font-size:12px;line-height:1.8}
+.rpg-choice{margin-top:30px;padding-top:24px;border-top:1px solid #dce5d7;min-width:0}
+.streaming-prose.awaiting-choice{min-height:0}
+.rpg-choice>h2{margin:0 0 18px;font-size:15px;font-weight:500;color:#34553e;scroll-margin-top:160px}
 .rpg-choice-question{font-size:16px;line-height:1.9;color:#34553e;white-space:pre-wrap;margin:0}
 .rpg-choice-options{border:0;padding:0;margin:0;display:flex;flex-direction:column;gap:10px;min-width:0}
 .rpg-choice-options>legend{font-size:12px;color:#75896a;margin-bottom:12px}
@@ -463,7 +466,7 @@
 .rpg-choice-option strong{font-size:13px;font-weight:500;color:#34553e}
 .rpg-choice-option small{font-size:12px;color:#78916e;white-space:pre-wrap}
 .rpg-waiting{align-items:center;background:#eef5e7}
-@media(max-width:760px){.rpg-setup{padding:12px}.rpg-choice-question{font-size:14px}.rpg-choice-options>.rpg-choice-option{padding:12px}.rpg-choice-option strong{font-size:12px}.rpg-choice-option small{font-size:11px}.rpg-choice .row>.button{font-size:11px;padding:9px 11px}.rpg-waiting .button{font-size:10px;padding:7px 9px}}
+@media(max-width:760px){.rpg-setup{padding:12px}.rpg-choice{margin-top:22px;padding-top:20px}.rpg-choice>h2{font-size:14px;scroll-margin-top:180px}.rpg-choice-question{font-size:14px}.rpg-choice-options>.rpg-choice-option{padding:12px}.rpg-choice-option strong{font-size:12px}.rpg-choice-option small{font-size:11px}.rpg-choice .row>.button{font-size:11px;padding:9px 11px}.rpg-waiting .button{font-size:10px;padding:7px 9px}}
 .settings-form[hidden]{display:none}
 .account-security-card{padding:22px;border:1px solid #dce5d7;border-radius:9px;background:#fffefa;min-width:0}
 .account-security-card h3{font-size:16px;color:#34553e;margin:0}
