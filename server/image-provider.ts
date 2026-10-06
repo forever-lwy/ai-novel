@@ -1,4 +1,5 @@
 import type { ImageSettings, ProviderConnection } from '../shared/types.js';
+import { providerFetch } from './outbound.js';
 import { imageModelCapabilities, type ImageModelCapabilities } from '../shared/image-capabilities.js';
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -226,7 +227,7 @@ export async function generateImage(provider: ProviderConnection, config: ImageS
   try {
     if (signal?.aborted) controller.abort();
     // Prevent credentials being forwarded even by same-origin redirects.
-    const response = await fetch(url, { method: 'POST', headers, body, signal: controller.signal, redirect: 'error' });
+    const response = await providerFetch(url, { method: 'POST', headers, body, signal: controller.signal, redirect: 'error' });
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
       const hint = response.status === 401 || response.status === 403 ? '请检查密钥及生图模型权限。' : response.status === 429 ? '额度不足或请求过于频繁，请稍后手动重试。' : response.status === 404 ? '请检查 API 前缀、协议与模型名称。' : '请检查生图服务后手动重试。';

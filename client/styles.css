@@ -464,3 +464,8 @@
 .rpg-choice-option small{font-size:12px;color:#78916e;white-space:pre-wrap}
 .rpg-waiting{align-items:center;background:#eef5e7}
 @media(max-width:760px){.rpg-setup{padding:12px}.rpg-choice-question{font-size:14px}.rpg-choice-options>.rpg-choice-option{padding:12px}.rpg-choice-option strong{font-size:12px}.rpg-choice-option small{font-size:11px}.rpg-choice .row>.button{font-size:11px;padding:9px 11px}.rpg-waiting .button{font-size:10px;padding:7px 9px}}
+.settings-form[hidden]{display:none}
+.account-security-card{padding:22px;border:1px solid #dce5d7;border-radius:9px;background:#fffefa;min-width:0}
+.account-security-card h3{font-size:16px;color:#34553e;margin:0}
+.account-security-card .settings-section-fields{gap:16px}
+@media(max-width:760px){.account-security-card{padding:16px}.account-security-card h3{font-size:14px}.account-security-card .button{font-size:12px}}

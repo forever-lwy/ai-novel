@@ -26,7 +26,7 @@ npm ci
 npm run dev
 ```
 
-打开 [开发工作台](http://127.0.0.1:5173)。首次使用设置个人密码，至少 8 位。网页和 API 默认只监听本机，Vite 将 `/api/` 请求代理到 `127.0.0.1:4317`。
+打开 [开发工作台](http://127.0.0.1:5173)。首次使用设置个人密码，至少 12 位，不能全为空白或使用常见弱密码。网页和 API 默认只监听本机，Vite 将 `/api/` 请求代理到 `127.0.0.1:4317`。
 
 ### 生产运行
 
@@ -36,17 +36,19 @@ npm run build
 npm start
 ```
 
-打开 [工作台](http://127.0.0.1:4317)。服务同时提供 API 和构建后的网页，不需要另外运行 Vite。
+打开 [工作台](http://127.0.0.1:4317)。生产实例首次设置需在服务器读取 `data/.setup-token` 并填入安装码；初始化后文件删除。服务同时提供 API 和构建后的网页，不需要另外运行 Vite。
 
-默认无需创建配置文件；需要调整时，复制 [.env.example](.env.example) 为 `.env`，服务启动时会自动读取。
+本机使用默认无需创建配置文件；需要调整时，复制 [.env.example](.env.example) 为 `.env`，服务启动时会自动读取。构建后的生产入口默认使用 `NODE_ENV=production`，开发源码入口默认使用 `development`，也可在 `.env` 明确设置。
 
 | 配置项 | 默认值与用途 |
 | --- | --- |
 | `HOST` | `127.0.0.1`，服务监听地址 |
 | `PORT` | `4317`，API 与生产网页端口 |
 | `DATA_DIR` | `./data`，数据库、原文件及加密密钥目录 |
-| `PUBLIC_ORIGIN` | 外部访问来源，例如 `https://novel.example.com` |
-| `COOKIE_SECURE` | 未设置时为 false；通过 HTTPS 访问时设为 `true` |
+| `PUBLIC_ORIGIN` | 公网部署的 HTTPS 来源，例如 `https://novel.example.com`，不带子路径、查询参数或凭据 |
+| `COOKIE_SECURE` | 配置 `PUBLIC_ORIGIN` 后自动启用 Secure Cookie，并拒绝显式 `false`；本机 HTTP 使用可留空 |
+| `TRUSTED_PROXIES` | 默认不信任代理头；只填写实际代理的 IP／CIDR，多个值以逗号分隔 |
+| `OUTBOUND_ALLOWED_ORIGINS` | 生产模式默认只连接 HTTPS 公网地址；设置后只允许列出的来源，HTTP／私网网关也须明确列入，多个值以逗号分隔 |
 
 开发时若更改 API 的 `PORT`，还需同步调整 [vite.config.ts](vite.config.ts) 中的代理目标。生产运行不使用开发代理。
 
@@ -56,9 +58,9 @@ npm start
 docker compose up -d --build
 ```
 
-[Compose](compose.yaml) 默认绑定主机 `127.0.0.1:4317`，数据持久化到 `novel-data` 卷的 `/app/data`。先在受信任环境完成首次密码设置；局域网开放可在 `.env` 设置 `BIND_ADDRESS=0.0.0.0`，该项用于 Compose 的主机端口绑定。
+[Compose](compose.yaml) 默认绑定主机 `127.0.0.1:4317`，数据持久化到 `novel-data` 卷的 `/app/data`。初次安装需要安装码：启动后在服务器本地运行 `docker compose exec ai-novel cat /app/data/.setup-token`，将其填入首次设置页面；初始化后文件自动删除。已有数据目录保留原密码、作品和独立 API 密钥，不需要重新初始化。
 
-通过互联网访问时，使用反向代理提供 HTTPS，并设置 `PUBLIC_ORIGIN=https://你的域名` 和 `COOKIE_SECURE=true`。SQLite 数据必须放在服务主机本地存储，不要将运行中的数据库放在 SMB／NFS 共享目录。Docker 与目标 NAS 的实机验收情况见 [项目状态](PROJECT-STATUS.md#当前限制与未验证部分)。
+通过互联网访问时，使用反向代理提供 HTTPS，设置 `PUBLIC_ORIGIN=https://你的域名`，后端端口继续只绑定本机。代理必须覆盖转发头，核实实际连接来源后设置 `TRUSTED_PROXIES`，详见 [安全部署](docs/DEPLOYMENT.md)。SQLite 数据必须放在服务主机本地存储，不要将运行中的数据库放在 SMB／NFS 共享目录。Docker 与目标 NAS 的实机验收情况见 [项目状态](PROJECT-STATUS.md#当前限制与未验证部分)。
 
 ## 开始创作
 
@@ -104,6 +106,7 @@ npm run test:e2e
 - [PROJECT-STATUS.md](PROJECT-STATUS.md)：当前能力、限制、最近改动和验证情况；**每次修改完成后、提交前同步更新**。
 - [使用指南](docs/USAGE.md)：创作流程、模型与提示词设置、手工修正及备份。
 - [API 契约](docs/API-CONTRACT.md)：接口与数据行为。
+- [安全部署](docs/DEPLOYMENT.md)：HTTPS、代理、首次安装、权限与服务迁移。
 - [提取流程](docs/EXTRACTION.md)：证据、资料归并与版本规则。
 - [模型连接排查](docs/MODEL-CONNECTIONS.md)：实际请求、参数及服务错误排查。
 - [验收记录](docs/VALIDATION.md)：按日期保存程序、浏览器、真实接口与部署验证证据。

@@ -253,7 +253,7 @@ describe('streaming adapters and transport diagnostics', () => {
   it('records an empty HTTP 500 with exact redacted request before failing without retries', async () => {
     const captured = vi.fn(); const snapshot = vi.fn();
     const url = await service((_req, res) => { res.writeHead(500, { 'x-request-id': 'empty-fixture' }); res.end(); });
-    const failure = await generateText({ ...config('gemini', `${url}/v1beta?session=fictional-session&route=test`), temperature: 0, topP: 0.9, geminiThinking: { mode: 'level', level: 'low' }, timeoutMs: 300000 }, { ...request, onRequest: snapshot, onResponse: captured }).catch(error => error);
+    const failure = await generateText({ ...config('gemini', `${url}/v1beta?route=test`), temperature: 0, topP: 0.9, geminiThinking: { mode: 'level', level: 'low' }, timeoutMs: 300000 }, { ...request, onRequest: snapshot, onResponse: captured }).catch(error => error);
     expect(failure.message).toContain('HTTP 500'); expect(failure).not.toBeInstanceOf(ModelOutputError);
     expect(captured).toHaveBeenCalledTimes(1); expect(snapshot).toHaveBeenCalledTimes(1); expect(requests).toHaveLength(1);
     expect(captured.mock.calls[0][0]).toMatchObject({ rawResponse: '', text: '', httpStatus: 500, request: { headers: { 'x-goog-api-key': '[REDACTED]' }, timeoutMs: 300000 }, diagnostics: { responseBytes: 0, transport: 'http', responseHeaders: { 'x-request-id': 'empty-fixture' } } });

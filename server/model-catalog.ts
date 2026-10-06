@@ -1,4 +1,5 @@
 import type { ProviderConnection, ProviderModel } from '../shared/types.js';
+import { providerFetch } from './outbound.js';
 import { redactModelPayload } from './providers.js';
 
 const MAX_CATALOG_BYTES = 4 * 1024 * 1024;
@@ -102,7 +103,7 @@ export async function listProviderModels(config: ProviderConnection): Promise<Pr
   try {
     for (let page = 0; page < MAX_PAGES; page++) {
       // Do not send credentials to any redirect target, including another origin.
-      const response = await fetch(new URL(url), { method: 'GET', headers, signal: controller.signal, redirect: 'error' });
+      const response = await providerFetch(new URL(url), { method: 'GET', headers, signal: controller.signal, redirect: 'error' });
       if (!response.ok) {
         controller.abort();
         const hint = response.status === 401 || response.status === 403 ? '请检查密钥及模型列表权限。'

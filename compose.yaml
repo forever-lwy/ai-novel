@@ -2,14 +2,26 @@ services:
   ai-novel:
     build: .
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: "${MEMORY_LIMIT:-2g}"
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:4317:4317"
     environment:
       HOST: 0.0.0.0
       PORT: 4317
       DATA_DIR: /app/data
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      NODE_ENV: production
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
+      OUTBOUND_ALLOWED_ORIGINS: "${OUTBOUND_ALLOWED_ORIGINS:-}"
     volumes:
       - novel-data:/app/data
 volumes:

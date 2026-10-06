@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered, Image } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered, Image, ShieldCheck } from 'lucide-react';
 import type { CapturedModelResponse, ImageSettings, ModelParameters, ModelRole, ProviderConnection, ProviderModel, ProviderProtocol, Settings, TaskSettings } from '../shared/types';
 import { defaultModelParameters, getModelParameters, upsertModelParameters } from '../shared/model-settings';
 import { api, post, put } from './api';
@@ -11,6 +11,7 @@ import { validatePromptTemplates } from '../shared/prompt-templates';
 import { normalizeImageSettings } from '../shared/image-settings';
 import { imageModelCapabilities } from '../shared/image-capabilities';
 import { normalizeTaskSettings } from '../shared/task-settings';
+import { AccountSecurity } from './AccountSecurity';
 
 const protocols: Record<ProviderProtocol, { name: string; url: string }> = {
   'openai-chat': { name: 'OpenAI · Chat Completions', url: 'https://api.openai.com/v1' },
@@ -32,6 +33,7 @@ const sections = [
   { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '为各类任务选择模型，设置资料提取自动重试和剧情规划方式。每个任务独立保存参数，同模型用于不同任务也不共用。' },
   { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '为四类任务管理提示词预设、调整消息顺序，并预览编排后的内容。' },
   { id: 'images', label: '生图与自动插画', icon: Image, description: '选择图片模型，设置作品画风、新人物立绘与场景 CG 的自动生成。' },
+  { id: 'account', label: '账号安全', icon: ShieldCheck, description: '修改登录密码，管理其他设备的登录。' },
 ] as const;
 type SettingsSection = typeof sections[number]['id'];
 
@@ -56,6 +58,7 @@ function TaskNumber({ label, value, max, step = 1, disabled, onChange }: { label
 export function SettingsPage({ onBack }: { onBack: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null); const [error, setError] = useState(''); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false);
   const [section, setSection] = useState<SettingsSection>('providers');
+  const [accountBusy, setAccountBusy] = useState(false);
   const [savedSignature, setSavedSignature] = useState('');
   const [inputDraftInvalid, setInputDraftInvalid] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -83,7 +86,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   }, [dirty]);
   useEffect(() => () => { for (const request of requests.current.values()) { clearTimeout(request.timer); request.controller.abort(); } }, []);
 
-  function back() { if (!busy && (!dirty || window.confirm('设置尚未保存，返回作品会放弃这些修改。确定返回吗？'))) onBack(); }
+  function back() { if (!busy && !accountBusy && (!dirty || window.confirm('设置尚未保存，返回作品会放弃这些修改。确定返回吗？'))) onBack(); }
   function showIssue(target: SettingsSection, text: string, field?: HTMLElement) {
     setSection(target); setMessage(''); setError(text);
     if (field) requestAnimationFrame(() => {
@@ -201,12 +204,12 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   }
   const tasks = normalizeTaskSettings(settings?.taskSettings);
   return <main className="settings-page" data-testid="settings-page" aria-label="设置页面">
-    <header className="settings-header"><Brand /><button type="button" className="text-button" disabled={busy} onClick={back}><ArrowLeft size={16} />返回作品</button></header>
-    <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>设置</h1><p>配置模型服务、任务参数与提示词，让创作按你的习惯运行。</p></div>
+    <header className="settings-header"><Brand /><button type="button" className="text-button" disabled={busy || accountBusy} onClick={back}><ArrowLeft size={16} />返回作品</button></header>
+    <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>设置</h1><p>配置模型服务、任务参数与提示词，管理工作台的账号安全。</p></div>
     <div className="settings-layout">
-      <nav className="settings-navigation" aria-label="设置分类">{sections.map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || !settings} onClick={() => { setSection(item.id); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">分类之间可自由切换，修改会保留在当前页面。保存后统一生效。</p></nav>
+      <nav className="settings-navigation" aria-label="设置分类">{sections.map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || accountBusy || !settings} onClick={() => { setSection(item.id); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">模型与创作设置的修改可跨分类保留，保存后统一生效。账号安全操作单独生效。</p></nav>
       <div className="settings-content">
-        {!settings ? <section className="settings-loading" aria-label="设置加载状态">{loading ? <Spinner /> : <><Notice error={error} /><button type="button" className="button secondary" onClick={() => setLoadAttempt(value => value + 1)}><RefreshCw size={15} />重新加载设置</button></>}</section> : <form ref={form} className="settings-form form-stack" noValidate onChange={() => setInputDraftInvalid(!!invalidField())} onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
+        {!settings ? <section className="settings-loading" aria-label="设置加载状态">{loading ? <Spinner /> : <><Notice error={error} /><button type="button" className="button secondary" onClick={() => setLoadAttempt(value => value + 1)}><RefreshCw size={15} />重新加载设置</button></>}</section> : <form ref={form} className="settings-form form-stack" hidden={section === 'account'} inert={section === 'account'} noValidate onChange={() => setInputDraftInvalid(!!invalidField())} onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
     <section data-settings-section="providers" hidden={section !== 'providers'} aria-label="供应商连接设置">
     <div className="settings-section-heading"><h2>供应商连接</h2><p>{sections[0].description}</p></div>
     <fieldset className="settings-section-fields form-stack" disabled={busy}>
@@ -214,8 +217,9 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       <div className="row between"><span className="eyebrow">供应商 {String(index + 1).padStart(2, '0')}</span><button type="button" className="icon-button danger-text" title="删除此供应商" aria-label={`删除供应商 ${provider.name}`} disabled={busy} onClick={() => deleteProvider(provider.id)}><Trash2 size={16} /></button></div>
       <div className="form-grid"><label>供应商名称<input required value={provider.name} onChange={e => updateProvider(index, { name: e.target.value })} placeholder="例如：我的模型服务商" /></label><label>接口协议<select aria-label="接口协议" value={provider.protocol} onChange={e => { const protocol = e.target.value as ProviderProtocol; const wasDefault = provider.baseUrl.replace(/\/+$/, '') === protocols[provider.protocol].url.replace(/\/+$/, ''); updateProvider(index, { protocol, ...(wasDefault ? { baseUrl: protocols[protocol].url } : {}) }); }}>{Object.entries(protocols).map(([key, value]) => <option key={key} value={key}>{value.name}</option>)}</select></label></div>
       <p className="hint">服务地址填写协议前缀（例如 /v1），不要填写完整生成接口。更换服务域名后，需要重新填写密钥。</p><label>服务地址<input required type="url" value={provider.baseUrl} onChange={e => updateProvider(index, { baseUrl: e.target.value })} placeholder="https://api.example.com/v1" /></label>
+      {provider.hasUrlCredentials && <p className="notice error">原地址中的凭据已加密保留。请把密钥填入下面的独立字段，或明确清除凭据后保存。</p>}
       <label><span className="row"><KeyRound size={13} />API 密钥 {provider.hasKey && <span className="positive-text">已保存</span>}</span><input type="password" autoComplete="off" value={provider.apiKey || ''} onChange={e => updateProvider(index, { apiKey: e.target.value })} placeholder={provider.hasKey ? '留空保留现有密钥' : '输入密钥'} /></label>
-      {provider.hasKey && <label className="checkbox"><input type="checkbox" checked={!!provider.clearApiKey} onChange={e => updateProvider(index, { clearApiKey: e.target.checked, apiKey: e.target.checked ? '' : provider.apiKey })} />保存时清除现有密钥</label>}
+      {(provider.hasKey || provider.hasUrlCredentials) && <label className="checkbox"><input type="checkbox" checked={!!provider.clearApiKey} onChange={e => updateProvider(index, { clearApiKey: e.target.checked, apiKey: e.target.checked ? '' : provider.apiKey })} />保存时清除现有密钥</label>}
     </section>)}</div>
     <button className="button secondary align-start" type="button" disabled={busy} onClick={() => { setMessage(''); setSettings({ ...settings, providers: [...settings.providers, { id: crypto.randomUUID(), name: `供应商 ${settings.providers.length + 1}`, protocol: 'openai-chat', baseUrl: protocols['openai-chat'].url, apiKey: '' }] }); }}><Plus size={16} />添加供应商连接</button>
     {!settings.providers.length && <p className="hint">还没有供应商连接。添加连接后，可前往“任务模型”为各类任务选择模型。</p>}
@@ -267,8 +271,9 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       <fieldset className="settings-section-fields form-stack" disabled={busy}><ImageSettingsEditor settings={settings} onChange={value => { setMessage(''); setSettings(value); }} /></fieldset>
     </section>
     <div className="settings-feedback" aria-live="polite">{error && <Notice error={error} />}{message && <div className="notice success" role="status"><CheckCircle2 size={17} />{message}</div>}</div>
-    <footer className="settings-save-footer"><p className="hint">{dirty ? '有未保存的修改。保存会同时应用所有分类的设置。' : '所有分类共用一份设置，保存后统一生效。'}</p><button type="submit" className="button primary" disabled={busy}><Save size={16} />{busy ? '正在处理…' : '保存设置'}</button></footer>
+    <footer className="settings-save-footer"><p className="hint">{dirty ? '有未保存的修改。保存会同时应用模型与创作设置。' : '模型与创作设置共用一份配置，保存后统一生效。'}</p><button type="submit" className="button primary" disabled={busy}><Save size={16} />{busy ? '正在处理…' : '保存设置'}</button></footer>
   </form>}
+        {settings && section === 'account' && <AccountSecurity onBusyChange={setAccountBusy} />}
       </div>
     </div>
   </main>;

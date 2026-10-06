@@ -30,8 +30,8 @@ export function upsertModelParameters(settings: Settings, role: ModelRole, provi
 }
 
 export function connectionOnly(provider: ProviderConnection): ProviderConnection {
-  const { id, name, protocol, baseUrl, apiKey, hasKey, clearApiKey } = provider;
-  return { id, name, protocol, baseUrl, ...(apiKey !== undefined ? { apiKey } : {}), ...(hasKey !== undefined ? { hasKey } : {}), ...(clearApiKey !== undefined ? { clearApiKey } : {}) };
+  const { id, name, protocol, baseUrl, apiKey, hasKey, clearApiKey, hasUrlCredentials } = provider;
+  return { id, name, protocol, baseUrl, ...(apiKey !== undefined ? { apiKey } : {}), ...(hasKey !== undefined ? { hasKey } : {}), ...(clearApiKey !== undefined ? { clearApiKey } : {}), ...(hasUrlCredentials ? { hasUrlCredentials: true } : {}) };
 }
 
 /** Preserve historical models while separating each task's parameters during migration. */

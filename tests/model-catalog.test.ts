@@ -96,16 +96,15 @@ describe('provider model catalogs', () => {
     expect(await listProviderModels(config('gemini'))).toEqual([{ id: 'a'.repeat(300) }]);
   });
 
-  it('redacts API keys and sensitive query values in names and removes credential echoes used as model IDs', async () => {
+  it('redacts API keys in names and removes credential echoes used as model IDs', async () => {
     mockFetch(json({ data: [
-      { id: 'valid', name: `Model ${secret} route-secret` },
-      { id: secret }, { id: 'route-secret' }, { id: 'control\u0000character' },
+      { id: 'valid', name: `Model ${secret}` },
+      { id: secret }, { id: 'control\u0000character' },
       { id: 'safe', name: { apiKey: secret } },
     ] }));
-    const models = await listProviderModels(config('openai-chat', { baseUrl: 'https://gateway.example/v1?api_key=route-secret' }));
-    expect(models).toEqual([{ id: 'valid', name: 'Model [REDACTED] [REDACTED]' }, { id: 'safe' }]);
+    const models = await listProviderModels(config('openai-chat'));
+    expect(models).toEqual([{ id: 'valid', name: 'Model [REDACTED]' }, { id: 'safe' }]);
     expect(JSON.stringify(models)).not.toContain(secret);
-    expect(JSON.stringify(models)).not.toContain('route-secret');
   });
 
   it.each([401, 403, 404, 429, 500])('returns a safe HTTP %s error with the custom-model fallback and does not retry', async status => {

@@ -11,7 +11,7 @@ ENV NODE_ENV=production HOST=0.0.0.0 PORT=4317 DATA_DIR=/app/data
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-RUN mkdir /app/data && chown node:node /app/data
+RUN mkdir -m 0700 /app/data && chown node:node /app/data
 USER node
 VOLUME ["/app/data"]
 EXPOSE 4317

@@ -2,6 +2,21 @@
 
 所有接口 /api，cookie session。JSON 错误 {error:string}。时间 ISO。共享类型 shared/types.ts。
 
+## 登录与安全边界
+
+- `GET /auth/status -> {initialized:boolean,authenticated:boolean,setupTokenRequired?:boolean}`，生产、配置公网来源或非本机监听的实例未初始化时额外返回 `setupTokenRequired:true`，不返回安装码、密码哈希或会话值。
+- `POST /auth/setup {password,setupToken?} -> {ok:true}`，仅未初始化时可用。新密码 12～256 字符，去除首尾空白后仍须至少 12 位，拒绝全空白、重复单字符及常见弱密码；生产、配置公网来源或非本机监听时须校验服务器本地安装码。缺少／错误安装码为 403，已初始化或初始化竞争为 409。
+- `POST /auth/login {password} -> {ok:true}`，接受旧版 8～256 字符密码；成功登录时将旧 `salt:hash` 升级为带版本与参数的 scrypt 哈希（`N=16384,r=8,p=5`），不更改原密码。错误密码为 401。
+- `POST /auth/logout -> {ok:true}`，撤销当前会话并清除 Cookie。
+- `POST /auth/password {currentPassword,password} -> {ok:true}`，要求有效会话与当前密码，新密码遵循初始化规则。事务更新密码并撤销全部原会话，返回当前浏览器的新 Cookie；异步校验期间密码或会话已变化时拒绝操作。
+- `POST /auth/sessions/revoke {password} -> {ok:true}`，要求有效会话与正确密码，撤销全部原会话并为当前浏览器重新建立会话。错误密码为 401。
+- 鉴权依据实际匹配的 API 路由执行；编码路径不能跳过登录或来源检查。会话 token 为随机 32 字节，数据库仅存 SHA-256；Cookie 使用 `HttpOnly`、`SameSite=Strict`，有效期 7 天。配置 `PUBLIC_ORIGIN` 后自动 `Secure`，显式关闭会导致启动失败。
+- SSE 在发送每个事件与心跳前重新检查会话；退出、改密码、撤销或过期后关闭原连接，不再发送新内容。
+- 上述写接口的请求体上限 4 KiB。登录和初始化分别按可信客户端 IP 限制 5 分钟内 10 次；改密码与撤销会话共享 5 分钟内 5 次。限速在请求体解析前执行，成功登录不清空计数；超限返回 429 和 `Retry-After`。密码运算同时最多 4 项，繁忙返回 429。
+- `PUBLIC_ORIGIN` 只接受不含凭据、子路径、查询或片段的 HTTPS 来源；`TRUSTED_PROXIES` 只接受明确 IP／CIDR，默认不信任代理头。写请求执行来源检查；一般响应带浏览器安全头，生产页面启用内容安全策略。请求日志不记录查询参数、请求体、Cookie 或 Authorization。
+
+详细部署设置见 [安全部署](DEPLOYMENT.md)。
+
 ## RPG 与剧情选择
 
 - `Mode` 新增 `rpg`，作品创建与提示词模式条件接受该值。`StoryState.rpg` 保存体验角色及入场要求，跟随故事版本、分支与完整作品备份；阅读投影隐藏此作者配置。
@@ -38,7 +53,7 @@
 
 ## 文字与作品接口
 
-- GET /auth/status -> {initialized,authenticated}; POST /auth/setup {password}（首次）; POST /auth/login {password}; POST /auth/logout。
+- 认证接口见上文“登录、凭据与部署边界”，首次设置带可选安装码；改密与会话撤销不进入作品备份。
 - GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],sources:Source[]}。GET 默认隐藏 premise（初始作者设定），显式 ?view=author 返回。
 - DELETE /projects/:id（无请求体）-> {ok:true}：永久删除整部作品，包括原文、正文、所有故事线及历史快照、世界资料、剧情规划与伏笔、任务、导入队列、模型输出和搜索索引。先取消该作品未结束的任务、中止模型请求并等待收尾，再在事务中清理数据，迟到结果不能重新写回。删除期间创建、恢复或重试任务返回 409；重复并发删除返回 409，作品不存在或已删除返回 404。沿用 session 和同源校验，无需 baseRevisionId 或作者视图参数；不影响其他作品、登录和供应商设置。原文清理如遇文件占用，会保留在内部待清理目录并在下次服务启动重试。
 - GET /branches/:id?view=author|reader -> BranchView，默认 reader；读者视图移除 outline/foreshadows/secret 内容（outline 空对象结构保留）。
@@ -69,7 +84,8 @@
 - `diagnostics` 可含 `modelOutcome`（completed/blocked/truncated/empty/error）、`finishReason`、`promptBlockReason`。这是模型服务响应的反馈，不代表资料校验通过；Gemini 流式的真实 `promptFeedback.blockReason` 不替换为泛化标签。网关未返回模型反馈时省略相应字段，不从 5xx 猜测拦截原因，旧备份可继续读取。
 - POST /jobs/:id/outputs?view=author {text} -> ModelOutputRecord：保存历史响应，不自动应用，也不调用模型。
 - POST /jobs/:id/outputs/:outputId/apply?view=author {text,baseRevisionId} -> Job：保存修正后做本地校验。格式或证据不符返回 422，详情接口可取已保存草稿及问题；版本、阶段、进度过期或重复应用返回 409。成功后 completed 或 paused，不自动运行下一次模型请求。
-- GET /settings -> Settings（密钥只返回 hasKey）；PUT /settings Settings（同服务空 apiKey 保留已有密钥；clearApiKey 清除；更换服务域名不自动携带旧密钥）-> Settings。
+- GET /settings -> Settings（独立密钥只返回 hasKey）；PUT /settings Settings（同来源空 apiKey 保留已有密钥；clearApiKey 清除；更换来源不自动携带旧密钥）-> Settings。服务地址拒绝凭据查询参数；旧含凭据地址在启动时迁为加密保留，公开返回移除凭据后的 baseUrl 和 hasUrlCredentials:true，不返回原地址或密文。该连接须明确提交非空 apiKey 或 clearApiKey:true 后才能保存清理后的地址；只保存其他设置返回 400，原配置及密文保留。
+- 生产模型出站默认只允许 HTTPS 全球公网地址，检查 DNS 结果并将实际连接绑定到已检查地址；设置 `OUTBOUND_ALLOWED_ORIGINS` 后仅允许名单中来源，可明确允许指定来源的 HTTP／私网网关，链路本地及已知云元数据地址仍禁止，所有模式拒绝 URL 查询凭据及重定向。
 - `Settings.taskSettings` 为 `{extraction:{autoRetry:boolean,maxRetries:number,retryDelayMs:number},planning:{enabled:boolean,mode:'separate'|'tool'}}`。重试默认关闭、最多额外 2 次、间隔 5000 毫秒；次数为 0–10 整数，间隔为 0–300000 整数毫秒。规划默认开启并使用 separate。旧配置缺字段时补默认，旧 PUT 省略整个 taskSettings 保留已保存值；传入时必须完整且拒绝未知字段及非法范围。
 - 自动重试按提取任务的章节／片段计数，导入与独立 extract 共用；失败次数持久化，成功片段的资料、进度及计数清理同事务提交。网络、超时、HTTP 5xx／408／429、输出格式与证据校验失败按设置重试，其他 HTTP 4xx、配置／预算错误、存储错误、停止与版本变化不重试。等待期间 status=running，message 显示次数；每次输出留档、用量累计，耗尽后 failed，人工 resume/retry 重置失败次数。重启或恢复备份转暂停，仍需手动操作；不重发正文、规划、压缩、连接测试或生图请求。
 - planning.mode=tool 且 enabled=true 时，正文请求提供 `update_plot_plan({fine,foreshadows})`：fine 必须为当前待写章及后面三章的四项唯一规划，foreshadows 仅允许 planned，关联名称须匹配唯一已有实体。工具直接接受写作模型提供的内容，不调用 planning 模型；返回 staged 或可修正的 error。有效规划暂存于写作任务，正文成功保存时一起写入同一版本并清除暂存；失败、暂停及取消不先应用规划，手工修复正文可一起恢复，重新生成清除旧暂存。保存前关闭规划或离开工具模式会丢弃暂存规划。关闭规划保留已有数据但正文上下文 currentChapterPlan 为 null；独立规划按钮停用，人工编辑仍可用。
@@ -83,7 +99,8 @@
 - POST /settings/models `{providerId}` 或 `{provider:ProviderConnection}` -> `{models:{id:string,name?:string}[]}`。后者按草稿查询，不保存设置；只有同源且未清除密钥时才复用已保存密钥。服务端按协议获取上游模型列表并处理分页；获取失败返回明确错误，用户仍可自定义模型名。此接口不调用文本生成，也不自动重试。
 - Gemini 模型参数可设 `geminiIncludeThoughts?:boolean`，映射至 `generationConfig.thinkingConfig.includeThoughts`；未设置时省略，false 明确发送，且可独立于思考等级或预算使用。其他协议不发送该设置；返回摘要保留在原响应中，但不计入模型正文。
 - POST /settings/test `{providerId,model?,role?}` -> `{ok,message,inputTokens,outputTokens,capture?}`（按指定任务与模型保存的参数和输出上限调用一次真实模型，未保存过的模型使用通用默认值，不暗中缩小上限）。界面总是传入当前任务的模型及 `role`。兼容旧调用：未传 `role` 时，按正文写作、剧情规划、资料提取的顺序选第一个供应商与模型匹配的任务，无匹配则使用正文写作参数或默认值；省略模型时取对应任务已分配的模型，没有可用模型则拒绝请求。模型服务错误也返回 HTTP 200 / ok:false 及当次脱敏capture；输入错误仍返回4xx。
-- GET /branches/:id/export -> txt；GET /projects/:id/backup -> gzip压缩JSON完整作品不含密钥，含任务进度及作者过程；过程备份仅重映射所属 jobId，工具参数和结果保留历史实际值；POST /restore multipart file（JSON或gzip）-> Project。恢复为独立作品，运行中任务转为暂停。历史状态在备份中单独gzip编码，避免长篇多版本膨胀。
+- GET /branches/:id/export -> txt；GET /projects/:id/backup -> gzip压缩JSON完整作品不含密钥，含任务进度及作者过程；过程备份仅重映射所属 jobId，工具参数和结果保留历史实际值；POST /restore multipart file（JSON或gzip）-> Project。恢复为独立作品，运行中任务转为暂停。导出在读取原文件与完整历史前执行容量预检，未压缩 JSON、压缩下载、外层上传及解压分别最多 128 MiB。最多恢复 5000 个历史版本；单历史状态解压最多 64 MiB，全部历史状态累计最多 256 MiB。请求体或历史容量超限返回 413，无效 JSON／GZIP 或外层解压超限返回 400；原作品保留。历史状态在备份中单独gzip编码，避免长篇多版本膨胀；超限使用停机后的完整数据目录迁移。
+- 小说文件上传、作品备份下载与作品恢复共用每个可信客户端 IP 5 分钟内 3 次的限额，超限返回 429。正文 TXT 导出不计入这项限额。
 
 前端每 2 秒刷新任务，任务完成后刷新当前 branch 状态；编辑器有未保存内容时不得被后台刷新覆盖。所有写请求使用 baseRevisionId，409 提示刷新/另存，不覆盖草稿。正文使用 SSE 实时输出，后台任务继续每两秒轮询；重连从持久化草稿快照续接，刷新和切换视图不重发生成请求。
 

@@ -42,7 +42,7 @@ export interface ProviderConfig extends ModelParameters {
   apiKey?: string; hasKey?: boolean; clearApiKey?: boolean;
 }
 /** Generation fields and model are accepted only when upgrading older settings. */
-export type ProviderConnection = Omit<ProviderConfig, keyof ModelParameters | 'model'> & Partial<ModelParameters> & { model?: string };
+export type ProviderConnection = Omit<ProviderConfig, keyof ModelParameters | 'model'> & Partial<ModelParameters> & { model?: string; hasUrlCredentials?: boolean };
 export interface ProviderModel { id: string; name?: string }
 export type PromptTask = 'writing' | 'planning' | 'extraction' | 'compression';
 export interface PromptMessage { role: 'system' | 'user' | 'assistant'; content: string }

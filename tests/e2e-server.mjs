@@ -9,6 +9,7 @@ import { once } from 'node:events';
 process.env.NODE_ENV = 'production';
 const port = Number(process.env.E2E_PORT || 14328);
 const mockPort = Number(process.env.E2E_MODEL_PORT || 4329);
+process.env.OUTBOUND_ALLOWED_ORIGINS = `http://127.0.0.1:${mockPort}`;
 const staticDir = resolve('dist/public');
 if (!existsSync(join(staticDir, 'index.html'))) throw new Error('请先 npm run build，再启动浏览器测试。');
 const dataDir = mkdtempSync(join(tmpdir(), 'ai-novel-browser-'));
@@ -184,7 +185,8 @@ const modelServer = createServer(async (req, res) => {
 });
 modelServer.listen(mockPort, '127.0.0.1'); await once(modelServer, 'listening');
 const { buildApp } = await import('../dist/server/app.js');
-const { app } = await buildApp({ dataDir, staticDir });
+// Browser regression logs in and imports many independent fixtures; security limit tests use defaults.
+const { app } = await buildApp({ dataDir, staticDir, requireSetupToken: false, rateLimits: { login: 1000, imports: 1000, models: 1000 } });
 await app.listen({ port, host: '127.0.0.1' });
 console.log(`E2E only: http://127.0.0.1:${port}; mock model on ${mockPort}; isolated data ${dataDir}`);
 let closing = false;

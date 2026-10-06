@@ -1,4 +1,6 @@
 import { ZodError } from 'zod';
+import { providerFetch } from './outbound.js';
+import { createSecretStreamRedactor, redactSseFragments, secretVariants } from './stream-redaction.js';
 import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequestSnapshot, ModelResult, ModelToolCall, ModelToolContinuation, ModelTransportDiagnostics, OutputIssue, ProviderConfig } from '../shared/types.js';
 import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions } from './provider-options.js';
 import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream } from './model-stream.js';
@@ -104,6 +106,7 @@ function redactAssignments(text: string): string {
 
 /** Preserve original response formatting unless credentials must be removed. */
 function redactPayload(text: string, key?: string, nesting = 0): string {
+  if (/^\s*(?::|event:|data:)/.test(text)) text = redactSseFragments(text, key ? [key] : []);
   const safe = redactAssignments(redactKnown(text, key));
   if (nesting >= 8) return safe;
   try {
@@ -132,8 +135,14 @@ export function redactModelPayload(text: string, keys: string[] = []): string {
   return safe;
 }
 
+export function redactKnownSecrets(text: string, keys: string[]) {
+  for (const key of secretVariants(keys)) text = text.split(key).join('[REDACTED]');
+  return text;
+}
+
 function redactWirePayload(text: string, key?: string): string {
   if (!/^\s*(?::|event:|data:)/.test(text)) return redactPayload(text, key);
+  text = redactSseFragments(text, key ? [key] : []);
   // SSE is a sequence of JSON documents, not one document. Inspect each data
   // field so credentials nested in a stringified model reply are also removed.
   return text.split(/(\r\n\r\n|\n\n|\r\r)/).map(block => {
@@ -293,7 +302,8 @@ async function readBody(response: Response, config: ProviderConfig, onTextDelta?
   const streaming = config.stream || response.headers.get('content-type')?.includes('text/event-stream');
   const detector = createStreamEndDetector(config.protocol);
   const decoder = new TextDecoder();
-  const emit = createStreamTextEmitter(config.protocol, text => onTextDelta?.(redactKnown(text, config.apiKey)));
+  const redactor = createSecretStreamRedactor(config.apiKey ? [config.apiKey] : [], text => onTextDelta?.(text));
+  const emit = createStreamTextEmitter(config.protocol, text => redactor.feed(text));
   const activities = createStreamActivityEmitter(config.protocol, event => onActivity?.(event));
   let length = 0;
   let error: 'limit' | 'read' | undefined;
@@ -322,7 +332,7 @@ async function readBody(response: Response, config: ProviderConfig, onTextDelta?
   } catch { error ??= 'read'; }
   // Socket closure is not a thinking completion marker. Interrupted blocks
   // remain open for the job's failed/paused/cancelled state to settle them.
-  finally { reader.releaseLock(); }
+  finally { redactor.finish(); reader.releaseLock(); }
   return { raw: Buffer.concat(chunks, length).toString('utf8'), bytes: length, incomplete: Boolean(error), error };
 }
 
@@ -403,7 +413,7 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     if (request.signal?.aborted) { transport = 'cancelled'; controller.abort(); throw new Error('模型请求已取消。'); }
     try {
       // Never forward credentials to a redirect target, including same-origin redirects.
-      response = await fetch(wire.url, { method: 'POST', headers: wire.headers, body: JSON.stringify(wire.body), signal: controller.signal, redirect: 'error' });
+      response = await providerFetch(wire.url, { method: 'POST', headers: wire.headers, body: JSON.stringify(wire.body), signal: controller.signal, redirect: 'error' });
     } catch (error) {
       transport = request.signal?.aborted ? 'cancelled' : timedOut ? 'timeout' : 'network_error';
       const code = (error as { cause?: { code?: unknown }; code?: unknown })?.cause?.code ?? (error as { code?: unknown })?.code;

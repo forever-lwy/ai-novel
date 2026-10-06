@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
@@ -12,6 +12,31 @@ import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef
 
 export class HttpError extends Error { constructor(message: string, public statusCode = 400) { super(message); } }
 export class OutputValidationError extends HttpError { constructor(public issues: OutputIssue[], message = '模型输出未通过校验，请在作者输出记录中查看具体位置并修正') { super(message, 422); } }
+export const RESTORE_MAX_REVISIONS = 5000;
+export const RESTORE_MAX_STATE_BYTES = 64 * 1024 * 1024;
+export const RESTORE_MAX_EXPANDED_STATE_BYTES = 256 * 1024 * 1024;
+export const RESTORE_MAX_DEPTH = 64;
+export const RESTORE_MAX_NODES = 1_000_000;
+export const RESTORE_MAX_ARRAY_LENGTH = 100_000;
+export const RESTORE_LIMITS = { maxRevisions: RESTORE_MAX_REVISIONS, maxStateBytes: RESTORE_MAX_STATE_BYTES, maxExpandedStateBytes: RESTORE_MAX_EXPANDED_STATE_BYTES, maxDepth: RESTORE_MAX_DEPTH, maxNodes: RESTORE_MAX_NODES, maxArrayLength: RESTORE_MAX_ARRAY_LENGTH };
+type RestoreLimits = typeof RESTORE_LIMITS;
+const restoreCapacityError = () => new HttpError('备份历史资料超过恢复容量上限，请停止服务并完整迁移数据目录', 413);
+
+/** Bound untrusted JSON before schema validation or recursive ID remapping. */
+export function validateBackupStructure(input: unknown, overrides: Partial<RestoreLimits> = {}): number {
+  const limits = { ...RESTORE_LIMITS, ...overrides };
+  const pending = [{ value: input, depth: 0 }]; let nodes = 0;
+  while (pending.length) {
+    const { value, depth } = pending.pop()!;
+    if (++nodes > limits.maxNodes || depth > limits.maxDepth) throw restoreCapacityError();
+    if (!value || typeof value !== 'object') continue;
+    if (Array.isArray(value) && value.length > limits.maxArrayLength) throw restoreCapacityError();
+    const values = Object.values(value);
+    if (nodes + pending.length + values.length > limits.maxNodes) throw restoreCapacityError();
+    for (const child of values) pending.push({ value: child, depth: depth + 1 });
+  }
+  return nodes;
+}
 const now = () => new Date().toISOString();
 const id = () => randomUUID();
 const clone = <T>(value: T): T => structuredClone(value);
@@ -43,15 +68,50 @@ const rpgSessionSchema = rpgSetupSchema.extend({ character: rpgSetupSchema.shape
 const stateSchema = z.object({ rpg: rpgSessionSchema.optional(), activeImageIds: z.array(z.string().min(1)).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
 const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
 const writingActivitySchema = z.object({ id: z.string().min(1), kind: z.enum(['thinking', 'tool']), text: z.string().optional(), name: z.string().optional(), arguments: z.record(z.string(), z.unknown()).optional(), result: z.unknown().optional(), status: z.enum(['running', 'completed', 'failed']), error: z.string().optional() });
-const backupSchema = z.object({ images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), createdAt: z.string() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: stateSchema.optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
+const backupSchema = z.object({ images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), createdAt: z.string() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: z.unknown().optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1).max(RESTORE_MAX_REVISIONS), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
+
+/** Decode each historical state once, sharing one cumulative expansion budget. */
+export function readBackupStates(entries: readonly { state?: unknown; snapshot?: string }[], overrides: Partial<RestoreLimits> = {}): StoryState[] {
+  const limits = { ...RESTORE_LIMITS, ...overrides };
+  if (entries.length > limits.maxRevisions) throw restoreCapacityError();
+  let expandedBytes = 0, remainingNodes = limits.maxNodes;
+  return entries.map(entry => {
+    const available = Math.min(limits.maxStateBytes, limits.maxExpandedStateBytes - expandedBytes);
+    if (available <= 0) throw restoreCapacityError();
+    let value: unknown, bytes: number, nodes: number | undefined;
+    try {
+      if (entry.state !== undefined) {
+        nodes = validateBackupStructure(entry.state, { ...limits, maxNodes: remainingNodes });
+        const serialized = JSON.stringify(entry.state);
+        if (serialized === undefined) throw new Error('invalid state');
+        bytes = Buffer.byteLength(serialized, 'utf8'); value = entry.state;
+      } else {
+        const decoded = gunzipSync(Buffer.from(entry.snapshot ?? '', 'base64'), { maxOutputLength: available });
+        bytes = decoded.length; value = JSON.parse(decoded.toString('utf8'));
+      }
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      if ((error as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE') throw restoreCapacityError();
+      throw new HttpError('备份历史快照损坏或格式不正确');
+    }
+    if (bytes > available) throw restoreCapacityError();
+    expandedBytes += bytes;
+    remainingNodes -= nodes ?? validateBackupStructure(value, { ...limits, maxNodes: remainingNodes });
+    const parsed = stateSchema.safeParse(value);
+    if (!parsed.success) throw new HttpError('备份历史快照格式不正确');
+    return parsed.data;
+  });
+}
 
 export class Store {
   readonly db: DatabaseSync;
   readonly outputs: OutputStore;
   readonly images: ImageStore;
   constructor(public readonly dataDir: string) {
-    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    if (process.platform !== 'win32') chmodSync(dataDir, 0o700);
     this.db = new DatabaseSync(join(dataDir, 'novel.sqlite'));
+    if (process.platform !== 'win32') chmodSync(join(dataDir, 'novel.sqlite'), 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS branches (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL);
@@ -64,6 +124,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS job_writing_drafts (job_id TEXT PRIMARY KEY, text TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS job_writing_activities (job_id TEXT NOT NULL, activity_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(job_id,activity_id));
       CREATE INDEX IF NOT EXISTS jobs_branch ON jobs(branch_id,status);`);
+    if (process.platform !== 'win32') for (const filename of ['novel.sqlite-wal', 'novel.sqlite-shm']) { const path = join(dataDir, filename); if (existsSync(path)) chmodSync(path, 0o600); }
     this.outputs = new OutputStore(this.db);
     this.images = new ImageStore(this.db);
   }
@@ -328,10 +389,14 @@ export class Store {
   }
   search(branchId: string, query: string, author = false): { chapters: { id: string; title: string; snippet: string }[]; entities: Entity[] } {
     const q = query.trim().slice(0, 200); if (!q) return { chapters: [], entities: [] }; const state = this.view(branchId, author).state;
-    const allowed = new Set(state.chapters.map(c => c.id));
+    if (q.includes('\0')) throw new HttpError('搜索关键词不能包含空字符');
+    const allowed = JSON.stringify(state.chapters.map(c => c.id));
     // Trigram accelerates Chinese search; short words use exact substring matching.
-    const rows = q.length >= 3 ? this.db.prepare('SELECT id,text FROM chapter_search WHERE chapter_search MATCH ?').all(`"${q.replace(/"/g, '""')}"`) : this.db.prepare('SELECT id,text FROM chapter_search WHERE instr(text,?)>0 OR instr(title,?)>0').all(q, q);
-    const chapters = rows.filter(r => allowed.has(String(r.id))).slice(0, 60).map(r => { const ref = state.chapters.find(c => c.id === r.id)!; const text = String(r.text); const at = Math.max(0, text.indexOf(q)); return { id: ref.id, title: ref.title, snippet: text.slice(Math.max(0, at - 40), at + q.length + 100) }; });
+    const rows = !state.chapters.length ? [] : q.length >= 3
+      ? this.db.prepare('SELECT id,substr(text,max(1,instr(text,?)-40),length(?)+100+min(40,max(0,instr(text,?)-1))) AS snippet FROM chapter_search WHERE id IN (SELECT value FROM json_each(?)) AND chapter_search MATCH ? LIMIT 60').all(q, q, q, allowed, `"${q.replace(/"/g, '""')}"`)
+      : this.db.prepare('SELECT id,substr(text,max(1,instr(text,?)-40),length(?)+100+min(40,max(0,instr(text,?)-1))) AS snippet FROM chapter_search WHERE id IN (SELECT value FROM json_each(?)) AND (instr(text,?)>0 OR instr(title,?)>0) LIMIT 60').all(q, q, q, allowed, q, q);
+    const refs = new Map(state.chapters.map(chapter => [chapter.id, chapter]));
+    const chapters = rows.map(row => { const ref = refs.get(String(row.id))!; return { id: ref.id, title: ref.title, snippet: String(row.snippet) }; });
     const entities = state.entities.filter(e => !e.mergedInto && normalize([e.name, ...e.aliases, e.description, ...e.facts.map(f => f.text)].join(' ')).includes(normalize(q))).slice(0, 60);
     return { chapters, entities };
   }
@@ -395,7 +460,7 @@ export class Store {
     if (complete) state.outline.fine = state.outline.fine.filter(plan => plan.chapter > state.chapters.length);
     return this.commit(branchId, base, state, complete ? `完成资料整理：${ref.title}` : `整理章节片段：${ref.title}`, checkpoint);
   }
-  exportProject(projectId: string): unknown {
+  exportProject(projectId: string) {
     const project = this.getProject(projectId); const branches = this.listBranches(projectId);
     // Assets and interrupted jobs may refer to a revision detached by rollback.
     const revisionIds = new Set(branches.flatMap(branch => this.history(branch.id).map(revision => revision.id)));
@@ -414,25 +479,24 @@ export class Store {
     return { version: 1, project, branches, revisions, chapters, jobs, importChapters, writingDrafts, writingActivities, outputs: this.outputs.all(projectId), images: this.images.export(projectId) };
   }
   restoreProject(input: unknown, sourceIdMap: Record<string, string> = {}, onRestore?: (project: Project) => void): Project {
+    if (input && typeof input === 'object' && Array.isArray((input as { revisions?: unknown }).revisions) && (input as { revisions: unknown[] }).revisions.length > RESTORE_MAX_REVISIONS) throw restoreCapacityError();
+    validateBackupStructure(input);
     const parsed = backupSchema.safeParse(input); if (!parsed.success) throw new HttpError('作品备份格式不正确或缺少正文与世界资料字段');
     const data = parsed.data;
-    const readState = (entry: typeof data.revisions[number]): StoryState => {
-      if (entry.state) return entry.state;
-      try { return stateSchema.parse(JSON.parse(gunzipSync(Buffer.from(entry.snapshot!, 'base64'), { maxOutputLength: 64 * 1024 * 1024 }).toString())); }
-      catch { throw new HttpError('备份历史快照损坏、格式不正确或单版本解压后超过 64 MB'); }
-    };
+    const states = readBackupStates(data.revisions);
     const map = new Map<string, string>(); const register = (value: string) => { if (value && !map.has(value)) map.set(value, id()); };
     register(data.project.id); for (const b of data.branches) register(b.id); for (const c of data.chapters) register(c.id); for (const job of data.jobs) register(job.id); for (const output of data.outputs) register(output.id); for (const asset of data.images) register(asset.image.id);
-    for (const r of data.revisions) { register(r.revision.id); const state = readState(r); for (const e of state.entities) { register(e.id); for (const f of e.facts) register(f.id); } for (const relation of state.relations) register(relation.id); for (const f of state.foreshadows) register(f.id); }
+    for (let index = 0; index < data.revisions.length; index++) { register(data.revisions[index].revision.id); const state = states[index]; for (const e of state.entities) { register(e.id); for (const f of e.facts) register(f.id); } for (const relation of state.relations) register(relation.id); for (const f of state.foreshadows) register(f.id); }
     const remap = (value: unknown, key = ''): unknown => {
       // Process payloads are historical observations, like raw model responses. Only their owning job is remapped.
       if (key === 'rpgContinuation') return clone(value);
       if (key === 'writingActivities' && Array.isArray(value)) return value.map(entry => ({ jobId: map.get(entry.jobId) ?? entry.jobId, activities: clone(entry.activities) }));
-      if (typeof value === 'string') { if (key === 'sourceId') return sourceIdMap[value]; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds' || key === 'imageIds' || key === 'activeImageIds' || key === 'imageStartingEntityIds' || key === 'imagesRequestedFor' || key === 'referenceImageIds' || key === 'referenceEntityIds' || key === 'materialEntityIds') return map.get(value) ?? value; return value; }
+      if (typeof value === 'string') { if (key === 'sourceId') return Object.hasOwn(sourceIdMap, value) ? sourceIdMap[value] : undefined; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds' || key === 'imageIds' || key === 'activeImageIds' || key === 'imageStartingEntityIds' || key === 'imagesRequestedFor' || key === 'referenceImageIds' || key === 'referenceEntityIds' || key === 'materialEntityIds') return map.get(value) ?? value; return value; }
       if (Array.isArray(value)) return value.map(v => remap(v, key)); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, remap(v, k)])); return value;
     };
-    const restored = remap(data) as typeof data;
-    const restoredState = (index: number) => remap(readState(data.revisions[index])) as StoryState;
+    const restored = remap({ ...data, revisions: data.revisions.map(entry => ({ revision: entry.revision })) }) as typeof data;
+    for (let index = 0; index < states.length; index++) states[index] = remap(states[index]) as StoryState;
+    const restoredState = (index: number) => states[index];
     const branchIds = new Set(restored.branches.map(b => b.id)); const revisionIds = new Set(restored.revisions.map(r => r.revision.id)); const chapterIds = new Set(restored.chapters.map(c => c.id));
     if (branchIds.size !== restored.branches.length || revisionIds.size !== restored.revisions.length || chapterIds.size !== restored.chapters.length || !branchIds.has(restored.project.mainBranchId) || restored.branches.some(b => b.projectId !== restored.project.id || !revisionIds.has(b.revisionId) || (b.parentBranchId && !branchIds.has(b.parentBranchId))) || restored.revisions.some(r => !branchIds.has(r.revision.branchId) || (r.revision.parentId && !revisionIds.has(r.revision.parentId)))) throw new HttpError('备份存在无效关联');
     const chapterLookup = new Map(restored.chapters.map(c => [c.id, paragraphs(c.text)]));
@@ -486,7 +550,8 @@ export class Store {
       if (included.size !== state.chapters.length || entities.size !== state.entities.length || state.entities.some(e => (e.mergedInto && (!entities.has(e.mergedInto) || e.mergedInto === e.id)) || e.facts.some(f => !validCitation(f.citation))) || state.relations.some(r => !entities.has(r.fromId) || !entities.has(r.toId) || !validCitation(r.citation)) || state.foreshadows.some(f => f.relatedEntityIds.some(e => !entities.has(e)) || (f.plantedChapterId && !included.has(f.plantedChapterId)) || (f.resolvedChapterId && !included.has(f.resolvedChapterId)))) throw new HttpError('备份存在无效资料关联或原文引用');
     }
     const parents = new Map(restored.revisions.map(r => [r.revision.id, r.revision.parentId]));
-    for (const revision of restored.revisions) { const visited = new Set<string>(); let current: string | undefined = revision.revision.id; while (current) { if (visited.has(current)) throw new HttpError('备份版本存在循环引用'); visited.add(current); current = parents.get(current); } }
+    const validatedParents = new Set<string>();
+    for (const revision of restored.revisions) { const visited = new Set<string>(); let current: string | undefined = revision.revision.id; while (current && !validatedParents.has(current)) { if (visited.has(current)) throw new HttpError('备份版本存在循环引用'); visited.add(current); current = parents.get(current); } for (const revisionId of visited) validatedParents.add(revisionId); }
     const jobs = new Map(restored.jobs.map(j => [j.id, j])); const importPositions = new Set<string>();
     if (jobs.size !== restored.jobs.length || restored.jobs.some(j => j.projectId !== restored.project.id || !branchIds.has(j.branchId) || !revisionIds.has(j.baseRevisionId) || j.progress > j.total)) throw new HttpError('备份存在无效任务关联');
     for (const part of restored.importChapters) { const key = `${part.jobId}:${part.position}`; if (jobs.get(part.jobId)?.kind !== 'import' || importPositions.has(key) || part.position >= jobs.get(part.jobId)!.total) throw new HttpError('备份导入章节关联无效'); importPositions.add(key); }

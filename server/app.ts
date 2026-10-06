@@ -12,9 +12,12 @@ import { StoryEngine } from './engine.js';
 import { ImageService } from './images.js';
 import { validateImageParameters } from './image-provider.js';
 import { parseNovel } from './importer.js';
-import { generateText, redactModelPayload, validateProviderOptions } from './providers.js';
+import { generateText, redactKnownSecrets, redactModelPayload, validateProviderOptions } from './providers.js';
 import { listProviderModels } from './model-catalog.js';
-import { SettingsStore, hashPassword, verifyPassword, tokenHash, normalizeSettings } from './security.js';
+import { SettingsStore, tokenHash, normalizeSettings, hasUrlCredentials } from './security.js';
+import { registerAuthRoutes } from './auth.js';
+import { httpSecurityConfig, safeRequestLog, RequestRateLimit } from './http-security.js';
+import { checkBackupSize, MAX_BACKUP_BYTES } from './backup-limits.js';
 import type { Source, SourcePreview, Settings, Entity, Foreshadow, Job, CapturedModelResponse, ModelRequestSnapshot } from '../shared/types.js';
 import { modelRoles, resolveModelConfig } from '../shared/model-settings.js';
 import { validatePromptTemplates } from '../shared/prompt-templates.js';
@@ -22,7 +25,6 @@ import { parseTaskSettings } from '../shared/task-settings.js';
 
 const revision = z.string().min(1).max(100);
 const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']);
-const passwordBody = z.object({ password: z.string().min(8, '密码至少 8 位').max(256) });
 const outlineSchema = z.object({ worldview: z.string().max(100000).optional(), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000) });
 const modelNameSchema = z.string().trim().max(300).refine(value => !/[\u0000-\u001f\u007f]/.test(value), '模型名称不能包含控制字符');
 const modelParametersSchema = z.object({
@@ -59,16 +61,27 @@ function fail(message: string, statusCode = 400): never { throw Object.assign(ne
 type SourceRow = { id: string; project_id: string; filename: string; format: 'txt' | 'epub'; chapter_count: number; created_at: string; confirmed: number; preview: string; storage_name: string };
 const sourcePublic = (r: SourceRow): Source => ({ id: r.id, projectId: r.project_id, filename: r.filename, format: r.format, chapterCount: r.chapter_count, createdAt: r.created_at, confirmed: Boolean(r.confirmed) });
 
-export async function buildApp(options: { dataDir?: string; startEngine?: boolean; logger?: boolean; staticDir?: string } = {}) {
+export async function buildApp(options: { dataDir?: string; startEngine?: boolean; logger?: boolean; staticDir?: string; requireSetupToken?: boolean; rateLimits?: { login?: number; imports?: number; models?: number } } = {}) {
+  const config = httpSecurityConfig();
   const dataDir = resolve(options.dataDir || process.env.DATA_DIR || './data');
-  mkdirSync(dataDir, { recursive: true });
-  const uploadDir = join(dataDir, 'sources'); mkdirSync(uploadDir, { recursive: true });
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const uploadDir = join(dataDir, 'sources'); mkdirSync(uploadDir, { recursive: true, mode: 0o700 });
   const store = new Store(dataDir);
   const settings = new SettingsStore(store.db, dataDir);
   const images = new ImageService(store, () => settings.get());
   const engine = new StoryEngine(store, () => settings.get(), undefined, images);
   store.db.exec(`CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, filename TEXT NOT NULL, format TEXT NOT NULL, chapter_count INTEGER NOT NULL, created_at TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, preview TEXT NOT NULL, storage_name TEXT NOT NULL)`);
-  const app = Fastify({ logger: options.logger ?? false, bodyLimit: 128 * 1024 * 1024 });
+  const app = Fastify({ logger: options.logger ? { serializers: { req: safeRequestLog }, redact: ['req.headers.cookie', 'req.headers.authorization'] } : false,
+    bodyLimit: 2 * 1024 * 1024, requestTimeout: 120_000, keepAliveTimeout: 15_000, maxRequestsPerSocket: 100, trustProxy: config.trustedProxies });
+  app.server.headersTimeout = 30_000;
+  app.addHook('onRoute', route => {
+    if (route.bodyLimit !== undefined) return;
+    if (route.url === '/api/restore') route.bodyLimit = 128 * 1024 * 1024;
+    else if (route.url.endsWith('/import')) route.bodyLimit = 32 * 1024 * 1024 + 4096;
+    else if (/\/chapters(?:\/:chapterId)?$|\/outputs(?:\/:outputId\/apply)?$/.test(route.url) || route.url === '/api/sources/:id/confirm') route.bodyLimit = 64 * 1024 * 1024;
+    else if (route.url.endsWith('/entities/:entityId')) route.bodyLimit = 16 * 1024 * 1024;
+    else if (route.url === '/api/settings') route.bodyLimit = 4 * 1024 * 1024;
+  });
   const deletionDir = join(dataDir, 'deleted-sources');
   // Originals move aside while SQLite commits. On restart, restore files if the
   // transaction rolled back, or finish removing them if the project was deleted.
@@ -88,18 +101,26 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   }
   await app.register(cookie);
   await app.register(multipart, { limits: { fileSize: 128 * 1024 * 1024, files: 1, fields: 8 } });
-  const attempts = new Map<string, { count: number; since: number }>();
+  const traffic = new RequestRateLimit(1200);
+  const searches = new RequestRateLimit(60);
+  const imports = new RequestRateLimit(options.rateLimits?.imports ?? 3, 300_000);
+  const models = new RequestRateLimit(options.rateLimits?.models ?? 20);
   const isPublic = (path: string) => ['/api/health', '/api/auth/status', '/api/auth/setup', '/api/auth/login'].includes(path);
   app.addHook('onRequest', async (request, reply) => {
-    const path = request.url.split('?')[0];
+    reply.header('X-Frame-Options', 'DENY').header('Referrer-Policy', 'no-referrer').header('X-Content-Type-Options', 'nosniff');
+    if (process.env.NODE_ENV === 'production') reply.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    if (config.publicOrigin) reply.header('Strict-Transport-Security', 'max-age=31536000');
+    // Authentication follows the matched route, exactly as the router does.
+    const path = request.routeOptions.url || '';
     if (!path.startsWith('/api/')) return;
+    if (!request.url.startsWith('/') || request.url.startsWith('//')) fail('无效的请求目标。', 400);
     reply.header('Cache-Control', 'no-store');
     reply.header('X-Content-Type-Options', 'nosniff');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       const origin = request.headers.origin;
       if (origin) {
-        const allowed = new Set([`http://${request.headers.host}`, `https://${request.headers.host}`, process.env.PUBLIC_ORIGIN]);
-        if (process.env.NODE_ENV !== 'production') { allowed.add('http://127.0.0.1:5173'); allowed.add('http://localhost:5173'); }
+        const allowed = new Set(config.publicOrigin ? [config.publicOrigin] : [`http://${request.headers.host}`, `https://${request.headers.host}`]);
+        if (!config.publicOrigin && process.env.NODE_ENV !== 'production') { allowed.add('http://127.0.0.1:5173'); allowed.add('http://localhost:5173'); }
         if (!allowed.has(origin)) fail('请求来源不匹配，请从应用页面操作。', 403);
       }
     }
@@ -107,6 +128,10 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     const session = request.cookies.session;
     const valid = session && store.db.prepare('SELECT token_hash FROM sessions WHERE token_hash=? AND expires_at>?').get(tokenHash(session), Date.now());
     if (!valid) { reply.clearCookie('session', { path: '/' }); fail('请先登录。', 401); }
+    if (!traffic.accept(request.ip)) fail('请求过于频繁，请稍后重试。', 429);
+    if (path.endsWith('/search') && !searches.accept(request.ip)) fail('搜索过于频繁，请稍后重试。', 429);
+    if (['/api/restore', '/api/projects/:id/import', '/api/projects/:id/backup'].includes(path) && !imports.accept(request.ip)) fail('备份或导入操作过于频繁，请稍后重试。', 429);
+    if (['/api/settings/models', '/api/settings/test'].includes(path) && !models.accept(request.ip)) fail('模型操作过于频繁，请稍后重试。', 429);
   });
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof z.ZodError) return reply.status(400).send({ error: error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('；') });
@@ -116,34 +141,17 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     // Do not expose SQL, file paths, upstream bodies or keys to the browser.
     return reply.status(status).send({ error: status === 500 ? '操作未完成，请查看任务状态或服务日志后重试。' : err.message });
   });
-  const authenticated = (token?: string) => Boolean(token && store.db.prepare('SELECT token_hash FROM sessions WHERE token_hash=? AND expires_at>?').get(tokenHash(token), Date.now()));
-  const createSession = (reply: any) => {
-    const token = randomBytes(32).toString('hex');
-    store.db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(Date.now());
-    store.db.prepare('INSERT INTO sessions VALUES (?,?)').run(tokenHash(token), Date.now() + 7 * 86400000);
-    reply.setCookie('session', token, { path: '/', httpOnly: true, sameSite: 'strict', secure: process.env.COOKIE_SECURE === 'true', maxAge: 7 * 86400 });
-  };
   app.get('/api/health', async () => ({ ok: true }));
-  app.get('/api/auth/status', async request => ({ initialized: Boolean(settings.meta('password')), authenticated: authenticated(request.cookies.session) }));
-  let settingUp = false;
-  app.post('/api/auth/setup', async (request, reply) => {
-    if (settings.meta('password') || settingUp) fail('已经初始化，请登录。', 409);
-    const { password } = passwordBody.parse(request.body);
-    settingUp = true;
-    try { settings.setMeta('password', await hashPassword(password)); createSession(reply); return { ok: true }; }
-    finally { settingUp = false; }
-  });
-  app.post('/api/auth/login', async (request, reply) => {
-    const { password } = passwordBody.parse(request.body);
-    const now = Date.now(), ip = request.ip;
-    for (const [key, item] of attempts) if (now - item.since > 300000) attempts.delete(key);
-    const attempt = attempts.get(ip) || { count: 0, since: now };
-    if (attempt.count >= 10) fail('尝试次数较多，请五分钟后重试。', 429);
-    attempt.count++; attempts.set(ip, attempt);
-    if (!await verifyPassword(password, settings.meta('password') || '')) fail('密码不正确。', 401);
-    attempts.delete(ip); createSession(reply); return { ok: true };
-  });
-  app.post('/api/auth/logout', async (request, reply) => { if (request.cookies.session) store.db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash(request.cookies.session)); reply.clearCookie('session', { path: '/' }); return { ok: true }; });
+  const requireSetupToken = options.requireSetupToken ?? (process.env.NODE_ENV === 'production' || Boolean(config.publicOrigin) || !['127.0.0.1', 'localhost', '::1'].includes(process.env.HOST || '127.0.0.1'));
+  const setupPath = join(dataDir, '.setup-token');
+  let setupToken: string | undefined;
+  if (requireSetupToken && !settings.meta('password')) {
+    if (!existsSync(setupPath)) writeFileSync(setupPath, randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' });
+    setupToken = readFileSync(setupPath, 'utf8').trim();
+    if (!/^[a-f0-9]{64}$/.test(setupToken)) throw new Error('首次安装码文件无效，请在服务器重新生成 .setup-token。');
+  }
+  registerAuthRoutes(app, { settings, store, publicOrigin: config.publicOrigin, secureCookies: config.secureCookies, requireSetupToken, setupToken, loginAttempts: options.rateLimits?.login });
+  app.addHook('onResponse', async () => { if (settings.meta('password') && existsSync(setupPath)) unlinkSync(setupPath); });
   const param = (req: any, key = 'id'): string => z.string().min(1).max(100).parse(req.params[key]);
   const base = (body: unknown) => z.object({ baseRevisionId: revision }).parse(body).baseRevisionId;
   const author = (req: any) => req.query?.view === 'author';
@@ -242,18 +250,21 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.get('/api/jobs/:id/activities', async request => { requireAuthor(request); return engine.listWritingActivities(param(request)); });
   app.get('/api/jobs/:id/events', async (request, reply) => {
     requireAuthor(request); const jobId = param(request); const snapshot = engine.writingSnapshot(jobId);
-    reply.hijack(); reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+    const sessionHash = tokenHash(request.cookies.session || '');
+    const stillAuthenticated = () => Boolean(store.db.prepare('SELECT 1 FROM sessions WHERE token_hash=? AND expires_at>?').get(sessionHash, Date.now()));
+    reply.hijack(); reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', 'X-Content-Type-Options': 'nosniff', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
     const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'stale', 'paused'].includes(status);
     let unsubscribe = () => {}; let heartbeat: ReturnType<typeof setInterval> | undefined;
     const cleanup = () => { unsubscribe(); if (heartbeat) clearInterval(heartbeat); };
     const send = (event: Parameters<typeof engine.subscribeWriting>[1] extends (event: infer T) => void ? T : never) => {
+      if (!stillAuthenticated()) { cleanup(); reply.raw.end(); return; }
       if (reply.raw.destroyed || reply.raw.writableEnded) { cleanup(); return; }
       reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
       if ((event.type === 'snapshot' || event.type === 'status') && terminal(event.job.status)) { cleanup(); reply.raw.end(); }
     };
     unsubscribe = engine.subscribeWriting(jobId, send); reply.raw.on('close', cleanup);
     send(snapshot);
-    if (!terminal(snapshot.job.status)) heartbeat = setInterval(() => { if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.write(': keepalive\n\n'); else cleanup(); }, 15000);
+    if (!terminal(snapshot.job.status)) heartbeat = setInterval(() => { if (!stillAuthenticated()) { cleanup(); reply.raw.end(); } else if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.write(': keepalive\n\n'); else cleanup(); }, 15000);
   });
   app.post('/api/branches/:id/summary-compression', async request => { requireAuthor(request); return engine.enqueue(param(request), 'plan', { baseRevisionId: base(request.body), purpose: 'compress-summary' }); });
   app.get('/api/jobs/:id/summary-compression', async request => { requireAuthor(request); return engine.summaryCompression(param(request)); });
@@ -262,7 +273,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     return engine.confirmSummaryCompression(param(request), body);
   });
   app.get('/api/jobs/:id/outputs', async request => { requireAuthor(request); return engine.listOutputs(param(request)); });
-  app.get('/api/jobs/:id/outputs/:outputId', async request => { requireAuthor(request); return engine.outputDetail(param(request), param(request, 'outputId')); });
+  app.get('/api/jobs/:id/outputs/:outputId', async request => { requireAuthor(request); return JSON.parse(redactModelPayload(JSON.stringify(engine.outputDetail(param(request), param(request, 'outputId'))), settings.get().providers.flatMap(provider => provider.apiKey ? [provider.apiKey] : []))); });
   app.post('/api/jobs/:id/outputs', async request => {
     requireAuthor(request);
     const { text } = z.object({ text: z.string().min(1).max(16 * 1024 * 1024) }).parse(request.body);
@@ -278,6 +289,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.get('/api/settings', async () => settings.public());
   app.put('/api/settings', async request => {
     const input = settingsSchema.parse(request.body) as Settings;
+    if (input.providers.some(provider => hasUrlCredentials(provider.baseUrl))) fail('服务地址不能包含密钥或 Token 查询参数，请移到独立密钥字段。');
     if (input.promptTemplates !== undefined) {
       try { input.promptTemplates = validatePromptTemplates(input.promptTemplates); }
       catch (error) { fail(error instanceof Error ? error.message : '提示词编排配置无效。'); }
@@ -357,9 +369,16 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   });
   app.get('/api/projects/:id/backup', async (request, reply) => {
     const projectId = param(request), project = store.getProject(projectId);
+    checkBackupSize(store.db, uploadDir, projectId);
     const sources = (store.db.prepare('SELECT * FROM sources WHERE project_id=?').all(projectId) as SourceRow[]).map(s => ({ metadata: sourcePublic(s), preview: JSON.parse(s.preview), originalBase64: readFileSync(join(uploadDir, s.storage_name)).toString('base64') }));
-    const bytes = Buffer.from(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: store.exportProject(projectId), sources }));
-    if (bytes.length > 512 * 1024 * 1024) fail('该作品备份已超过 512 MiB，请停止服务并备份完整数据目录以保留全部历史。', 413);
+    const data = store.exportProject(projectId);
+    const keys = settings.get().providers.flatMap(provider => provider.apiKey ? [provider.apiKey] : []);
+    data.outputs = JSON.parse(redactModelPayload(JSON.stringify(data.outputs), keys));
+    data.writingActivities = JSON.parse(redactModelPayload(JSON.stringify(data.writingActivities), keys));
+    data.writingDrafts = data.writingDrafts.map(draft => ({ ...draft, text: redactKnownSecrets(String(draft.text), keys) }));
+    // Authoritative source bytes, prose and world snapshots are preserved verbatim.
+    const bytes = Buffer.from(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: data, sources }));
+    if (bytes.length > MAX_BACKUP_BYTES) fail('该作品备份已超过 128 MiB，请停止服务并备份完整数据目录以保留全部历史。', 413);
     const compressed = gzipSync(bytes);
     if (compressed.length > 128 * 1024 * 1024) fail('压缩备份已超过 128 MiB，请停止服务并备份完整数据目录。', 413);
     return reply.type('application/gzip').header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(project.title)}.ai-novel.json.gz`).send(compressed);
@@ -369,9 +388,10 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     let raw: unknown;
     try {
       const bytes = await file.toBuffer();
-      const decoded = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes, { maxOutputLength: 512 * 1024 * 1024 }) : bytes;
+      const decoded = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes, { maxOutputLength: 128 * 1024 * 1024 }) : bytes;
+      if (decoded.byteLength > 128 * 1024 * 1024) fail('备份解压后不能超过 128 MiB。', 413);
       raw = JSON.parse(decoded.toString('utf8'));
-    } catch { fail('备份文件不是有效的 JSON / GZIP 备份，或解压后超过 512 MiB。'); }
+    } catch { fail('备份文件不是有效的 JSON / GZIP 备份，或解压后超过 128 MiB。'); }
     const backup = z.object({ format: z.literal('ai-novel-backup'), version: z.literal(1), project: z.unknown(), sources: z.array(z.object({ metadata: z.object({ id: z.string(), filename: z.string().max(500), format: z.enum(['txt', 'epub']), confirmed: z.boolean(), createdAt: z.string() }), preview: chaptersSchema, originalBase64: z.string().max(48 * 1024 * 1024) })).max(1000) }).parse(raw);
     const map: Record<string, string> = {}, createdFiles: string[] = [];
     try {

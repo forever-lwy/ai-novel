@@ -213,7 +213,7 @@ export class StoryEngine {
   writingSnapshot(jobId: string): Extract<WritingEvent, { type: 'snapshot' }> {
     const job = this.get(jobId); if (job.kind !== 'generate') throw new HttpError('此任务不是正文生成任务', 400);
     const row = this.store.db.prepare('SELECT text FROM job_writing_drafts WHERE job_id=?').get(job.id);
-    return { type: 'snapshot', text: String(row?.text ?? ''), title: String(job.payload.title ?? '新章节'), job: this.publicJob(job), chapterId: job.payload.generatedChapterId as string | undefined, activities: this.store.listWritingActivities(jobId) };
+    return JSON.parse(this.redact(JSON.stringify({ type: 'snapshot', text: String(row?.text ?? ''), title: String(job.payload.title ?? '新章节'), job: this.publicJob(job), chapterId: job.payload.generatedChapterId as string | undefined, activities: this.store.listWritingActivities(jobId) }))) as Extract<WritingEvent, { type: 'snapshot' }>;
   }
   subscribeWriting(jobId: string, listener: (event: WritingEvent) => void): () => void {
     this.writingSnapshot(jobId); const listeners = this.writingListeners.get(jobId) ?? new Set(); listeners.add(listener); this.writingListeners.set(jobId, listeners);
