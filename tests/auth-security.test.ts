@@ -8,7 +8,7 @@ import { randomBytes, scryptSync } from 'node:crypto';
 import { z } from 'zod';
 import { Store } from '../server/store.js';
 import { SettingsStore, hashPassword, hasUrlCredentials, tokenHash, verifyPassword, verifyPasswordWithUpgrade } from '../server/security.js';
-import { registerAuthRoutes, type AuthOptions } from '../server/auth.js';
+import { initializePassword, registerAuthRoutes, type AuthOptions } from '../server/auth.js';
 import type { Settings } from '../shared/types.js';
 
 const applications: Awaited<ReturnType<typeof make>>[] = [];
@@ -23,7 +23,7 @@ async function make(options: Partial<AuthOptions> = {}) {
     const problem = error as Error & { statusCode?: number };
     return reply.status(problem.statusCode || 500).send({ error: problem.statusCode ? problem.message : '操作未完成。' });
   });
-  registerAuthRoutes(app, { settings, store, secureCookies: true, requireSetupToken: false, ...options });
+  registerAuthRoutes(app, { settings, store, secureCookies: true, ...options });
   app.addHook('onClose', async () => store.close());
   const context = { app, store, settings, dataDir };
   applications.push(context);
@@ -32,7 +32,8 @@ async function make(options: Partial<AuthOptions> = {}) {
 afterEach(async () => { for (const { app } of applications.splice(0)) await app.close(); });
 const sessionCookie = (response: { cookies: { name: string; value: string }[] }) => response.cookies.find(item => item.name === 'session')!.value;
 async function setup(context: Awaited<ReturnType<typeof make>>) {
-  const response = await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password } });
+  await initializePassword(context.settings, password);
+  const response = await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password } });
   expect(response.statusCode).toBe(200);
   return sessionCookie(response);
 }
@@ -55,8 +56,7 @@ describe('password storage and authentication security', () => {
 
   it.each(['        ', '          abc', '123456789012', 'password123456', 'aaaaaaaaaaaa', 'qwertyuiop123'])('rejects a weak new password: %s', async weakPassword => {
     const context = await make();
-    const result = await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: weakPassword } });
-    expect(result.statusCode).toBe(400);
+    await expect(initializePassword(context.settings, weakPassword)).rejects.toThrow('INITIAL_PASSWORD');
     expect(context.settings.meta('password')).toBeUndefined();
   });
 
@@ -77,18 +77,20 @@ describe('password storage and authentication security', () => {
     expect(login.headers['set-cookie']).toContain('SameSite=Strict');
   });
 
-  it('requires a local setup token for public initialization and never exposes it in status', async () => {
-    const setupToken = 'fixture-local-install-token';
-    const context = await make({ requireSetupToken: true, publicOrigin: 'https://novel.example', setupToken });
-    const status = await context.app.inject('/api/auth/status');
-    expect(status.json()).toEqual({ initialized: false, authenticated: false, setupTokenRequired: true });
-    expect(status.body).not.toContain(setupToken);
-    for (const token of [undefined, 'wrong-local-install-token']) {
-      expect((await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password, setupToken: token } })).statusCode).toBe(403);
-    }
-    const result = await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password, setupToken } });
-    expect(result.statusCode).toBe(200); expect(result.body).not.toContain(setupToken);
-    expect((await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password, setupToken } })).statusCode).toBe(409);
+  it('requires an explicit initial password and exposes no web initialization endpoint', async () => {
+    const context = await make();
+    for (const value of [undefined, '']) await expect(initializePassword(context.settings, value)).rejects.toThrow('INITIAL_PASSWORD');
+    expect(context.settings.meta('password')).toBeUndefined();
+    expect((await context.app.inject('/api/auth/status')).json()).toEqual({ initialized: false, authenticated: false });
+    expect((await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password } })).statusCode).toBe(404);
+    await initializePassword(context.settings, password);
+    const stored = context.settings.meta('password')!;
+    expect(stored).not.toContain(password); expect(await verifyPassword(password, stored)).toBe(true);
+    expect((await context.app.inject('/api/auth/status')).body).not.toContain(password);
+    expect(await initializePassword(context.settings, 'Replacement-Password-99')).toBe(false);
+    expect(await initializePassword(context.settings, undefined)).toBe(false);
+    expect(await initializePassword(context.settings, 'weak')).toBe(false);
+    expect(context.settings.meta('password')).toBe(stored);
   });
 
   it('preserves a legacy 8-character password and upgrades its hash after successful login', async () => {
@@ -103,10 +105,12 @@ describe('password storage and authentication security', () => {
     expect(await authenticated(context, sessionCookie(login))).toBe(true);
   });
 
-  it('allows only one initialization when requests arrive concurrently', async () => {
+  it('sets only one password when startup initialization runs concurrently', async () => {
     const context = await make();
-    const results = await Promise.all(Array.from({ length: 5 }, () => context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password } })));
-    expect(results.map(result => result.statusCode).sort()).toEqual([200, 409, 409, 409, 409]);
+    const results = await Promise.all(Array.from({ length: 5 }, (_, index) => initializePassword(context.settings, `Concurrent-Fixture-Password-${index}`)));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const matches = await Promise.all(Array.from({ length: 5 }, (_, index) => verifyPassword(`Concurrent-Fixture-Password-${index}`, context.settings.meta('password')!)));
+    expect(matches.filter(Boolean)).toHaveLength(1);
     expect(context.store.db.prepare("SELECT count(*) count FROM app_meta WHERE key='password'").get()!.count).toBe(1);
   });
 
@@ -124,8 +128,8 @@ describe('password storage and authentication security', () => {
 
   it('caps authentication request bodies at 4 KiB and rejects overlong passwords', async () => {
     const context = await make();
-    expect((await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'x'.repeat(257) } })).statusCode).toBe(400);
-    expect((await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password, padding: 'x'.repeat(4096) } })).statusCode).toBe(413);
+    expect((await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'x'.repeat(257) } })).statusCode).toBe(400);
+    expect((await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password, padding: 'x'.repeat(4096) } })).statusCode).toBe(413);
     const session = await setup(context);
     for (const url of ['/api/auth/login', '/api/auth/password', '/api/auth/sessions/revoke', '/api/auth/logout']) {
       expect((await context.app.inject({ method: 'POST', url, cookies: { session }, payload: { password, padding: 'x'.repeat(4096) } })).statusCode).toBe(413);

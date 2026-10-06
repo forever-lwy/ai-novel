@@ -21,12 +21,14 @@
 
 ### 本地开发
 
+新实例首次启动前，复制 [.env.example](.env.example) 为 `.env`，取消 `INITIAL_PASSWORD` 的注释并填写自己的长密码：去除首尾空白后至少 12 位，不能使用常见弱密码。已有 `.env` 时直接编辑，保留其他配置；已有登录密码的数据目录无需提供初始密码。
+
 ```sh
 npm ci
 npm run dev
 ```
 
-打开 [开发工作台](http://127.0.0.1:5173)。首次使用设置个人密码，至少 12 位，不能全为空白或使用常见弱密码。网页和 API 默认只监听本机，Vite 将 `/api/` 请求代理到 `127.0.0.1:4317`。
+打开 [开发工作台](http://127.0.0.1:5173)，使用配置的密码登录。网页和 API 默认只监听本机，Vite 将 `/api/` 请求代理到 `127.0.0.1:4317`。
 
 ### 生产运行
 
@@ -36,15 +38,16 @@ npm run build
 npm start
 ```
 
-打开 [工作台](http://127.0.0.1:4317)。生产实例首次设置需在服务器读取 `data/.setup-token` 并填入安装码；初始化后文件删除。服务同时提供 API 和构建后的网页，不需要另外运行 Vite。
+新实例同样须在启动前配置 `INITIAL_PASSWORD`。打开 [工作台](http://127.0.0.1:4317)，直接使用该密码登录。服务同时提供 API 和构建后的网页，不需要另外运行 Vite。
 
-本机使用默认无需创建配置文件；需要调整时，复制 [.env.example](.env.example) 为 `.env`，服务启动时会自动读取。构建后的生产入口默认使用 `NODE_ENV=production`，开发源码入口默认使用 `development`，也可在 `.env` 明确设置。
+设置通过进程环境或 `.env` 提供，服务启动时会自动读取 `.env`。首次无密码的数据目录必须提供有效的 `INITIAL_PASSWORD`，缺失、为空或不合规则时停止启动，不在网页上设置初始密码。构建后的生产入口默认使用 `NODE_ENV=production`，开发源码入口默认使用 `development`，也可在 `.env` 明确设置。
 
 | 配置项 | 默认值与用途 |
 | --- | --- |
 | `HOST` | `127.0.0.1`，服务监听地址 |
 | `PORT` | `4317`，API 与生产网页端口 |
 | `DATA_DIR` | `./data`，数据库、原文件及加密密钥目录 |
+| `INITIAL_PASSWORD` | 仅首次无密码的数据目录必填，至少 12 位有效字符；已有密码不被重启配置覆盖，改密使用账号安全页面 |
 | `PUBLIC_ORIGIN` | 公网部署的 HTTPS 来源，例如 `https://novel.example.com`，不带子路径、查询参数或凭据 |
 | `COOKIE_SECURE` | 配置 `PUBLIC_ORIGIN` 后自动启用 Secure Cookie，并拒绝显式 `false`；本机 HTTP 使用可留空 |
 | `TRUSTED_PROXIES` | 默认不信任代理头；只填写实际代理的 IP／CIDR，多个值以逗号分隔 |
@@ -58,7 +61,7 @@ npm start
 docker compose up -d --build
 ```
 
-[Compose](compose.yaml) 默认绑定主机 `127.0.0.1:4317`，数据持久化到 `novel-data` 卷的 `/app/data`。初次安装需要安装码：启动后在服务器本地运行 `docker compose exec ai-novel cat /app/data/.setup-token`，将其填入首次设置页面；初始化后文件自动删除。已有数据目录保留原密码、作品和独立 API 密钥，不需要重新初始化。
+[Compose](compose.yaml) 默认绑定主机 `127.0.0.1:4317`，数据持久化到 `novel-data` 卷的 `/app/data`。空数据卷首次运行前在 `.env` 填写 `INITIAL_PASSWORD`，已有完整数据卷保留原密码、作品和独立 API 密钥，无需重新初始化。初始化成功后可从 `.env` 移除初始密码；密码含 `$` 时按 [安全部署](docs/DEPLOYMENT.md#启动与初始密码) 的单引号规则填写。
 
 通过互联网访问时，使用反向代理提供 HTTPS，设置 `PUBLIC_ORIGIN=https://你的域名`，后端端口继续只绑定本机。代理必须覆盖转发头，核实实际连接来源后设置 `TRUSTED_PROXIES`，详见 [安全部署](docs/DEPLOYMENT.md)。SQLite 数据必须放在服务主机本地存储，不要将运行中的数据库放在 SMB／NFS 共享目录。Docker 与目标 NAS 的实机验收情况见 [项目状态](PROJECT-STATUS.md#当前限制与未验证部分)。
 

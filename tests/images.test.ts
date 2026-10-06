@@ -211,11 +211,11 @@ describe('durable story illustrations', () => {
     expect(lockStarted).toBe(true); expect(ctx.store.images.all()).toEqual([]); release(); await deletion; expect(ctx.store.images.all()).toEqual([]);
   });
   it('applies session, author view and same-origin boundaries to illustration routes', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'novel-image-api-')); const ctx = await buildApp({ dataDir: directory, startEngine: false });
+    const directory = mkdtempSync(join(tmpdir(), 'novel-image-api-')); const ctx = await buildApp({ initialPassword: 'fixture-image-password', dataDir: directory, startEngine: false });
     cleanup.push(async () => { await ctx.app.close(); rmSync(directory, { recursive: true, force: true }); });
     const project = ctx.store.createProject({ title: 'API测试' }); const branchId = project.mainBranchId; const baseRevisionId = ctx.store.getBranch(branchId).revisionId;
     const unauthenticated = await ctx.app.inject({ url: `/api/branches/${branchId}/images` }); expect(unauthenticated.statusCode).toBe(401);
-    const auth = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'fixture-image-password' } }); const cookies = { session: auth.cookies.find(item => item.name === 'session')!.value };
+    const auth = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'fixture-image-password' } }); const cookies = { session: auth.cookies.find(item => item.name === 'session')!.value };
     for (const path of [`/api/branches/${branchId}/images`, `/api/branches/${branchId}/images/missing/retry`, `/api/branches/${branchId}/images/missing/cancel`]) expect((await ctx.app.inject({ method: 'POST', url: path, cookies, payload: { baseRevisionId, kind: 'map' } })).statusCode).toBe(403);
     expect((await ctx.app.inject({ method: 'POST', url: `/api/branches/${branchId}/images?view=author`, cookies, headers: { origin: 'https://untrusted.invalid' }, payload: { baseRevisionId, kind: 'map' } })).statusCode).toBe(403);
     expect((await ctx.app.inject({ method: 'POST', url: `/api/branches/${branchId}/images?view=author`, cookies, payload: { baseRevisionId, kind: 'map' } })).statusCode).toBe(400);

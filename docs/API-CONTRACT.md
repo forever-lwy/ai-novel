@@ -4,15 +4,15 @@
 
 ## 登录与安全边界
 
-- `GET /auth/status -> {initialized:boolean,authenticated:boolean,setupTokenRequired?:boolean}`，生产、配置公网来源或非本机监听的实例未初始化时额外返回 `setupTokenRequired:true`，不返回安装码、密码哈希或会话值。
-- `POST /auth/setup {password,setupToken?} -> {ok:true}`，仅未初始化时可用。新密码 12～256 字符，去除首尾空白后仍须至少 12 位，拒绝全空白、重复单字符及常见弱密码；生产、配置公网来源或非本机监听时须校验服务器本地安装码。缺少／错误安装码为 403，已初始化或初始化竞争为 409。
+- 初始密码通过服务启动环境的 `INITIAL_PASSWORD` 设置，只对没有密码的数据目录生效。新密码 12～256 字符，去除首尾空白后仍须至少 12 位，拒绝全空白、重复单字符及常见弱密码；只保存带版本及参数的 scrypt 哈希。首次启动缺失、为空或不合规则时停止启动，错误不包含密码；已有数据库密码不被此变量覆盖。
+- `GET /auth/status -> {initialized:boolean,authenticated:boolean}`，不返回初始密码、密码哈希或会话值。不提供网页初始化密码接口；嵌入式实例未初始化时只能提示管理员配置。
 - `POST /auth/login {password} -> {ok:true}`，接受旧版 8～256 字符密码；成功登录时将旧 `salt:hash` 升级为带版本与参数的 scrypt 哈希（`N=16384,r=8,p=5`），不更改原密码。错误密码为 401。
 - `POST /auth/logout -> {ok:true}`，撤销当前会话并清除 Cookie。
 - `POST /auth/password {currentPassword,password} -> {ok:true}`，要求有效会话与当前密码，新密码遵循初始化规则。事务更新密码并撤销全部原会话，返回当前浏览器的新 Cookie；异步校验期间密码或会话已变化时拒绝操作。
 - `POST /auth/sessions/revoke {password} -> {ok:true}`，要求有效会话与正确密码，撤销全部原会话并为当前浏览器重新建立会话。错误密码为 401。
 - 鉴权依据实际匹配的 API 路由执行；编码路径不能跳过登录或来源检查。会话 token 为随机 32 字节，数据库仅存 SHA-256；Cookie 使用 `HttpOnly`、`SameSite=Strict`，有效期 7 天。配置 `PUBLIC_ORIGIN` 后自动 `Secure`，显式关闭会导致启动失败。
 - SSE 在发送每个事件与心跳前重新检查会话；退出、改密码、撤销或过期后关闭原连接，不再发送新内容。
-- 上述写接口的请求体上限 4 KiB。登录和初始化分别按可信客户端 IP 限制 5 分钟内 10 次；改密码与撤销会话共享 5 分钟内 5 次。限速在请求体解析前执行，成功登录不清空计数；超限返回 429 和 `Retry-After`。密码运算同时最多 4 项，繁忙返回 429。
+- 上述写接口的请求体上限 4 KiB。登录按可信客户端 IP 限制 5 分钟内 10 次；改密码与撤销会话共享 5 分钟内 5 次。限速在请求体解析前执行，成功登录不清空计数；超限返回 429 和 `Retry-After`。密码运算同时最多 4 项，繁忙返回 429。
 - `PUBLIC_ORIGIN` 只接受不含凭据、子路径、查询或片段的 HTTPS 来源；`TRUSTED_PROXIES` 只接受明确 IP／CIDR，默认不信任代理头。写请求执行来源检查；一般响应带浏览器安全头，生产页面启用内容安全策略。请求日志不记录查询参数、请求体、Cookie 或 Authorization。
 
 详细部署设置见 [安全部署](DEPLOYMENT.md)。
@@ -53,7 +53,7 @@
 
 ## 文字与作品接口
 
-- 认证接口见上文“登录、凭据与部署边界”，首次设置带可选安装码；改密与会话撤销不进入作品备份。
+- 认证接口见上文“登录与安全边界”，初始密码由服务器环境提供；改密与会话撤销不进入作品备份。
 - GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],sources:Source[]}。GET 默认隐藏 premise（初始作者设定），显式 ?view=author 返回。
 - DELETE /projects/:id（无请求体）-> {ok:true}：永久删除整部作品，包括原文、正文、所有故事线及历史快照、世界资料、剧情规划与伏笔、任务、导入队列、模型输出和搜索索引。先取消该作品未结束的任务、中止模型请求并等待收尾，再在事务中清理数据，迟到结果不能重新写回。删除期间创建、恢复或重试任务返回 409；重复并发删除返回 409，作品不存在或已删除返回 404。沿用 session 和同源校验，无需 baseRevisionId 或作者视图参数；不影响其他作品、登录和供应商设置。原文清理如遇文件占用，会保留在内部待清理目录并在下次服务启动重试。
 - GET /branches/:id?view=author|reader -> BranchView，默认 reader；读者视图移除 outline/foreshadows/secret 内容（outline 空对象结构保留）。

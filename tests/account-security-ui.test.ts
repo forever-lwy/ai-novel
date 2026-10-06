@@ -10,10 +10,11 @@ import { AccountSecurity } from '../client/AccountSecurity';
 import { Auth } from '../client/App';
 
 describe('account security form structure', () => {
-  it('shows the required installation code only for first-time setup', () => {
-    const setup = renderToStaticMarkup(createElement(Auth, { initialized: false, setupTokenRequired: true, onAuthenticated: () => {} }));
-    const login = renderToStaticMarkup(createElement(Auth, { initialized: true, setupTokenRequired: true, onAuthenticated: () => {} }));
-    expect(setup).toContain('安装码'); expect(setup).toContain('.setup-token'); expect(setup).toContain('minLength="12"');
+  it('shows administrator initialization guidance without a public setup form', () => {
+    const uninitialized = renderToStaticMarkup(createElement(Auth, { initialized: false, onAuthenticated: () => {} }));
+    const login = renderToStaticMarkup(createElement(Auth, { initialized: true, onAuthenticated: () => {} }));
+    expect(uninitialized).toContain('INITIAL_PASSWORD'); expect(uninitialized).toContain('重启服务');
+    expect(uninitialized).not.toContain('<form'); expect(uninitialized).not.toContain('<input');
     expect(login).not.toContain('安装码'); expect(login).not.toContain('确认密码'); expect(login).toContain('minLength="8"');
   });
 
@@ -44,7 +45,7 @@ describe('ordinary account security interactions in an isolated browser fixture'
           if (path === '/account') return <AccountSecurity />;
           if (path === '/settings') return <SettingsPage onBack={() => {}} />;
           if (done) return <p role="status">正常认证完成</p>;
-          return <Auth initialized={path === '/login'} setupTokenRequired={path === '/setup'} onAuthenticated={() => setDone(true)} />;
+          return <Auth initialized={path === '/login'} onAuthenticated={() => setDone(true)} />;
         }
         createRoot(document.getElementById('root')).render(<Fixture />);
       `, resolveDir: resolve('.'), loader: 'tsx' }, bundle: true, platform: 'browser', target: 'es2022', jsx: 'automatic', write: false,
@@ -108,20 +109,17 @@ describe('ordinary account security interactions in an isolated browser fixture'
     expect(await page.getByLabel('验证当前密码', { exact: true }).inputValue()).toBe('');
   });
 
-  it('sends the installation code during setup and permits an existing eight-character password at login', async () => {
+  it('offers no public setup action and permits an existing eight-character password at login', async () => {
     const submissions: { path: string; body: unknown }[] = [];
-    const setup = await pageFor('/setup', (path, body) => { submissions.push({ path, body }); return {}; });
-    await setup.getByLabel('安装码', { exact: true }).fill('fixture-installation-code');
-    await setup.getByLabel('登录密码', { exact: true }).fill('normal-first-passphrase');
-    await setup.getByLabel('确认密码', { exact: true }).fill('normal-first-passphrase');
-    await setup.getByRole('button', { name: '创建私人工作台', exact: true }).click();
-    await setup.getByRole('status').filter({ hasText: '正常认证完成' }).waitFor();
+    const uninitialized = await pageFor('/uninitialized', (path, body) => { submissions.push({ path, body }); return {}; });
+    await uninitialized.getByRole('alert').filter({ hasText: 'INITIAL_PASSWORD' }).waitFor();
+    expect(await uninitialized.locator('form').count()).toBe(0); expect(await uninitialized.locator('input').count()).toBe(0); expect(submissions).toEqual([]);
     const login = await pageFor('/login', (path, body) => { submissions.push({ path, body }); return {}; });
     await login.getByLabel('登录密码', { exact: true }).fill('old-pass');
     await login.getByRole('button', { name: '进入工作台', exact: true }).click();
     await login.getByRole('status').filter({ hasText: '正常认证完成' }).waitFor();
-    expect(submissions).toEqual([{ path: '/api/auth/setup', body: { password: 'normal-first-passphrase', setupToken: 'fixture-installation-code' } }, { path: '/api/auth/login', body: { password: 'old-pass' } }]);
-    expect(await setup.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
+    expect(submissions).toEqual([{ path: '/api/auth/login', body: { password: 'old-pass' } }]);
+    expect(await login.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0]);
   });
 
   it('keeps supplier drafts across account navigation and blocks navigation only while a security request is pending', async () => {

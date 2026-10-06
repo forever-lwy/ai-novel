@@ -37,11 +37,11 @@ function makeStore() {
   return store;
 }
 async function makeApp() {
-  const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-delete-api-')), startEngine: false });
+  const ctx = await buildApp({ initialPassword: 'delete-novel-test-password', dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-delete-api-')), startEngine: false });
   apps.push(ctx);
-  const setup = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'delete-novel-test-password' } });
-  expect(setup.statusCode).toBe(200);
-  return { ...ctx, cookies: { session: setup.cookies.find(cookie => cookie.name === 'session')!.value } };
+  const loginResponse = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'delete-novel-test-password' } });
+  expect(loginResponse.statusCode).toBe(200);
+  return { ...ctx, cookies: { session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value } };
 }
 function form(filename: string, text: string) {
   const boundary = 'project-deletion-test-boundary';
@@ -262,7 +262,7 @@ describe('novel deletion', () => {
     apps.splice(apps.findIndex(current => current.app === ctx.app), 1);
     await ctx.app.close();
 
-    const reopened = await buildApp({ dataDir: directory, startEngine: false });
+    const reopened = await buildApp({ initialPassword: 'delete-novel-test-password', dataDir: directory, startEngine: false });
     apps.push(reopened);
 
     expect(readFileSync(original, 'utf8')).toBe(contents);

@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { hashPassword, tokenHash, verifyPasswordWithUpgrade, type SettingsStore } from './security.js';
 import type { Store } from './store.js';
@@ -14,6 +14,15 @@ const newPassword = z.string().min(12, '新密码至少 12 位').max(256, '密�
 }, '请使用至少 12 位有效字符，并避开空白或常见弱密码');
 
 function fail(message: string, statusCode: number): never { throw Object.assign(new Error(message), { statusCode }); }
+
+/** An environment value seeds a new installation; it never overwrites a saved password. */
+export async function initializePassword(settings: SettingsStore, password: string | undefined) {
+  if (settings.meta('password')) return false;
+  if (!password) throw new Error('首次启动请设置 INITIAL_PASSWORD 环境变量。');
+  if (!newPassword.safeParse(password).success) throw new Error('INITIAL_PASSWORD 必须为 12～256 位，去除首尾空白后至少 12 位，且不能使用空白或常见弱密码。');
+  const hash = await hashPassword(password);
+  return settings.setInitialPasswordHash(hash);
+}
 
 /** Limit work before parsing the request body. Saturation denies new addresses rather than evicting active limits. */
 function rateLimit(maximum: number) {
@@ -36,16 +45,11 @@ export type AuthOptions = {
   settings: SettingsStore;
   store: Store;
   secureCookies: boolean;
-  publicOrigin?: string;
-  setupToken?: string;
-  requireSetupToken?: boolean;
   loginAttempts?: number;
 };
 
 export function registerAuthRoutes(app: FastifyInstance, options: AuthOptions) {
   const { settings, store, secureCookies } = options;
-  const host = process.env.HOST || '127.0.0.1';
-  const requireSetupToken = options.requireSetupToken ?? Boolean(options.publicOrigin || !['127.0.0.1', '::1', '[::1]', 'localhost'].includes(host));
   const isAuthenticated = (token?: string) => Boolean(token && store.db.prepare('SELECT 1 FROM sessions WHERE token_hash=? AND expires_at>?').get(tokenHash(token), Date.now()));
   const createSession = (reply: FastifyReply) => {
     const token = randomBytes(32).toString('hex');
@@ -68,23 +72,12 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthOptions) {
     if (request) requireSession(request);
     return { stored, upgradedHash: result.upgradedHash };
   };
-  const loginLimit = rateLimit(options.loginAttempts ?? 10), setupLimit = rateLimit(10), sensitiveLimit = rateLimit(5);
+  const loginLimit = rateLimit(options.loginAttempts ?? 10), sensitiveLimit = rateLimit(5);
   const sensitiveOnRequest = async (request: FastifyRequest, reply: FastifyReply) => { requireSession(request); await sensitiveLimit(request, reply); };
-  let settingUp = false;
 
   app.get('/api/auth/status', async request => {
     const initialized = Boolean(settings.meta('password'));
-    return { initialized, authenticated: isAuthenticated(request.cookies.session), ...(!initialized && requireSetupToken ? { setupTokenRequired: true } : {}) };
-  });
-  app.post('/api/auth/setup', { bodyLimit: authBodyLimit, onRequest: setupLimit }, async (request, reply) => {
-    if (settings.meta('password') || settingUp) fail('已经初始化，请登录。', 409);
-    const { password, setupToken } = z.object({ password: newPassword, setupToken: z.string().max(256).optional() }).strict().parse(request.body);
-    if (requireSetupToken && (!setupToken || !options.setupToken || !timingSafeEqual(Buffer.from(tokenHash(setupToken), 'hex'), Buffer.from(tokenHash(options.setupToken), 'hex')))) {
-      fail('首次设置需要服务启动时提供的安装令牌。', 403);
-    }
-    settingUp = true;
-    try { settings.setMeta('password', await passwordWork(() => hashPassword(password))); createSession(reply); return { ok: true }; }
-    finally { settingUp = false; }
+    return { initialized, authenticated: isAuthenticated(request.cookies.session) };
   });
   app.post('/api/auth/login', { bodyLimit: authBodyLimit, onRequest: loginLimit }, async (request, reply) => {
     const { password } = z.object({ password: loginPassword }).strict().parse(request.body);

@@ -8,9 +8,9 @@ import type { Entity, Settings } from '../shared/types.js';
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 afterEach(async () => { for (const ctx of apps.splice(0)) await ctx.app.close(); });
-async function make() { const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-api-')), startEngine: false }); apps.push(ctx); return ctx; }
+async function make() { const ctx = await buildApp({ initialPassword: 'story-password-123', dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-api-')), startEngine: false }); apps.push(ctx); return ctx; }
 async function login(ctx: Awaited<ReturnType<typeof buildApp>>) {
-  const response = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'story-password-123' } });
+  const response = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'story-password-123' } });
   expect(response.statusCode).toBe(200);
   return response.cookies.find(c => c.name === 'session')!.value;
 }
@@ -21,12 +21,11 @@ function form(filename: string, contents: string | Buffer) {
 describe('HTTP boundaries and persistence', () => {
   it('requires a session, rate limits login and rejects cross-origin mutation', async () => {
     const ctx = await make();
-    expect((await ctx.app.inject('/api/auth/status')).json()).toEqual({ initialized: false, authenticated: false });
+    expect((await ctx.app.inject('/api/auth/status')).json()).toEqual({ initialized: true, authenticated: false });
     expect((await ctx.app.inject('/api/projects')).statusCode).toBe(401);
     const session = await login(ctx);
-    expect((await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'new-password-123' } })).statusCode).toBe(409);
     expect((await ctx.app.inject({ method: 'POST', url: '/api/projects', cookies: { session }, headers: { origin: 'https://untrusted.invalid' }, payload: { title: 'bad' } })).statusCode).toBe(403);
-    for (let i = 0; i < 10; i++) expect((await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'wrong-password-123' } })).statusCode).toBe(401);
+    for (let i = 0; i < 9; i++) expect((await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'wrong-password-123' } })).statusCode).toBe(401);
     expect((await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'wrong-password-123' } })).statusCode).toBe(429);
     expect((await ctx.app.inject({ method: 'POST', url: '/api/auth/logout', cookies: { session } })).statusCode).toBe(200);
     expect((await ctx.app.inject({ url: '/api/projects', cookies: { session } })).statusCode).toBe(401);

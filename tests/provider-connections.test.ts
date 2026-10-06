@@ -15,9 +15,9 @@ afterEach(async () => {
   for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 async function context() {
-  const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-provider-connections-')), startEngine: false }); apps.push(ctx);
-  const setup = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'provider-test-password' } });
-  return { ...ctx, cookies: { session: setup.cookies.find(cookie => cookie.name === 'session')!.value } };
+  const ctx = await buildApp({ initialPassword: 'provider-test-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-provider-connections-')), startEngine: false }); apps.push(ctx);
+  const loginResponse = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'provider-test-password' } });
+  return { ...ctx, cookies: { session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value } };
 }
 function provider(overrides: Partial<ProviderConnection> = {}): ProviderConnection {
   return { id: 'upstream', name: '测试供应商', protocol: 'openai-chat', baseUrl: 'https://example.invalid/v1', maxOutputTokens: 2048, contextTokens: 64000, ...overrides };

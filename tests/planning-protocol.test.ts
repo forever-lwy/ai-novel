@@ -57,9 +57,9 @@ async function harness(protocol: ProviderProtocol, continuation?: (response: Ser
   });
   servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const baseUrl = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
-  const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-planning-protocol-')) }); apps.push(ctx);
-  const setup = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'planning-protocol-fixture' } });
-  const cookies = { session: setup.cookies.find(cookie => cookie.name === 'session')!.value };
+  const ctx = await buildApp({ initialPassword: 'planning-protocol-fixture', dataDir: mkdtempSync(join(tmpdir(), 'novel-planning-protocol-')) }); apps.push(ctx);
+  const loginResponse = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'planning-protocol-fixture' } });
+  const cookies = { session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value };
   const settings: Settings = { providers: [{ id: 'local', name: '本地协议模拟', protocol, baseUrl }], writingProviderId: 'local', writingModel: 'writer', planningProviderId: 'local', planningModel: 'planner-forbidden', extractionProviderId: 'local', extractionModel: 'extractor', taskSettings: { ...defaultTaskSettings(), planning: { enabled: true, mode: 'tool' } } };
   const saved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies, payload: settings }); expect(saved.statusCode).toBe(200);
   const project = ctx.store.createProject({ title: '港口故事' }); const branchId = project.mainBranchId; const baseRevisionId = ctx.store.getBranch(branchId).revisionId;

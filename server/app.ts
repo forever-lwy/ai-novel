@@ -3,7 +3,7 @@ import cookie from '@fastify/cookie';
 import multipart from '@fastify/multipart';
 import staticFiles from '@fastify/static';
 import { z } from 'zod';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, existsSync, writeFileSync, readFileSync, unlinkSync, renameSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve, basename, dirname } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
@@ -15,7 +15,7 @@ import { parseNovel } from './importer.js';
 import { generateText, redactKnownSecrets, redactModelPayload, validateProviderOptions } from './providers.js';
 import { listProviderModels } from './model-catalog.js';
 import { SettingsStore, tokenHash, normalizeSettings, hasUrlCredentials } from './security.js';
-import { registerAuthRoutes } from './auth.js';
+import { initializePassword, registerAuthRoutes } from './auth.js';
 import { httpSecurityConfig, safeRequestLog, RequestRateLimit } from './http-security.js';
 import { checkBackupSize, MAX_BACKUP_BYTES } from './backup-limits.js';
 import type { Source, SourcePreview, Settings, Entity, Foreshadow, Job, CapturedModelResponse, ModelRequestSnapshot } from '../shared/types.js';
@@ -61,13 +61,18 @@ function fail(message: string, statusCode = 400): never { throw Object.assign(ne
 type SourceRow = { id: string; project_id: string; filename: string; format: 'txt' | 'epub'; chapter_count: number; created_at: string; confirmed: number; preview: string; storage_name: string };
 const sourcePublic = (r: SourceRow): Source => ({ id: r.id, projectId: r.project_id, filename: r.filename, format: r.format, chapterCount: r.chapter_count, createdAt: r.created_at, confirmed: Boolean(r.confirmed) });
 
-export async function buildApp(options: { dataDir?: string; startEngine?: boolean; logger?: boolean; staticDir?: string; requireSetupToken?: boolean; rateLimits?: { login?: number; imports?: number; models?: number } } = {}) {
+export async function buildApp(options: { dataDir?: string; startEngine?: boolean; logger?: boolean; staticDir?: string; initialPassword?: string; rateLimits?: { login?: number; imports?: number; models?: number } } = {}) {
   const config = httpSecurityConfig();
   const dataDir = resolve(options.dataDir || process.env.DATA_DIR || './data');
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const uploadDir = join(dataDir, 'sources'); mkdirSync(uploadDir, { recursive: true, mode: 0o700 });
   const store = new Store(dataDir);
-  const settings = new SettingsStore(store.db, dataDir);
+  let settings: SettingsStore;
+  try {
+    settings = new SettingsStore(store.db, dataDir);
+    await initializePassword(settings, options.initialPassword ?? process.env.INITIAL_PASSWORD);
+    const oldSetupPath = join(dataDir, '.setup-token'); if (existsSync(oldSetupPath)) unlinkSync(oldSetupPath);
+  } catch (error) { store.close(); throw error; }
   const images = new ImageService(store, () => settings.get());
   const engine = new StoryEngine(store, () => settings.get(), undefined, images);
   store.db.exec(`CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, filename TEXT NOT NULL, format TEXT NOT NULL, chapter_count INTEGER NOT NULL, created_at TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, preview TEXT NOT NULL, storage_name TEXT NOT NULL)`);
@@ -105,7 +110,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   const searches = new RequestRateLimit(60);
   const imports = new RequestRateLimit(options.rateLimits?.imports ?? 3, 300_000);
   const models = new RequestRateLimit(options.rateLimits?.models ?? 20);
-  const isPublic = (path: string) => ['/api/health', '/api/auth/status', '/api/auth/setup', '/api/auth/login'].includes(path);
+  const isPublic = (path: string) => ['/api/health', '/api/auth/status', '/api/auth/login'].includes(path);
   app.addHook('onRequest', async (request, reply) => {
     reply.header('X-Frame-Options', 'DENY').header('Referrer-Policy', 'no-referrer').header('X-Content-Type-Options', 'nosniff');
     if (process.env.NODE_ENV === 'production') reply.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
@@ -142,16 +147,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     return reply.status(status).send({ error: status === 500 ? '操作未完成，请查看任务状态或服务日志后重试。' : err.message });
   });
   app.get('/api/health', async () => ({ ok: true }));
-  const requireSetupToken = options.requireSetupToken ?? (process.env.NODE_ENV === 'production' || Boolean(config.publicOrigin) || !['127.0.0.1', 'localhost', '::1'].includes(process.env.HOST || '127.0.0.1'));
-  const setupPath = join(dataDir, '.setup-token');
-  let setupToken: string | undefined;
-  if (requireSetupToken && !settings.meta('password')) {
-    if (!existsSync(setupPath)) writeFileSync(setupPath, randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' });
-    setupToken = readFileSync(setupPath, 'utf8').trim();
-    if (!/^[a-f0-9]{64}$/.test(setupToken)) throw new Error('首次安装码文件无效，请在服务器重新生成 .setup-token。');
-  }
-  registerAuthRoutes(app, { settings, store, publicOrigin: config.publicOrigin, secureCookies: config.secureCookies, requireSetupToken, setupToken, loginAttempts: options.rateLimits?.login });
-  app.addHook('onResponse', async () => { if (settings.meta('password') && existsSync(setupPath)) unlinkSync(setupPath); });
+  registerAuthRoutes(app, { settings, store, secureCookies: config.secureCookies, loginAttempts: options.rateLimits?.login });
   const param = (req: any, key = 'id'): string => z.string().min(1).max(100).parse(req.params[key]);
   const base = (body: unknown) => z.object({ baseRevisionId: revision }).parse(body).baseRevisionId;
   const author = (req: any) => req.query?.view === 'author';

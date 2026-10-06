@@ -82,6 +82,7 @@ export class SettingsStore {
     return (this.db.prepare('SELECT value FROM app_meta WHERE key=?').get(name) as { value: string } | undefined)?.value;
   }
   setMeta(name: string, value: string) { this.db.prepare('INSERT INTO app_meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(name, value); }
+  setInitialPasswordHash(hash: string) { return this.db.prepare('INSERT INTO app_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO NOTHING').run('password', hash).changes !== 0; }
   private encrypt(value: string) {
     const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.key, iv);
     const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);

@@ -187,9 +187,9 @@ describe('author writing activity persistence and streaming', () => {
 
 describe('author-only activity API and SSE', () => {
   it('requires login and author view for saved thinking/tool history and includes it in the author stream', async () => {
-    const context = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-activity-api-')), startEngine: false }); apps.push(context);
-    const setup = await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'activity-api-test-password' } });
-    const cookies = { session: setup.cookies.find(cookie => cookie.name === 'session')!.value };
+    const context = await buildApp({ initialPassword: 'activity-api-test-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-activity-api-')), startEngine: false }); apps.push(context);
+    const loginResponse = await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'activity-api-test-password' } });
+    const cookies = { session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value };
     const project = context.store.createProject({ title: '活动权限' });
     const writing = context.engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章' });
     context.store.recordWritingActivity(writing.id, { type: 'thinking', id: 'private-thinking', text: '作者可见的思考过程' });
@@ -209,12 +209,12 @@ describe('author-only activity API and SSE', () => {
   });
 
   it('keeps the HTTP stream open for activity events and ends only after prose is committed', async () => {
-    const context = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-activity-http-')), startEngine: false }); apps.push(context);
+    const context = await buildApp({ initialPassword: 'activity-http-test-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-activity-http-')), startEngine: false }); apps.push(context);
     context.settings.save(settings());
     const began = deferred<void>(); const finish = deferred<void>();
     const model = models(async request => { request.onActivity?.({ type: 'thinking', id: 'live-thought', text: '核对故事资料。' }); request.onActivity?.({ type: 'tool_call', id: 'live-tool', name: 'search_story', arguments: { q: '旧桥' } }); request.onTextDelta?.('旅人来到桥边。'); began.resolve(); await pending(finish.promise, request.signal); return '旅人来到桥边。'; });
     (context.engine as unknown as { models: TextModels }).models = model;
-    const setup = await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'activity-http-test-password' } }); const cookies = { session: setup.cookies.find(cookie => cookie.name === 'session')!.value };
+    const loginResponse = await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'activity-http-test-password' } }); const cookies = { session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value };
     const project = context.store.createProject({ title: '活动实时流' }); const writing = context.engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章' });
     const response = context.app.inject({ url: `/api/jobs/${writing.id}/events?view=author`, cookies });
     await context.app.ready(); context.engine.start(); await began.promise; finish.resolve();

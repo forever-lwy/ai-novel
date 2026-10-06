@@ -35,7 +35,7 @@ while ($queue.Count -gt 0) {
 }
 `;
     const powershellDir = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0');
-    const childEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toLowerCase() !== 'psmodulepath'));
+    const childEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !['psmodulepath', 'initial_password'].includes(name.toLowerCase())));
     try { execFileSync(join(powershellDir, 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...childEnv, PSModulePath: join(powershellDir, 'Modules'), AI_NOVEL_PRIVATE_DIR: target }, windowsHide: true, stdio: 'pipe', timeout: 120_000 }); }
     catch (error) { throw new Error('无法收紧数据目录权限，请让运行账号保留该目录所有权及访问权限后重试。', { cause: error }); }
     return;

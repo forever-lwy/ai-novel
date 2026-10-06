@@ -8,9 +8,9 @@ const contexts: Awaited<ReturnType<typeof buildApp>>[] = [];
 afterEach(async () => { for (const ctx of contexts.splice(0)) await ctx.app.close(); });
 
 it('keeps imported responses and failed manual edits private, then applies an exact citation without calling a model', async () => {
-  const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-output-api-')), startEngine: false }); contexts.push(ctx);
-  const setup = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'test-output-password' } });
-  const session = setup.cookies.find(c => c.name === 'session')!.value;
+  const ctx = await buildApp({ initialPassword: 'test-output-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-output-api-')), startEngine: false }); contexts.push(ctx);
+  const loginResponse = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'test-output-password' } });
+  const session = loginResponse.cookies.find(c => c.name === 'session')!.value;
   const project = ctx.store.createProject({ title: '中性引用修复测试' });
   const text = '“回来了。”旅人走进古城。';
   const view = ctx.store.saveChapter(project.mainBranchId, { baseRevisionId: ctx.store.getBranch(project.mainBranchId).revisionId, title: '第一章', text });

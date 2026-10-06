@@ -12,9 +12,9 @@ const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 const servers: Server[] = [];
 afterEach(async () => { for (const app of apps.splice(0)) await app.app.close(); for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); } });
 async function context() {
-  const app = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-model-settings-')) }); apps.push(app);
-  const setup = await app.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'test-parameters-password' } });
-  return { ...app, session: setup.cookies.find(cookie => cookie.name === 'session')!.value };
+  const app = await buildApp({ initialPassword: 'test-parameters-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-model-settings-')) }); apps.push(app);
+  const loginResponse = await app.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'test-parameters-password' } });
+  return { ...app, session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value };
 }
 function settings(overrides: Partial<ProviderConfig> = {}): Settings {
   const { baseUrl = 'http://unused.invalid', apiKey = 'test-secret-key', protocol = 'gemini', ...parameters } = overrides;

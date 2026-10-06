@@ -8,8 +8,7 @@ const mockUrl = `http://127.0.0.1:${process.env.E2E_MODEL_PORT || '4329'}/v1`;
 let previousSettings: Settings;
 
 test.beforeEach(async ({ page }) => {
-  const status = await (await page.request.get('/api/auth/status')).json();
-  expect((await page.request.post(status.initialized ? '/api/auth/login' : '/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   previousSettings = await (await page.request.get('/api/settings')).json();
   const providerId = 'e2e-rpg-provider';
   expect((await page.request.put('/api/settings', { data: {

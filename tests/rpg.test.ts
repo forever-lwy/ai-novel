@@ -223,8 +223,8 @@ describe('durable RPG story choices', () => {
   });
 
   it('requires author view for RPG generation and choices, and omits role setup and choices from reader JSON', async () => {
-    const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-rpg-api-')), startEngine: false }); apps.push(ctx);
-    const login = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'story-password-123' } }); const session = login.cookies.find(cookie => cookie.name === 'session')!.value;
+    const ctx = await buildApp({ initialPassword: 'story-password-123', dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-rpg-api-')), startEngine: false }); apps.push(ctx);
+    const login = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'story-password-123' } }); const session = login.cookies.find(cookie => cookie.name === 'session')!.value;
     const project = ctx.store.createProject({ title: '权限体验' }); const payload = { baseRevisionId: ctx.store.getBranch(project.mainBranchId).revisionId, mode: 'rpg', instruction: '', rpg: originalSetup() };
     expect((await ctx.app.inject({ method: 'POST', url: `/api/branches/${project.mainBranchId}/generate`, cookies: { session }, payload })).statusCode).toBe(403);
     const generate = await ctx.app.inject({ method: 'POST', url: `/api/branches/${project.mainBranchId}/generate?view=author`, cookies: { session }, payload }); expect(generate.statusCode).toBe(200);

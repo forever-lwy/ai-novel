@@ -8,9 +8,9 @@ import { defaultImageSettings } from '../shared/image-settings.js';
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 afterEach(async () => { for (const ctx of apps.splice(0)) await ctx.app.close(); });
 async function context() {
-  const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-image-settings-')), startEngine: false }); apps.push(ctx);
-  const setup = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'image-settings-fixture' } });
-  const cookies = { session: setup.cookies.find(cookie => cookie.name === 'session')!.value };
+  const ctx = await buildApp({ initialPassword: 'image-settings-fixture', dataDir: mkdtempSync(join(tmpdir(), 'novel-image-settings-')), startEngine: false }); apps.push(ctx);
+  const loginResponse = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'image-settings-fixture' } });
+  const cookies = { session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value };
   return { ...ctx, cookies };
 }
 describe('image settings compatibility', () => {

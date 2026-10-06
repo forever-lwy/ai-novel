@@ -2,9 +2,9 @@
 
 当前是单用户、单实例的私人工作台。公网入口使用 HTTPS 反向代理，后端 4317 端口只绑定服务器本机，数据库放在服务主机本地存储。这里提供配置参考；Docker、Nginx、目标 NAS 和实际公网环境仍需部署后核验，不能把本地程序测试当成部署验收。
 
-## 启动与首次设置
+## 启动与初始密码
 
-原生运行按 [README](../README.md) 安装和构建，在 `.env` 设置：
+新实例先复制 `.env.example` 为 `.env`，已有配置文件直接编辑并保留其他设置。填写自己的 `INITIAL_PASSWORD`，去除首尾空白后至少 12 位，不使用常见弱密码；项目没有默认密码。原生运行按 [README](../README.md) 安装和构建，公网配置示例为：
 
 ```dotenv
 NODE_ENV=production
@@ -12,22 +12,23 @@ HOST=127.0.0.1
 PORT=4317
 DATA_DIR=./data
 PUBLIC_ORIGIN=https://novel.example.com
+# 首次无密码的数据目录必须填写自己的有效密码：
+INITIAL_PASSWORD=
 ```
 
-将示例域名替换为自己的域名。`PUBLIC_ORIGIN` 是 HTTPS 来源，不带子路径、查询参数、片段或用户名密码；设置后自动启用 Secure Cookie，不能再指定 `COOKIE_SECURE=false`。首次启动会在数据目录生成 `.setup-token`，在服务器本地读取：
-
-```sh
-cat data/.setup-token
-```
+将示例域名替换为自己的域名，并补齐空的密码值后再启动。`PUBLIC_ORIGIN` 是 HTTPS 来源，不带子路径、查询参数、片段或用户名密码；设置后自动启用 Secure Cookie，不能再指定 `COOKIE_SECURE=false`。
 
 Docker 使用项目的 [Compose](../compose.yaml)，默认只向主机本机开放端口：
 
 ```sh
 docker compose up -d --build
-docker compose exec ai-novel cat /app/data/.setup-token
 ```
 
-浏览器打开配置的 HTTPS 地址，输入安装码并设置至少 12 位的长密码。安装码不通过 API 返回，不写入服务日志，初始化后文件删除。生产实例即使仅监听本机也需要安装码；本机开发服务未配置公网来源时可直接设置密码。
+浏览器打开配置的地址，直接用初始密码登录；网页不能设置初始密码。首次空数据目录缺失、为空或无效的 `INITIAL_PASSWORD` 会导致启动失败，错误不会输出密码。已有数据库密码保持不变，即使重启时设置了不同的初始密码也不会覆盖；改密使用账号安全页面。
+
+密码包含 `$` 时，把 `.env` 的值用单引号包围。单引号值按原文读取，不把 `$变量` 或 `${变量}` 展开；不要使用未加引号或双引号的写法。写法为 `INITIAL_PASSWORD='…'`，其中省略号需要替换为自己的完整密码，不能直接使用。Shell 中已有的同名变量优先于 `.env`，排查时只核对配置来源，不输出值。规则见 [Compose 环境文件语法](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax)。
+
+初始化成功后可从 `.env` 移除 `INITIAL_PASSWORD`，已有完整数据卷再次启动不需要该变量。服务器入口会清除进程中的初始密码变量，但不会修改 `.env` 或容器配置；不要输出含秘密的完整环境或已展开的 Compose 配置。
 
 Compose 使用非 root 用户、只读根文件系统、临时 `/tmp`、禁用额外能力与提权；数据卷仍可写。默认限制 128 个进程及 2 GiB 内存，可用 `MEMORY_LIMIT` 调整内存。较大作品超出内存或恢复容量时使用停机后的完整服务迁移。配置字段见 [Compose 服务配置](https://docs.docker.com/reference/compose-file/services/)。
 
@@ -67,7 +68,7 @@ server {
     proxy_read_timeout 3600s;
     proxy_buffering off;
 
-    location ~ ^/api/auth/(setup|login|password|sessions/revoke|logout)$ {
+    location ~ ^/api/auth/(login|password|sessions/revoke|logout)$ {
         client_max_body_size 4k;
         limit_req zone=novel_auth burst=4 nodelay;
         limit_req_status 429;
@@ -105,7 +106,7 @@ OUTBOUND_ALLOWED_ORIGINS=https://gateway.example.com
 
 迁移已有本地数据时，先停止服务，复制完整 `data/` 或 Docker 卷，包括 `novel.sqlite`、原文件、`.encryption-key` 及仍存在的数据库附属文件，再设置目标数据目录与服务账号权限。启动后继续使用原密码、作品和独立 API 密钥；旧密码成功登录时升级哈希，不强制重新设置。不要使用空数据卷替换原数据，也不要删除 `.encryption-key`。
 
-默认 Compose 的 `novel-data` 卷不会自动复制原生运行的 `./data`。改用 Docker 前，先将完整停机备份放入目标卷，或将 Compose 的数据挂载明确改为目标主机的受保护本地目录，并使容器运行账号有访问权限。启动后确认仍显示登录页面、作品列表与供应商“已保存”状态；如果出现首次设置页面，先核对 `DATA_DIR` 和卷映射，保留原目录后再处理。
+默认 Compose 的 `novel-data` 卷不会自动复制原生运行的 `./data`。改用 Docker 前，先将完整停机备份放入目标卷，或将 Compose 的数据挂载明确改为目标主机的受保护本地目录，并使容器运行账号有访问权限。启动后用原密码登录，确认作品列表与供应商“已保存”状态；如果原密码不能登录、作品列表为空或提示未配置初始密码，先核对 `DATA_DIR` 和卷映射，保留原目录后再处理。
 
 作品备份未压缩 JSON、压缩下载、上传及外层解压分别最多 128 MiB，导出前先检查容量；最多恢复 5000 个历史版本，单状态最多解压 64 MiB，所有状态累计最多 256 MiB。备份下载、小说文件上传及作品恢复按可信客户端 IP 共享 5 分钟内 3 次的限额。恢复新建独立作品，超限返回错误，保留原作品。完整服务迁移不依赖这些单作品导入限制，适合长期累积的大作品。
 

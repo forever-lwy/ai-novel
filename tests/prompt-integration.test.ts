@@ -24,8 +24,8 @@ async function terminal(engine: StoryEngine, id: string) {
 }
 
 it('migrates old settings, persists editable presets and preserves them when an old client omits the field', async () => {
-  const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-prompt-api-')) }); apps.push(ctx);
-  const login = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'prompt-test-password' } });
+  const ctx = await buildApp({ initialPassword: 'prompt-test-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-prompt-api-')) }); apps.push(ctx);
+  const login = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'prompt-test-password' } });
   const cookies = { session: login.cookies[0].value };
   expect((await ctx.app.inject({ url: '/api/settings', cookies })).json().promptTemplates.presets.compression).toHaveLength(1);
   const settings = config(); settings.providers[0].apiKey = 'fixture-secret-key';

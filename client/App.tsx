@@ -7,7 +7,7 @@ import { SettingsPage } from './SettingsPanel';
 import { Workspace } from './Workspace';
 
 export default function App() {
-  const [auth, setAuth] = useState<{ initialized: boolean; authenticated: boolean; setupTokenRequired?: boolean } | null>(null);
+  const [auth, setAuth] = useState<{ initialized: boolean; authenticated: boolean } | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [settings, setSettings] = useState(false);
@@ -23,7 +23,7 @@ export default function App() {
   const [mode, setMode] = useState<Mode>('original');
 
   const loadProjects = async () => setProjects(await api<Project[]>('/projects'));
-  useEffect(() => { api<{ initialized: boolean; authenticated: boolean; setupTokenRequired?: boolean }>('/auth/status').then(setAuth).catch(e => setError(e.message)); }, []);
+  useEffect(() => { api<{ initialized: boolean; authenticated: boolean }>('/auth/status').then(setAuth).catch(e => setError(e.message)); }, []);
   useEffect(() => { if (auth?.authenticated) loadProjects().catch(e => setError(e.message)); }, [auth?.authenticated]);
   useEffect(() => {
     if (settings) window.scrollTo(0, 0);
@@ -61,7 +61,7 @@ export default function App() {
     } catch (e) { setDeleteError((e as Error).message); } finally { setDeleting(false); }
   }
   if (!auth) return <main className="startup"><Brand />{error ? <Notice error={error} /> : <Spinner />}</main>;
-  if (!auth.authenticated) return <Auth initialized={auth.initialized} setupTokenRequired={auth.setupTokenRequired} onAuthenticated={() => setAuth({ initialized: true, authenticated: true })} />;
+  if (!auth.authenticated) return <Auth initialized={auth.initialized} onAuthenticated={() => setAuth({ initialized: true, authenticated: true })} />;
 
   return <div className="app-shell">
     <div hidden={settings} inert={settings}>
@@ -83,14 +83,13 @@ export default function App() {
   </div>;
 }
 
-export function Auth({ initialized, setupTokenRequired = false, onAuthenticated }: { initialized: boolean; setupTokenRequired?: boolean; onAuthenticated: () => void }) {
-  const [password, setPassword] = useState(''); const [confirm, setConfirm] = useState(''); const [setupToken, setSetupToken] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+export function Auth({ initialized, onAuthenticated }: { initialized: boolean; onAuthenticated: () => void }) {
+  const [password, setPassword] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   async function submit(e: FormEvent) {
-    e.preventDefault(); if (busy) return; setError('');
-    if (!initialized && password !== confirm) { setError('两次输入的密码不一致。'); return; }
+    e.preventDefault(); if (busy || !initialized) return; setError('');
     setBusy(true);
-    try { await post(`/auth/${initialized ? 'login' : 'setup'}`, { password, ...(!initialized && setupTokenRequired ? { setupToken: setupToken.trim() } : {}) }); setPassword(''); setConfirm(''); setSetupToken(''); onAuthenticated(); }
+    try { await post('/auth/login', { password }); setPassword(''); onAuthenticated(); }
     catch (error) { setError((error as Error).message); } finally { setBusy(false); }
   }
-  return <main className="auth-page"><div className="auth-decoration" aria-hidden="true"><div className="auth-quote">一念起，<br />万象生。</div><span>EVERY STORY BEGINS WITH A SPARK.</span></div><section className="auth-content"><Brand /><div className="auth-form"><span className="eyebrow">WELCOME TO YOUR WORLD</span><h1>{initialized ? '欢迎回到故事里。' : '为你的世界，留一把钥匙。'}</h1><p>{initialized ? '登录你的私人小说创作工作台。' : '首次使用，请设置工作台的登录密码。'}</p><form className="form-stack" onSubmit={submit} aria-busy={busy}>{!initialized && setupTokenRequired && <><label>安装码<input type="password" required maxLength={256} autoComplete="off" aria-describedby="setup-token-help" value={setupToken} onChange={e => setSetupToken(e.target.value)} placeholder="输入部署时生成的安装码" disabled={busy} /></label><p id="setup-token-help" className="hint">请从服务器数据目录中的 .setup-token 文件获取安装码，或向部署者获取。</p></>}<label>登录密码<input type="password" required minLength={initialized ? 8 : 12} maxLength={256} autoFocus autoComplete={initialized ? 'current-password' : 'new-password'} placeholder={initialized ? '输入登录密码' : '至少 12 位字符，避免常见弱密码'} value={password} onChange={e => setPassword(e.target.value)} disabled={busy} /></label>{!initialized && <label>确认密码<input type="password" required minLength={12} maxLength={256} autoComplete="new-password" placeholder="再次输入密码" value={confirm} onChange={e => setConfirm(e.target.value)} disabled={busy} /></label>}{error && <Notice error={error} />}<button type="submit" className="button primary" disabled={busy}>{busy ? '请稍候…' : initialized ? '进入工作台' : '创建私人工作台'}<ArrowRight size={17} /></button></form></div><p className="auth-footnote">你的文字，你的世界。</p></section></main>;
+  return <main className="auth-page"><div className="auth-decoration" aria-hidden="true"><div className="auth-quote">一念起，<br />万象生。</div><span>EVERY STORY BEGINS WITH A SPARK.</span></div><section className="auth-content"><Brand /><div className="auth-form"><span className="eyebrow">WELCOME TO YOUR WORLD</span><h1>{initialized ? '欢迎回到故事里。' : '工作台尚未初始化。'}</h1><p>{initialized ? '登录你的私人小说创作工作台。' : '初始账号由服务器管理员配置。'}</p>{initialized ? <form className="form-stack" onSubmit={submit} aria-busy={busy}><label>登录密码<input type="password" required minLength={8} maxLength={256} autoFocus autoComplete="current-password" placeholder="输入登录密码" value={password} onChange={e => setPassword(e.target.value)} disabled={busy} /></label>{error && <Notice error={error} />}<button type="submit" className="button primary" disabled={busy}>{busy ? '请稍候…' : '进入工作台'}<ArrowRight size={17} /></button></form> : <Notice error="请管理员在服务器配置 INITIAL_PASSWORD 环境变量，并重启服务完成初始化。" />}</div><p className="auth-footnote">你的文字，你的世界。</p></section></main>;
 }

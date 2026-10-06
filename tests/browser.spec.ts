@@ -9,7 +9,8 @@ const password = 'browser-test-password-123';
 const mockUrl = `http://127.0.0.1:${process.env.E2E_MODEL_PORT || '4329'}/v1`;
 const novel = '第一章 起点\n林舟来到白石城，看到城门下的石碑。\n\n他决定先去城中打听消息。\n\n第二章 灯火\n林舟在白石城找到一盏旧灯。\n\n旧灯照亮了深夜的长街。';
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page }, testInfo) => {
+  if (testInfo.title.startsWith('初始账号登录，')) return;
   const status = await page.request.get('/api/auth/status');
   if ((await status.json()).initialized) {
     const login = await page.request.post('/api/auth/login', { data: { password } });
@@ -55,11 +56,15 @@ async function importNovel(page: Page) {
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
 }
 
-test('首次设置密码，一个供应商自动获取模型，三个任务各自选择或自定义且密钥不回显', async ({ page }, testInfo) => {
+test('初始账号登录，一个供应商自动获取模型，三个任务各自选择或自定义且密钥不回显', async ({ page }, testInfo) => {
+  const status = await page.request.get('/api/auth/status');
+  expect(await status.json()).toEqual({ initialized: true, authenticated: false });
+  expect(await status.text()).not.toContain(password);
   await page.goto('/');
+  await expect(page.getByLabel('登录密码', { exact: true })).toHaveValue('');
   await page.getByLabel('登录密码', { exact: true }).fill(password);
-  await page.getByLabel('确认密码', { exact: true }).fill(password);
-  await page.getByRole('button', { name: '创建私人工作台', exact: true }).click();
+  await expect(page.getByLabel('确认密码', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '进入工作台', exact: true }).click();
   await expect(page.getByRole('heading', { name: /我的作品/ })).toBeVisible();
   await page.getByRole('button', { name: '设置', exact: true }).click();
   const modal = page.getByTestId('settings-page');
@@ -265,7 +270,7 @@ test('原创生成保存正文、四章预期规划及隐藏伏笔，阅读接�
 
 test('新章实时显示正文，阅读视图隐藏流，重新生成可放弃后台整理并自动分支', async ({ page }, testInfo) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const originalSettings = await (await page.request.get('/api/settings')).json();
   const providerId = 'e2e-streaming-provider';
   expect((await page.request.put('/api/settings', { data: {
@@ -334,7 +339,7 @@ test('新章实时显示正文，阅读视图隐藏流，重新生成可放弃�
 
 test('作者实时查看公开思考与工具过程，默认折叠且正文独立，完成刷新及切视图不泄漏', async ({ page }, testInfo) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const originalSettings = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-activity-provider';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '公开思考与工具验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-public-activities', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
@@ -421,7 +426,7 @@ test('作者实时查看公开思考与工具过程，默认折叠且正文独�
 
 test('摘要压缩保留各章原摘要，候选取消不生效，作者确认后保存；主要角色可编辑', async ({ page }, testInfo) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const originalSettings = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-summary-provider';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '摘要确认验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
@@ -659,12 +664,9 @@ test('章节请求延迟返回时，切换到空故事线不会混入原故事�
 });
 
 test('任务操作回归：上游 HTTP500 后可重试、取消并退出登录，正文保留', async ({ page }) => {
-  // Self-contained setup also allows running this case alone with --grep.
+  // Self-contained login also allows running this case alone with --grep.
   const authentication = await (await page.request.get('/api/auth/status')).json();
-  if (!authentication.initialized) {
-    const setup = await page.request.post('/api/auth/setup', { data: { password } });
-    expect(setup.ok()).toBeTruthy();
-  } else if (!authentication.authenticated) {
+  if (!authentication.authenticated) {
     expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   }
   const providerId = 'e2e-http500-provider';
@@ -721,7 +723,7 @@ test('任务操作回归：上游 HTTP500 后可重试、取消并退出登录�
 
 test('模型输出修复：保留错误引文及原响应，手工修改后完成整理而不再次调用模型', async ({ page }, testInfo) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const providerId = 'e2e-repair-provider';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '本地引用修复模拟', protocol: 'openai-chat', baseUrl: mockUrl, model: 'e2e-quote-mismatch', apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 }],
@@ -806,7 +808,7 @@ test('模型输出修复：保留错误引文及原响应，手工修改后完�
 
 test('简化提取：只返回段落编号与必要字段，单次响应即可完成且保留本地整理说明', async ({ page }) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const providerId = 'e2e-compact-provider';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '简化提取模拟', protocol: 'openai-chat', baseUrl: mockUrl, model: 'e2e-compact-extraction', apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 }],
@@ -837,7 +839,7 @@ test('简化提取：只返回段落编号与必要字段，单次响应即可�
 
 test('模型参数与诊断：保留零值、协议专属思考设置，流式连接成功及 HTTP500 均可核对当次请求', async ({ page }, testInfo) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const providerId = 'e2e-parameters';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '参数诊断模拟', protocol: 'openai-chat', baseUrl: mockUrl, model: 'e2e-fixture', apiKey: 'e2e-private-parameter-key', maxOutputTokens: 8192, contextTokens: 64000 }],
@@ -925,7 +927,7 @@ test('模型参数与诊断：保留零值、协议专属思考设置，流式�
 
 test('模型列表失败仍可自定义，刷新后保留自定义名并使用任务模型测试', async ({ page }) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const providerId = 'e2e-model-list-error';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '目录故障模拟', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 }],
@@ -955,7 +957,7 @@ test('模型列表失败仍可自定义，刷新后保留自定义名并使用�
 
 test('切换供应商清空任务模型，迟到的列表和改地址前的列表不会混入新连接', async ({ page }) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const oldId = 'e2e-list-old'; const newId = 'e2e-list-new';
   expect((await page.request.put('/api/settings', { data: {
     providers: [oldId, newId].map((id, index) => ({ id, name: index ? '新供应商' : '旧供应商', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 })),
@@ -1003,7 +1005,7 @@ test('切换供应商清空任务模型，迟到的列表和改地址前的列�
 
 test('三任务使用同一模型时参数互不影响，切换恢复且清空与重置均独立持久化', async ({ page }, testInfo) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const providerId = 'e2e-model-defaults'; const otherId = 'e2e-model-defaults-other';
   expect((await page.request.put('/api/settings', { data: {
     providers: [providerId, otherId].map((id, index) => ({ id, name: index ? '另一个供应商' : '模型参数模拟', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' })),
@@ -1110,7 +1112,7 @@ test('三任务使用同一模型时参数互不影响，切换恢复且清空�
 
 test('统一上下文限制保留 64000 输出，不再显示或发送任务累计用量上限', async ({ page }) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const providerId = 'e2e-full-output';
   expect((await page.request.put('/api/settings', { data: {
     providers: [{ id: providerId, name: '完整输出模拟', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '', maxOutputTokens: 4096, contextTokens: 64000 }],
@@ -1155,7 +1157,7 @@ test('统一上下文限制保留 64000 输出，不再显示或发送任务累�
 
 test('书架删除需确认，取消和失败保留小说，处理中不能关闭，删除最后一本显示空书架', async ({ page }, testInfo) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   // This test runs last and clears only the isolated E2E server's temporary library.
   const previous = await (await page.request.get('/api/projects')).json();
   for (const project of previous) expect((await page.request.delete(`/api/projects/${project.id}`)).ok()).toBeTruthy();
@@ -1331,7 +1333,7 @@ test('无效提示词草稿可继续修正，保存和导入失败不会覆盖�
 test('生图设置、自动人物与场景工具、全文选段 CG、重绘参考图修改及资料地图图册', async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const previous = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-image-provider';
   expect((await page.request.put('/api/settings', { data: { providers: [{ id: providerId, name: '本地图片验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-images', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture', imageSettings: { providerId: '', model: '', protocol: 'openai-images', size: '1024x1024', quality: 'auto', stylePrompt: '', autoPortrait: true, autoCG: false, timeoutMs: 120000 } } })).ok()).toBeTruthy();
   try {
@@ -1401,7 +1403,7 @@ test('生图设置、自动人物与场景工具、全文选段 CG、重绘参�
 
 test('生图取消的迟到响应不会跨阅读视图或故事线显示作者图片', async ({ page }) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   await createProject(page, 'E2E 插画请求范围'); const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
   const view = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
   const fork = await (await page.request.post(`/api/branches/${branchId}/fork`, { data: { baseRevisionId: view.branch.revisionId, name: '插画请求其他线' } })).json();
@@ -1431,7 +1433,7 @@ test('生图取消的迟到响应不会跨阅读视图或故事线显示作者�
 test('专用生图提示词、AI 尺寸、两人物 CG 参考、Nano Banana 2 与 Together 参数及失败隔离', async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const previous = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-advanced-image-provider';
   expect((await page.request.put('/api/settings', { data: { providers: [{ id: providerId, name: '高级生图本地验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-image-prompt', extractionProviderId: providerId, extractionModel: 'e2e-fixture', imageSettings: { providerId, model: 'gpt-image-1', protocol: 'openai-images', size: '1024x1024', quality: 'auto', stylePrompt: '', autoPortrait: false, autoCG: false, timeoutMs: 120000, useCharacterReferences: true } } })).ok()).toBeTruthy();
   try {
@@ -1493,7 +1495,7 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
   test.setTimeout(180_000);
   const viewerErrors: string[] = []; page.on('pageerror', error => viewerErrors.push(error.message));
   const auth = await (await page.request.get('/api/auth/status')).json();
-  if (!auth.initialized) expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   const previous = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-image-selection-provider';
   expect((await page.request.put('/api/settings', { data: { providers: [{ id: providerId, name: '图片选择本地验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-image-prompt', extractionProviderId: providerId, extractionModel: 'e2e-fixture', imageSettings: { providerId, model: 'gpt-image-1', protocol: 'openai-images', size: '1024x1024', quality: 'auto', stylePrompt: '', autoPortrait: false, autoCG: false, timeoutMs: 120000, useCharacterReferences: true } } })).ok()).toBeTruthy();
   try {
@@ -1628,8 +1630,8 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
 });
 
 async function taskSettingsAuthentication(page: Page) {
-  if (!(await (await page.request.get('/api/auth/status')).json()).initialized) {
-    expect((await page.request.post('/api/auth/setup', { data: { password } })).ok()).toBeTruthy();
+  if (!(await (await page.request.get('/api/auth/status')).json()).authenticated) {
+    expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
   }
 }
 

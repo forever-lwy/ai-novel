@@ -8,28 +8,31 @@ import { buildApp } from '../server/app.js';
 import { httpSecurityConfig, safeRequestLog, RequestRateLimit } from '../server/http-security.js';
 import { secureDataDirectory } from '../server/private-files.js';
 import { checkBackupSize } from '../server/backup-limits.js';
+import { verifyPassword } from '../server/security.js';
 import type { FastifyRequest } from 'fastify';
 import type { WritingEvent } from '../shared/types.js';
 
 const contexts: Awaited<ReturnType<typeof buildApp>>[] = []; const directories: string[] = [];
 const password = 'fixture-account-password';
-beforeEach(() => { for (const name of ['PUBLIC_ORIGIN', 'COOKIE_SECURE', 'TRUSTED_PROXIES', 'HOST', 'OUTBOUND_ALLOWED_ORIGINS']) vi.stubEnv(name, ''); vi.stubEnv('NODE_ENV', 'test'); });
+beforeEach(() => { for (const name of ['PUBLIC_ORIGIN', 'COOKIE_SECURE', 'TRUSTED_PROXIES', 'HOST', 'OUTBOUND_ALLOWED_ORIGINS', 'INITIAL_PASSWORD']) vi.stubEnv(name, ''); vi.stubEnv('NODE_ENV', 'test'); });
 afterEach(async () => { for (const context of contexts.splice(0)) await context.app.close(); for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); vi.unstubAllEnvs(); });
-async function make() { const dataDir = mkdtempSync(join(tmpdir(), 'novel-http-security-')); directories.push(dataDir); const context = await buildApp({ dataDir, startEngine: false, staticDir: join(dataDir, 'no-web') }); contexts.push(context); return context; }
-async function setup(context: Awaited<ReturnType<typeof make>>) { const response = await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password } }); expect(response.statusCode).toBe(200); return response.cookies.find(cookie => cookie.name === 'session')!.value; }
+async function make() { const dataDir = mkdtempSync(join(tmpdir(), 'novel-http-security-')); directories.push(dataDir); const context = await buildApp({ dataDir, startEngine: false, staticDir: join(dataDir, 'no-web'), initialPassword: password }); contexts.push(context); return context; }
+async function setup(context: Awaited<ReturnType<typeof make>>) { const response = await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password } }); expect(response.statusCode).toBe(200); return response.cookies.find(cookie => cookie.name === 'session')!.value; }
 
 describe('HTTP authentication and deployment boundaries', () => {
   it('applies session protection to the matched route regardless of prefix spelling', async () => {
     const context = await make(); await setup(context);
     for (const url of ['/api/settings', '/%61pi/settings', '/a%70i/projects']) expect((await context.app.inject(url)).statusCode).toBe(401);
   });
-  it('uses a local installation code and secure cookies for a configured HTTPS site', async () => {
+  it('initializes before serving and uses secure cookies for a configured HTTPS site', async () => {
     vi.stubEnv('PUBLIC_ORIGIN', 'https://novel.example');
-    const context = await make(); const path = join(context.dataDir, '.setup-token'); const code = readFileSync(path, 'utf8');
-    const status = await context.app.inject('/api/auth/status'); expect(status.json().setupTokenRequired).toBe(true); expect(status.body).not.toContain(code);
-    expect((await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password } })).statusCode).toBe(403);
-    const result = await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password, setupToken: code } });
-    expect(result.statusCode).toBe(200); expect(String(result.headers['set-cookie'])).toContain('Secure'); expect(existsSync(path)).toBe(false);
+    const context = await make();
+    const status = await context.app.inject('/api/auth/status'); expect(status.json()).toEqual({ initialized: true, authenticated: false });
+    expect(status.body).not.toContain(password); expect(status.body).not.toContain(context.settings.meta('password')!);
+    expect(existsSync(join(context.dataDir, '.setup-token'))).toBe(false);
+    expect((await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password } })).statusCode).toBe(404);
+    const result = await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password } });
+    expect(result.statusCode).toBe(200); expect(String(result.headers['set-cookie'])).toContain('Secure');
     const session = result.cookies.find(cookie => cookie.name === 'session')!.value;
     expect((await context.app.inject({ method: 'POST', url: '/api/projects', cookies: { session }, headers: { origin: 'http://novel.example' }, payload: { title: 'fixture' } })).statusCode).toBe(403);
   });
@@ -38,10 +41,41 @@ describe('HTTP authentication and deployment boundaries', () => {
     vi.stubEnv('TRUSTED_PROXIES', '127.0.0.1,::1'); expect(httpSecurityConfig().trustedProxies).toEqual(['127.0.0.1', '::1']);
     vi.stubEnv('PUBLIC_ORIGIN', 'https://novel.example'); vi.stubEnv('COOKIE_SECURE', 'false'); expect(() => httpSecurityConfig()).toThrow('安全 Cookie');
   });
-  it('requires a local installation code even for a loopback production listener', async () => {
-    vi.stubEnv('NODE_ENV', 'production'); const context = await make();
-    expect((await context.app.inject('/api/auth/status')).json().setupTokenRequired).toBe(true);
-    expect((await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password } })).statusCode).toBe(403);
+  it('rejects missing or invalid initial passwords before starting an empty database', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const dataDir = mkdtempSync(join(tmpdir(), 'novel-bootstrap-security-')); directories.push(dataDir);
+    const options = { dataDir, startEngine: false, staticDir: join(dataDir, 'no-web') };
+    for (const value of [undefined, '', 'short']) {
+      vi.stubEnv('INITIAL_PASSWORD', value);
+      expect(process.env.INITIAL_PASSWORD).toBe(value);
+      let failure: unknown;
+      try { const unexpected = await buildApp(options); contexts.push(unexpected); }
+      catch (error) { failure = error; }
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain('INITIAL_PASSWORD');
+      if (value) expect((failure as Error).message).not.toContain(value);
+    }
+    vi.stubEnv('INITIAL_PASSWORD', password);
+    const context = await buildApp(options); contexts.push(context);
+    expect(await verifyPassword(password, context.settings.meta('password')!)).toBe(true);
+    expect((await context.app.inject('/api/auth/status')).json()).toEqual({ initialized: true, authenticated: false });
+  });
+  it('preserves a changed password on restart and removes an obsolete installation token', async () => {
+    const context = await make(), session = await setup(context), replacement = 'Changed-Fixture-Password-84';
+    const changed = await context.app.inject({ method: 'POST', url: '/api/auth/password', cookies: { session }, payload: { currentPassword: password, password: replacement } });
+    expect(changed.statusCode).toBe(200);
+    const stored = context.settings.meta('password')!;
+    const dataDir = context.dataDir;
+    await context.app.close(); contexts.splice(contexts.indexOf(context), 1);
+    const path = join(dataDir, '.setup-token'); writeFileSync(path, 'obsolete-fixture-token');
+    for (const initial of [undefined, 'weak', password]) {
+      vi.stubEnv('INITIAL_PASSWORD', initial);
+      const reopened = await buildApp({ dataDir, startEngine: false, staticDir: join(dataDir, 'no-web') }); contexts.push(reopened);
+      expect(reopened.settings.meta('password')).toBe(stored); expect(existsSync(path)).toBe(false);
+      expect((await reopened.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: replacement } })).statusCode).toBe(200);
+      expect((await reopened.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password } })).statusCode).toBe(401);
+      await reopened.app.close(); contexts.splice(contexts.indexOf(reopened), 1);
+    }
   });
   it('keeps login failure limits separate for visitors forwarded by a trusted proxy', async () => {
     vi.stubEnv('TRUSTED_PROXIES', '127.0.0.1'); const context = await make(); await setup(context);

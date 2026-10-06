@@ -186,7 +186,7 @@ const modelServer = createServer(async (req, res) => {
 modelServer.listen(mockPort, '127.0.0.1'); await once(modelServer, 'listening');
 const { buildApp } = await import('../dist/server/app.js');
 // Browser regression logs in and imports many independent fixtures; security limit tests use defaults.
-const { app } = await buildApp({ dataDir, staticDir, requireSetupToken: false, rateLimits: { login: 1000, imports: 1000, models: 1000 } });
+const { app } = await buildApp({ dataDir, staticDir, initialPassword: 'browser-test-password-123', rateLimits: { login: 1000, imports: 1000, models: 1000 } });
 await app.listen({ port, host: '127.0.0.1' });
 console.log(`E2E only: http://127.0.0.1:${port}; mock model on ${mockPort}; isolated data ${dataDir}`);
 let closing = false;

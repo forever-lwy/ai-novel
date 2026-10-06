@@ -13,15 +13,15 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const context = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-client-api-')), startEngine: false });
+  const context = await buildApp({ initialPassword: 'client-api-test-password', dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-client-api-')), startEngine: false });
   apps.push(context);
   const received: { method: string; path: string; contentType?: string; customHeader?: string }[] = [];
   context.app.addHook('onRequest', async request => {
     received.push({ method: request.method, path: request.url, contentType: request.headers['content-type'], customHeader: request.headers['x-regression'] as string | undefined });
   });
-  const setup = await context.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'client-api-test-password' } });
-  expect(setup.statusCode).toBe(200);
-  const session = setup.cookies.find(cookie => cookie.name === 'session')!.value;
+  const loginResponse = await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'client-api-test-password' } });
+  expect(loginResponse.statusCode).toBe(200);
+  const session = loginResponse.cookies.find(cookie => cookie.name === 'session')!.value;
   received.length = 0;
   // Keep the real client helpers and Fastify JSON/multipart parsers. Only bridge
   // browser fetch to injection; native Request performs FormData boundary encoding.

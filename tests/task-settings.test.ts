@@ -12,9 +12,9 @@ const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 afterEach(async () => { for (const ctx of apps.splice(0)) await ctx.app.close(); });
 const base = { providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '' };
 async function context() {
-  const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-task-settings-')), startEngine: false }); apps.push(ctx);
-  const setup = await ctx.app.inject({ method: 'POST', url: '/api/auth/setup', payload: { password: 'task-settings-fixture' } });
-  return { ...ctx, cookies: { session: setup.cookies.find(cookie => cookie.name === 'session')!.value } };
+  const ctx = await buildApp({ initialPassword: 'task-settings-fixture', dataDir: mkdtempSync(join(tmpdir(), 'novel-task-settings-')), startEngine: false }); apps.push(ctx);
+  const loginResponse = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'task-settings-fixture' } });
+  return { ...ctx, cookies: { session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value } };
 }
 
 describe('task settings compatibility and validation', () => {
