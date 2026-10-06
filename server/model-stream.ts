@@ -80,9 +80,31 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
   };
 }
 
+/** Gemini can interleave public thought and prose parts inside one SSE event.
+ * These fragments are only for callbacks; captures and signed history retain
+ * the original frame. Only the last fragment carries its completion metadata.
+ */
+export function streamFrameFragments(protocol: ProviderProtocol, frame: string): string[] {
+  if (protocol !== 'gemini') return [frame];
+  const item = event(frame.replace(/^\uFEFF/, ''), true);
+  let data: Json;
+  try { const parsed: unknown = JSON.parse(item.data); if (!object(parsed)) return [frame]; data = parsed; } catch { return [frame]; }
+  const candidate = objects(data.candidates).find(value => value.index === undefined || value.index === 0);
+  const parts = objects(candidate?.content?.parts);
+  if (!candidate || parts.length < 2) return [frame];
+  const { finishReason, ...unfinished } = candidate;
+  const { promptFeedback, error, ...content } = data;
+  return parts.map((part, index) => {
+    const last = index === parts.length - 1;
+    const fragment = { ...content, ...(last && promptFeedback !== undefined ? { promptFeedback } : {}), ...(last && error !== undefined ? { error } : {}), candidates: [{ ...unfinished, content: { ...candidate.content, parts: [part] }, ...(last && finishReason !== undefined ? { finishReason } : {}) }] };
+    return `${item.name ? `event: ${item.name}\n` : ''}data: ${JSON.stringify(fragment)}\n\n`;
+  });
+}
+
 /** Read only publicly returned reasoning text, never opaque provider signatures. */
 export function createStreamActivityEmitter(protocol: ProviderProtocol, emit: (event: ModelActivityEvent) => void): { feed: (chunk: string) => void; finish: () => void } {
   let pending = ''; let geminiBlock = 0; let geminiThinking = false;
+  let chatBlock = 0;
   const claudeThinking = new Set<number>();
   const responseIds = new Map<number, string | number>();
   const blocks = new Map<string, { text: string; done: boolean }>();
@@ -119,7 +141,12 @@ export function createStreamActivityEmitter(protocol: ProviderProtocol, emit: (e
       if (protocol === 'openai-chat') {
         const choice = objects(data.choices).find(value => value.index === undefined || value.index === 0);
         const delta = choice?.delta;
-        append('chat:reasoning', typeof delta?.reasoning_content === 'string' ? delta.reasoning_content : delta?.reasoning);
+        const id = chatBlock ? `chat:reasoning:${chatBlock}` : 'chat:reasoning';
+        append(id, typeof delta?.reasoning_content === 'string' ? delta.reasoning_content : delta?.reasoning);
+        if ((typeof delta?.content === 'string' && delta.content.length > 0) || objects(delta?.tool_calls).length) {
+          const block = blocks.get(id);
+          if (block && !block.done) { done(id); chatBlock++; }
+        }
         if (choice?.finish_reason) finish();
       } else if (protocol === 'openai-responses') {
         const id = `responses:${responseId(data.output_index ?? 0, data.item_id ?? data.item?.id)}:${data.summary_index ?? 0}`;

@@ -10,7 +10,7 @@ import type { ExtractionResult, Job, ModelRequest, PlanningResult, Settings } fr
 const cleanup: { store: Store; engine: StoryEngine }[] = [];
 afterEach(async () => { for (const context of cleanup.splice(0)) { await context.engine.close(); context.store.close(); } });
 const extraction = (): ExtractionResult => ({ summary: '记录员完成检查。', entities: [], relations: [], foreshadows: [] });
-const planning = (): PlanningResult => ({ fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第${chapter}章`, goal: '检查设备并记录线索。' })), foreshadows: [] });
+const planning = (next = 1): PlanningResult => ({ fine: Array.from({ length: 4 }, (_, index) => ({ chapter: next + index, title: `第${next + index}章`, goal: '检查设备并记录线索。' })), foreshadows: [] });
 const settings = (): Settings => ({ providers: [{ id: 'fixture', name: '中性模拟服务', protocol: 'gemini', baseUrl: 'http://unused.invalid', model: 'fixture', apiKey: 'test-configured-key-DO-NOT-PERSIST', maxOutputTokens: 4096, contextTokens: 64000 }], planningProviderId: 'fixture', writingProviderId: 'fixture', extractionProviderId: 'fixture' });
 function provider(response: (request: ModelRequest, writing: boolean) => Promise<string> | string): TextModels {
   const text = async (request: ModelRequest, writing: boolean) => { const body = await response(request, writing); request.onResponse?.({ rawResponse: JSON.stringify({ candidates: [{ content: { parts: [{ text: body }] } }] }), text: body, inputTokens: 13, outputTokens: 21, httpStatus: 200 }); return body; };
@@ -57,10 +57,10 @@ describe('author-only persisted model output recovery (neutral, simulated respon
   });
 
   it('persists business-invalid planning and applies a full four-chapter plan locally', async () => {
-    let calls = 0; const badPlan = planning(); badPlan.fine = badPlan.fine.slice(0, 1); const context = make(provider(() => { calls++; return JSON.stringify(badPlan); }));
+    let calls = 0; const badPlan = planning(2); badPlan.fine = badPlan.fine.slice(0, 1); const context = make(provider(() => { calls++; return JSON.stringify(badPlan); }), '记录员完成前一章检查。');
     const job = context.engine.enqueue(context.project.mainBranchId, 'plan', { baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId }); await waitJob(context.engine, job.id);
     const outputId = context.engine.listOutputs(job.id)[0].id; expect(context.engine.outputDetail(job.id, outputId).output.issues[0].path).toBe('fine');
-    expect(apply(context.engine, job, outputId, JSON.stringify(planning())).status).toBe('completed'); expect(calls).toBe(1); expect(context.store.state(context.project.mainBranchId).outline.fine).toHaveLength(4);
+    expect(apply(context.engine, job, outputId, JSON.stringify(planning(2))).status).toBe('completed'); expect(calls).toBe(1); expect(context.store.state(context.project.mainBranchId).outline.fine).toHaveLength(4);
   });
 
   it('keeps truncated writing, applies corrected prose, and pauses before any extraction request', async () => {

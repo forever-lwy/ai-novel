@@ -245,7 +245,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
         {role.role === 'planning' && <>
           <label className="checkbox"><input type="checkbox" aria-label="启用剧情规划" checked={tasks.planning.enabled} onChange={e => updateTaskSettings('planning', { enabled: e.target.checked })} />启用剧情规划</label>
           <label>剧情规划方式<select aria-label="剧情规划方式" value={tasks.planning.mode} disabled={!tasks.planning.enabled} onChange={e => updateTaskSettings('planning', { mode: e.target.value as TaskSettings['planning']['mode'] })}><option value="separate">独立规划模型</option><option value="tool">写作 AI 工具</option></select></label>
-          <p className="hint">{!tasks.planning.enabled ? '关闭后，写作不使用预期规划，也不会生成新规划。已有规划仍可查看和手动编辑。' : tasks.planning.mode === 'tool' ? '写作 AI 通过 update_plot_plan 直接提交当前章及后 3 章的规划，随正文一起保存，不调用独立规划模型。' : '使用下面配置的模型，通过“让 AI 规划”单独生成预期规划。'}</p>
+          <p className="hint">{!tasks.planning.enabled ? '关闭后，写作不使用预期规划，也不会生成新规划。已有规划仍可查看和手动编辑。' : tasks.planning.mode === 'tool' ? '正文完整保存后，写作 AI 通过 update_plot_plan 规划接下来的 4 章，不调用独立规划模型；规划失败可单独重试，不重新生成正文。' : '正文完整保存后，使用下面配置的模型规划接下来的 4 章。已有正文时，也可通过“让 AI 规划”单独更新预期规划。'}</p>
           <p className="hint">下面的模型配置同时用于摘要压缩和默认生图提示词优化。关闭规划或切换到工具模式时，配置仍会保留。</p>
         </>}
         <label>供应商<select aria-label={`${role.label}供应商`} value={settings[role.providerKey]} onChange={e => updateRole(role, e.target.value)}><option value="">暂不设置</option>{settings.providers.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>

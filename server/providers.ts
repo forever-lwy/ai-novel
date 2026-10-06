@@ -3,7 +3,7 @@ import { providerFetch } from './outbound.js';
 import { createSecretStreamRedactor, redactSseFragments, secretVariants } from './stream-redaction.js';
 import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequestSnapshot, ModelResult, ModelToolCall, ModelToolContinuation, ModelTransportDiagnostics, OutputIssue, ProviderConfig } from '../shared/types.js';
 import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions } from './provider-options.js';
-import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream } from './model-stream.js';
+import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream, streamFrameFragments } from './model-stream.js';
 export { validateProviderOptions } from './provider-options.js';
 
 export const MODEL_TIMEOUT_MS = DEFAULT_MODEL_TIMEOUT_MS;
@@ -295,7 +295,7 @@ export function buildRequestSnapshot(config: ProviderConfig, request: ModelReque
   return requestSnapshot(config, continuationWire(config, request));
 }
 
-async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
+async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void, onContent?: () => void): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
   if (!response.body) return { raw: '', bytes: 0, incomplete: false };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -305,12 +305,29 @@ async function readBody(response: Response, config: ProviderConfig, onTextDelta?
   const redactor = createSecretStreamRedactor(config.apiKey ? [config.apiKey] : [], text => onTextDelta?.(text));
   const emit = createStreamTextEmitter(config.protocol, text => redactor.feed(text));
   const activities = createStreamActivityEmitter(config.protocol, event => onActivity?.(event));
+  let pendingFrames = '';
+  const dispatchFrames = (decoded: string) => {
+    pendingFrames += decoded;
+    let separator: RegExpExecArray | null;
+    while ((separator = /\r\n\r\n|\n\n|\r\r/.exec(pendingFrames))) {
+      const end = separator.index + separator[0].length;
+      const frame = pendingFrames.slice(0, end); pendingFrames = pendingFrames.slice(end);
+      // A network chunk can contain prose between several thought/tool frames.
+      // Preserve frame order so activities anchor to prose already made visible.
+      for (const fragment of streamFrameFragments(config.protocol, frame)) { activities.feed(fragment); emit(fragment); }
+      if (detector(frame)) return true;
+    }
+    return false;
+  };
   let length = 0;
   let error: 'limit' | 'read' | undefined;
   try {
     while (true) {
       const next = await reader.read();
       if (next.done) break;
+      // Transport content includes reasoning, tools, heartbeat frames and partial
+      // UTF-8/JSON fragments, even before any visible prose can be parsed.
+      if (next.value.byteLength) onContent?.();
       const remaining = MAX_RESPONSE_BYTES - length;
       if (next.value.byteLength > remaining) {
         if (remaining) chunks.push(next.value.subarray(0, remaining));
@@ -322,8 +339,7 @@ async function readBody(response: Response, config: ProviderConfig, onTextDelta?
       chunks.push(next.value);
       length += next.value.byteLength;
       const decoded = decoder.decode(next.value, { stream: true });
-      if (streaming) { activities.feed(decoded); emit(decoded); }
-      if (streaming && detector(decoded)) {
+      if (streaming && dispatchFrames(decoded)) {
         // End events are authoritative. Some gateways keep a finished SSE socket open.
         try { await reader.cancel(); } catch { /* All protocol events were received. */ }
         break;
@@ -360,6 +376,8 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
   const started = Date.now();
   const controller = new AbortController();
   let timedOut = false;
+  let streamingResponse = snapshot.stream;
+  let receivedContent = false;
   let captured = false;
   let capturedTokens = { inputTokens: 0, outputTokens: 0 };
   let response: Response | undefined;
@@ -413,14 +431,18 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     if (request.signal?.aborted) { transport = 'cancelled'; controller.abort(); throw new Error('模型请求已取消。'); }
     try {
       // Never forward credentials to a redirect target, including same-origin redirects.
-      response = await providerFetch(wire.url, { method: 'POST', headers: wire.headers, body: JSON.stringify(wire.body), signal: controller.signal, redirect: 'error' });
+      response = await providerFetch(wire.url, { method: 'POST', headers: wire.headers, body: JSON.stringify(wire.body), signal: controller.signal, redirect: 'error' }, { timeoutManagedBySignal: true });
     } catch (error) {
       transport = request.signal?.aborted ? 'cancelled' : timedOut ? 'timeout' : 'network_error';
       const code = (error as { cause?: { code?: unknown }; code?: unknown })?.cause?.code ?? (error as { code?: unknown })?.code;
       if (typeof code === 'string' && /^(?:E[A-Z0-9_]{1,50}|UND_ERR_[A-Z0-9_]{1,40}|ABORT_ERR)$/.test(code)) errorCode = code;
       throw new Error('无法连接模型服务，请检查服务地址、网络和接口配置。');
     }
-    received = await readBody(response, { ...config, stream: snapshot.stream }, response.ok ? request.onTextDelta : undefined, response.ok ? request.onActivity : undefined);
+    streamingResponse ||= Boolean(response.headers.get('content-type')?.includes('text/event-stream'));
+    received = await readBody(response, { ...config, stream: snapshot.stream }, response.ok ? request.onTextDelta : undefined, response.ok ? request.onActivity : undefined, streamingResponse ? () => {
+      receivedContent = true;
+      if (!controller.signal.aborted) timer.refresh();
+    } : undefined);
     transport = request.signal?.aborted ? 'cancelled' : timedOut ? 'timeout' : received.error === 'read' ? 'interrupted' : 'http';
     const { data, tokens, streamError } = capture();
     if (data && response.ok && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) emitResponseActivities(config.protocol, data, event => request.onActivity?.(event));
@@ -464,7 +486,10 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     if (!captured) capture();
     const transportFailure = (message: string) => capturedTokens.inputTokens || capturedTokens.outputTokens ? new ModelOutputError(message, capturedTokens) : new Error(message);
     if (request.signal?.aborted) throw transportFailure('模型请求已取消。');
-    if (timedOut) throw transportFailure(`模型请求超时（${snapshot.timeoutMs / 1000} 秒），请缩小生成范围或检查服务后重试。`);
+    if (timedOut) {
+      const phase = streamingResponse ? receivedContent ? '流式响应空闲' : '等待首段响应内容' : '模型请求';
+      throw transportFailure(`${phase}超时（${snapshot.timeoutMs / 1000} 秒），请检查模型服务后手动重试。`);
+    }
     // Network/JSON diagnostics deliberately never include response bodies, URLs or keys.
     if (error instanceof TypeError) throw new Error('读取模型响应失败，请检查网络连接后手动重试。');
     throw error;
@@ -508,10 +533,13 @@ function activityEmitter(config: ProviderConfig, request: ModelRequest, round: n
   const deliver = (event: ModelActivityEvent) => { if (request.onActivity) request.onActivity(JSON.parse(redactModelPayload(JSON.stringify({ ...event, id: `round-${round + 1}:${event.id}` }), keys)) as ModelActivityEvent); };
   const flush = (id: string, finished = false) => {
     const thought = thoughts.get(id); if (!thought) return;
-    const safe = JSON.parse(redactModelPayload(JSON.stringify({ type: 'thinking', id, text: thought.raw }), keys)).text as string;
-    let end = safe.length;
-    // Do not publish a credential prefix which the next reasoning delta could complete.
-    if (!finished) for (const variant of variants) for (let length = Math.min(variant.length - 1, safe.length); length > 0; length--) if (safe.endsWith(variant.slice(0, length))) { end = Math.min(end, safe.length - length); break; }
+    let safe = JSON.parse(redactModelPayload(JSON.stringify({ type: 'thinking', id, text: thought.raw }), keys)).text as string;
+    let keep = 0;
+    // A prose boundary may end this thought before another block continues the
+    // credential. Do not release its withheld prefix when closing the block.
+    for (const variant of variants) for (let length = Math.min(variant.length - 1, safe.length); length > keep; length--) if (safe.endsWith(variant.slice(0, length))) { keep = length; break; }
+    if (finished && keep) safe = safe.slice(0, -keep) + '[REDACTED]';
+    let end = safe.length - (finished ? 0 : keep);
     // An unfinished JSON thought may contain another JSON document in a string;
     // wait until recursive field redaction can inspect the complete document.
     if (!finished) { const jsonStart = safe.search(/[\[{]\s*"/); if (jsonStart >= 0) { try { JSON.parse(thought.raw.slice(jsonStart)); } catch { end = Math.min(end, jsonStart); } } }

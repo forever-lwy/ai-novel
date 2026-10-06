@@ -63,7 +63,7 @@ const settings = (): Settings => ({
   providers: [{ id: 'fixture', name: '本地模拟模型', protocol: 'openai-chat', baseUrl: 'http://unused.invalid/v1', model: 'fixture', maxOutputTokens: 1024, contextTokens: 64000 }],
   writingProviderId: 'fixture', planningProviderId: 'fixture', extractionProviderId: 'fixture',
 });
-const plan = (): PlanningResult => ({ coarse: '旅人寻找归途', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第 ${chapter} 章`, goal: '继续寻找线索' })), foreshadows: [] });
+const plan = (next = 1): PlanningResult => ({ coarse: '旅人寻找归途', fine: Array.from({ length: 4 }, (_, index) => ({ chapter: next + index, title: `第 ${next + index} 章`, goal: '继续寻找线索' })), foreshadows: [] });
 function engineFor(store: Store, models: TextModels = {
   generateText: async () => ({ text: '模拟正文', inputTokens: 10, outputTokens: 10 }),
   generateStructured: async (_provider, _request, validate) => ({ value: validate(plan()), inputTokens: 10, outputTokens: 10 }),
@@ -278,6 +278,8 @@ describe('novel deletion', () => {
     const store = makeStore();
     const project = store.createProject({ title: '删除时仍在生成' });
     const keep = store.createProject({ title: '独立小说继续工作' });
+    const deletedReady = append(store, project.mainBranchId, '删除前已经完成的正文。');
+    const keepReady = append(store, keep.mainBranchId, '保留作品已经完成的正文。');
     const prepared = store.updateOutline(project.mainBranchId, store.getBranch(project.mainBranchId).revisionId, { ...plan(), locked: '' });
     const pausedBranch = store.fork(project.mainBranchId, { baseRevisionId: prepared.branch.revisionId, name: '暂停分支' });
     const failedBranch = store.fork(project.mainBranchId, { baseRevisionId: prepared.branch.revisionId, name: '失败分支' });
@@ -286,7 +288,7 @@ describe('novel deletion', () => {
     let request: ModelRequest | undefined;
     const engine = engineFor(store, {
       generateText: async (_provider, incoming) => { request = incoming; return gate.promise; },
-      generateStructured: async (_provider, _request, validate) => ({ value: validate(plan()), inputTokens: 10, outputTokens: 10 }),
+      generateStructured: async (_provider, _request, validate) => ({ value: validate(plan(2)), inputTokens: 10, outputTokens: 10 }),
     });
     const paused = engine.enqueue(pausedBranch.branch.id, 'plan', { baseRevisionId: pausedBranch.branch.revisionId });
     engine.action(paused.id, 'pause');
@@ -322,7 +324,9 @@ describe('novel deletion', () => {
     expect(engine.listJobs(project.id)).toEqual([]);
     expect(store.outputs.all(project.id)).toEqual([]);
     expect(count(store, 'job_import_chapters', 'job_id', queued.id)).toBe(0);
-    expect(count(store, 'chapter_texts')).toBe(0);
+    expect(count(store, 'chapter_texts')).toBe(1);
+    expect(count(store, 'chapter_texts', 'id', deletedReady.state.chapters[0].id)).toBe(0);
+    expect(store.chapter(keep.mainBranchId, keepReady.state.chapters[0].id).text).toBe('保留作品已经完成的正文。');
     expect(() => request!.onResponse!({ rawResponse: '更晚的回调', text: '更晚的回调', inputTokens: 10, outputTokens: 10 })).not.toThrow();
     expect(count(store, 'jobs', 'project_id', project.id)).toBe(0);
     expect(count(store, 'model_outputs', 'project_id', project.id)).toBe(0);

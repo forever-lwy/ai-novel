@@ -472,3 +472,12 @@
 .account-security-card h3{font-size:16px;color:#34553e;margin:0}
 .account-security-card .settings-section-fields{gap:16px}
 @media(max-width:760px){.account-security-card{padding:16px}.account-security-card h3{font-size:14px}.account-security-card .button{font-size:12px}}
+.writing-activities.writing-activities-inline{margin:14px 0;padding:12px 14px;max-width:none}
+.writing-activities-inline .writing-activities-heading h2{font-size:12px}
+.writing-timeline .prose p.prose-continuation{text-indent:0}
+.writing-timeline .prose p.prose-interrupted{margin-bottom:0}
+.streaming-prose .prose p,.streaming-prose.prose>p{scroll-margin-top:90px}
+.generation-controls{display:flex;flex-direction:column;gap:12px;margin-top:24px;padding:16px;border:1px solid #dfe7d6;border-radius:8px;background:#f8faf3}
+.generation-controls>.hint{margin:0;line-height:1.8}
+.generation-controls>.row:empty{display:none}
+@media(max-width:760px){.writing-activities.writing-activities-inline{margin:12px 0;padding:10px 11px}.generation-controls{padding:12px;margin-top:18px}.generation-controls .button{font-size:11px;padding:8px 10px}.streaming-prose .prose p,.streaming-prose.prose>p{scroll-margin-top:80px}}

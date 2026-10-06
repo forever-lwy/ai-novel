@@ -64,12 +64,14 @@ it('uses the selected message blocks and story variables for writing, planning a
     generateText: vi.fn(async (_provider, request) => { calls.push(request); return { text: '旅人来到桥边。', inputTokens: 2, outputTokens: 3 }; }),
     generateStructured: vi.fn(async (_provider, request, validate) => {
       calls.push(request);
-      const value = request.system.includes('planning') ? { fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `规划${chapter}`, goal: '未发生剧情' })), foreshadows: [] } : { summary: '旅人来到桥边。', entities: [], relations: [], foreshadows: [] };
+      const value = request.system.includes('planning') ? { fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `规划${chapter}`, goal: '未发生剧情' })), foreshadows: [] } : { summary: '旅人来到桥边。', entities: [], relations: [], foreshadows: [] };
       return { value: validate(value), inputTokens: 2, outputTokens: 3 };
     }),
   };
   const store = new Store(mkdtempSync(join(tmpdir(), 'novel-prompt-engine-'))); stores.push(store);
   const project = store.createProject({ title: '模板作品', premise: '古城长夜' });
+  const saved = store.saveChapter(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, title: '已有开场', text: '旅人离开村庄。' });
+  store.applyExtraction(project.mainBranchId, saved.branch.revisionId, saved.state.chapters[0].id, { summary: '旅人离开村庄。', entities: [], relations: [], foreshadows: [] }, true);
   const engine = new StoryEngine(store, () => settings, models); engines.push(engine); engine.start();
   const plan = engine.enqueue(project.mainBranchId, 'plan', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, instruction: '安排相遇' });
   expect((await terminal(engine, plan.id)).status).toBe('completed');
@@ -77,8 +79,9 @@ it('uses the selected message blocks and story variables for writing, planning a
   expect((await terminal(engine, writing.id)).status).toBe('completed');
   const extraction = engine.listJobs().find(value => value.kind === 'extract')!;
   expect((await terminal(engine, extraction.id)).status).toBe('completed');
-  expect(calls.map(request => request.messages![0].content)).toEqual(['planning 模板作品', 'writing 模板作品', 'extraction 模板作品']);
-  expect(calls[1].messages!.slice(1)).toEqual([{ role: 'assistant', content: '预设示例' }, { role: 'user', content: '古城长夜\n写旅人\n1' }]);
+  expect(calls.map((request, index) => request.messages![index === 1 ? 1 : 0].content)).toEqual(['planning 模板作品', 'writing 模板作品', 'extraction 模板作品']);
+  expect(calls[1].messages![0]).toEqual({ role: 'system', content: expect.stringContaining('当前阶段只生成正文') });
+  expect(calls[1].messages!.slice(1)).toEqual([{ role: 'system', content: 'writing 模板作品' }, { role: 'assistant', content: '预设示例' }, { role: 'user', content: '古城长夜\n写旅人\n2' }]);
   expect(calls[2].prompt).toContain('[1] 旅人来到桥边。');
   expect(calls[0].messages!.at(-1)!.role).toBe('system');
 });

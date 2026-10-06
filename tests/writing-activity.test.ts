@@ -24,6 +24,51 @@ function start(context: ReturnType<typeof harness>) { return context.engine.enqu
 const activityEvents = (events: WritingEvent[]): WritingActivity[] => events.flatMap(event => event.type === 'activity' ? [event.activity] : []);
 
 describe('author writing activity persistence and streaming', () => {
+  it('anchors activity to UTF-16 prose positions and keeps its first position through updates and backup', async () => {
+    const prefix = '前言🙂\r\n途中'; const middle = '，旅人继续。'; const suffix = '\n后来见到石碑。';
+    const context = harness(models(async request => {
+      request.onActivity?.({ type: 'thinking', id: 'opening', text: '先确认起点。' });
+      request.onActivity?.({ type: 'thinking_done', id: 'opening' });
+      request.onTextDelta?.(prefix);
+      request.onActivity?.({ type: 'tool_call', id: 'at-journey', name: 'search_story', arguments: { q: '途中' } });
+      request.onTextDelta?.(middle);
+      request.onActivity?.({ type: 'tool_result', id: 'at-journey', name: 'search_story', result: '找到资料。' });
+      request.onActivity?.({ type: 'thinking', id: 'after-journey', text: '确认行动后果。' });
+      request.onTextDelta?.(suffix);
+      request.onActivity?.({ type: 'thinking', id: 'after-journey', text: '继续核对。' });
+      request.onActivity?.({ type: 'thinking_done', id: 'after-journey' });
+      return prefix + middle + suffix;
+    }));
+    const writing = start(context); const events: WritingEvent[] = []; context.engine.subscribeWriting(writing.id, event => events.push(event));
+    expect((await terminal(context.engine, writing.id)).status).toBe('completed');
+    const activities = context.engine.listWritingActivities(writing.id);
+    expect(activities.map(activity => activity.proseOffset)).toEqual([0, prefix.length, prefix.length + middle.length]);
+    expect(activityEvents(events).filter(activity => activity.id === 'at-journey').every(activity => activity.proseOffset === prefix.length)).toBe(true);
+    expect(activities[2].text).toBe('确认行动后果。继续核对。');
+    expect(context.engine.writingSnapshot(writing.id).text).toBe(prefix + middle + suffix);
+    const restored = context.store.restoreProject(context.store.exportProject(context.project.id));
+    const restoredWriting = context.engine.listJobs(restored.id).find(job => job.kind === 'generate')!;
+    expect(context.engine.listWritingActivities(restoredWriting.id).map(activity => activity.proseOffset)).toEqual(activities.map(activity => activity.proseOffset));
+  });
+
+  it('uses author-visible redacted prose positions and preserves legacy unpositioned activity', async () => {
+    const context = harness(models(async () => '最终正文。'));
+    const writing = context.engine.enqueue(context.project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '' });
+    context.engine.action(writing.id, 'pause');
+    context.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?)').run(writing.id, '开头 fixture-secret 后文');
+    const redact = (value: string) => value.replaceAll('fixture-secret', '[REDACTED]');
+    const positioned = context.store.recordWritingActivity(writing.id, { type: 'tool_call', id: 'positioned', name: 'search_story', arguments: {} }, redact)!;
+    expect(positioned.proseOffset).toBe('开头 [REDACTED] 后文'.length);
+    context.store.db.prepare('INSERT INTO job_writing_activities VALUES(?,?,?)').run(writing.id, 'legacy', JSON.stringify({ id: 'legacy', kind: 'thinking', text: '旧记录', status: 'running' }));
+    expect(context.store.recordWritingActivity(writing.id, { type: 'thinking', id: 'legacy', text: '继续' })).not.toHaveProperty('proseOffset');
+    context.store.shiftWritingActivityOffsets(writing.id, 5);
+    expect(context.store.listWritingActivities(writing.id).find(activity => activity.id === 'positioned')?.proseOffset).toBe(positioned.proseOffset! + 5);
+    expect(context.store.listWritingActivities(writing.id).find(activity => activity.id === 'legacy')).not.toHaveProperty('proseOffset');
+    const restored = context.store.restoreProject(context.store.exportProject(context.project.id));
+    const restoredWriting = context.engine.listJobs(restored.id).find(job => job.kind === 'generate')!;
+    expect(context.engine.listWritingActivities(restoredWriting.id).find(activity => activity.id === 'legacy')).not.toHaveProperty('proseOffset');
+  });
+
   it('streams thinking and tool activity separately from prose, redacts cumulative fragments, and closes pending activity after commit', async () => {
     const began = deferred<void>(); const finish = deferred<void>();
     const context = harness(models(async request => {
@@ -204,8 +249,8 @@ describe('author-only activity API and SSE', () => {
     expect(stream.statusCode).toBe(200); const snapshot = JSON.parse(stream.body.trim().slice('data: '.length));
     expect(snapshot.activities).toEqual(history.json()); expect(snapshot.text).toBe(''); expect(snapshot.job.status).toBe('paused');
     const readerJobs = await context.app.inject({ url: '/api/jobs', cookies }); expect(readerJobs.body).not.toContain('作者可见的思考过程'); expect(readerJobs.body).not.toContain('未揭晓的钥匙');
-    const other = context.store.createProject({ title: '不是正文任务' }); const planning = context.engine.enqueue(other.mainBranchId, 'plan', { baseRevisionId: context.store.getBranch(other.mainBranchId).revisionId });
-    expect((await context.app.inject({ url: `/api/jobs/${planning.id}/activities?view=author`, cookies })).statusCode).toBe(400);
+    const other = context.store.createProject({ title: '不是正文任务' }); const extractionJob = context.engine.enqueue(other.mainBranchId, 'extract', { baseRevisionId: context.store.getBranch(other.mainBranchId).revisionId });
+    expect((await context.app.inject({ url: `/api/jobs/${extractionJob.id}/activities?view=author`, cookies })).statusCode).toBe(400);
   });
 
   it('keeps the HTTP stream open for activity events and ends only after prose is committed', async () => {

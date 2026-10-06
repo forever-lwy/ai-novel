@@ -34,6 +34,10 @@ async function endpoint(handler: (request: IncomingMessage, response: ServerResp
   return `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1`;
 }
 function json(response: ServerResponse, value: unknown, status = 200) { response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify(value)); }
+function seedReadyChapter(ctx: Awaited<ReturnType<typeof context>>, branchId: string) {
+  const saved = ctx.store.saveChapter(branchId, { baseRevisionId: ctx.store.getBranch(branchId).revisionId, title: '已有开场', text: '旅人离开村庄。' });
+  ctx.store.applyExtraction(branchId, saved.branch.revisionId, saved.state.chapters[0].id, { summary: '旅人离开村庄。', entities: [], relations: [], foreshadows: [] }, true);
+}
 
 async function waitForTask(engine: Awaited<ReturnType<typeof buildApp>>['engine'], id: string) {
   const deadline = Date.now() + 4000;
@@ -187,12 +191,12 @@ describe('provider connections and task model assignments', () => {
     const ctx = await context(); const requests: { model: string; max_tokens: number; temperature: number }[] = [];
     const baseUrl = await endpoint((_request, response, body) => {
       requests.push(body);
-      const text = body.model === 'planner' ? JSON.stringify({ coarse: '旅人寻找灯塔', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `${chapter}`, goal: '寻找线索' })), foreshadows: [] })
+      const text = body.model === 'planner' ? JSON.stringify({ coarse: '旅人寻找灯塔', fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `${chapter}`, goal: '寻找线索' })), foreshadows: [] })
         : body.model === 'extractor' ? JSON.stringify({ summary: '旅人抵达灯塔', entities: [], relations: [], foreshadows: [] }) : '旅人来到灯塔。';
       json(response, { choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 20 } });
     });
     ctx.settings.save({ ...settings(provider({ baseUrl })), modelParameters: ['writer', 'planner', 'extractor'].map((model, index) => ({ ...defaultModelParameters(), role: modelRoles[index], providerId: 'upstream', model, maxOutputTokens: 1024 * (index + 1), contextTokens: 128000, temperature: index / 2 })) });
-    const project = ctx.store.createProject({ title: '分任务模型' }); const branch = ctx.store.getBranch(project.mainBranchId);
+    const project = ctx.store.createProject({ title: '分任务模型' }); seedReadyChapter(ctx, project.mainBranchId); const branch = ctx.store.getBranch(project.mainBranchId);
     ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId });
     await waitForTask(ctx.engine, planJob.id);
     const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
@@ -203,7 +207,7 @@ describe('provider connections and task model assignments', () => {
     expect(ctx.engine.listJobs().find(value => value.id === job.id)).toMatchObject({ status: 'completed' });
     await waitForTask(ctx.engine, ctx.engine.listJobs().find(value => value.kind === 'extract')!.id);
     expect(requests.map(body => [body.model, body.max_tokens, body.temperature])).toEqual([['planner', 2048, 0.5], ['writer', 1024, 0], ['extractor', 3072, 1]]);
-    expect(ctx.store.state(branch.id).chapters[0].status).toBe('ready');
+    expect(ctx.store.state(branch.id).chapters).toHaveLength(2); expect(ctx.store.state(branch.id).chapters[1].status).toBe('ready');
   });
 
   it('tests a custom model explicitly and rejects tests without an assigned or supplied model before sending requests', async () => {
@@ -220,12 +224,12 @@ describe('provider connections and task model assignments', () => {
     const ctx = await context(); const requests: { model: string; max_tokens: number; temperature: number }[] = [];
     const baseUrl = await endpoint((_request, response, body) => {
       requests.push(body);
-      const text = body.max_tokens === 2048 ? JSON.stringify({ coarse: '旅人寻找灯塔', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `${chapter}`, goal: '寻找线索' })), foreshadows: [] })
+      const text = body.max_tokens === 2048 ? JSON.stringify({ coarse: '旅人寻找灯塔', fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `${chapter}`, goal: '寻找线索' })), foreshadows: [] })
         : body.max_tokens === 3072 ? JSON.stringify({ summary: '旅人抵达灯塔', entities: [], relations: [], foreshadows: [] }) : '旅人来到灯塔。';
       json(response, { choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 20 } });
     });
     ctx.settings.save({ ...settings(provider({ baseUrl })), writingModel: 'shared-model', planningModel: 'shared-model', extractionModel: 'shared-model', modelParameters: modelRoles.map((role, index) => ({ ...defaultModelParameters(), role, providerId: 'upstream', model: 'shared-model', maxOutputTokens: 1024 * (index + 1), contextTokens: 128000, temperature: index / 2 })) });
-    const project = ctx.store.createProject({ title: '相同模型按任务隔离参数' }); const branch = ctx.store.getBranch(project.mainBranchId);
+    const project = ctx.store.createProject({ title: '相同模型按任务隔离参数' }); seedReadyChapter(ctx, project.mainBranchId); const branch = ctx.store.getBranch(project.mainBranchId);
     ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId });
     await waitForTask(ctx.engine, planJob.id);
     const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
@@ -236,6 +240,6 @@ describe('provider connections and task model assignments', () => {
     expect(ctx.engine.listJobs().find(value => value.id === job.id)).toMatchObject({ status: 'completed' });
     await waitForTask(ctx.engine, ctx.engine.listJobs().find(value => value.kind === 'extract')!.id);
     expect(requests.map(body => [body.model, body.max_tokens, body.temperature])).toEqual([['shared-model', 2048, 0.5], ['shared-model', 1024, 0], ['shared-model', 3072, 1]]);
-    expect(ctx.store.state(branch.id).chapters[0].status).toBe('ready');
+    expect(ctx.store.state(branch.id).chapters).toHaveLength(2); expect(ctx.store.state(branch.id).chapters[1].status).toBe('ready');
   });
 });

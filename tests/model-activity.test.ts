@@ -31,7 +31,60 @@ function stream(protocol: ProviderProtocol) {
 const protocols: ProviderProtocol[] = ['openai-chat', 'openai-responses', 'gemini', 'claude'];
 const thinkingText = (events: ModelActivityEvent[]) => events.filter((event): event is Extract<ModelActivityEvent, { type: 'thinking' }> => event.type === 'thinking').map(event => event.text).join('');
 
+function interleavedStream(protocol: ProviderProtocol, prefix: string, suffix: string) {
+  const first = '第一段思考。', second = '第二段思考。';
+  if (protocol === 'openai-chat') return sse({ choices: [{ delta: { reasoning_content: first } }] }) + sse({ choices: [{ delta: { content: prefix } }] }) + sse({ choices: [{ delta: { reasoning_content: second } }] }) + sse({ choices: [{ delta: { content: suffix }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } }) + sse('[DONE]');
+  if (protocol === 'openai-responses') return sse({ type: 'response.reasoning_summary_text.delta', output_index: 0, item_id: 'first', delta: first }) + sse({ type: 'response.reasoning_summary_text.done', output_index: 0, item_id: 'first', text: first }) + sse({ type: 'response.output_text.delta', delta: prefix }) + sse({ type: 'response.reasoning_summary_text.delta', output_index: 2, item_id: 'second', delta: second }) + sse({ type: 'response.reasoning_summary_text.done', output_index: 2, item_id: 'second', text: second }) + sse({ type: 'response.output_text.delta', delta: suffix }) + sse({ type: 'response.completed', response: { status: 'completed', output: [{ type: 'reasoning', id: 'first', summary: [{ type: 'summary_text', text: first }] }, { type: 'message', content: [{ type: 'output_text', text: prefix }] }, { type: 'reasoning', id: 'second', summary: [{ type: 'summary_text', text: second }] }, { type: 'message', content: [{ type: 'output_text', text: suffix }] }], usage: { input_tokens: 10, output_tokens: 5 } } });
+  if (protocol === 'gemini') return sse({ candidates: [{ content: { parts: [{ thought: true, text: first }] } }] }) + sse({ candidates: [{ content: { parts: [{ text: prefix }] } }] }) + sse({ candidates: [{ content: { parts: [{ thought: true, text: second }] } }] }) + sse({ candidates: [{ content: { parts: [{ text: suffix }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 } });
+  return sse({ type: 'message_start', message: { content: [], usage: { input_tokens: 10 } } }) + sse({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: first } }) + sse({ type: 'content_block_stop', index: 0 }) + sse({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: prefix } }) + sse({ type: 'content_block_stop', index: 1 }) + sse({ type: 'content_block_start', index: 2, content_block: { type: 'thinking', thinking: second } }) + sse({ type: 'content_block_stop', index: 2 }) + sse({ type: 'content_block_start', index: 3, content_block: { type: 'text', text: suffix } }) + sse({ type: 'content_block_stop', index: 3 }) + sse({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } }) + sse({ type: 'message_stop' });
+}
+
 describe('public author model activity separated from novel prose', () => {
+  it.each(protocols)('%s preserves thought/prose order when a response sends interleaved frames in one write', async protocol => {
+    const prefix = '前言🙂\r\n旅人抵达；', suffix = '随后进入古城。';
+    const raw = interleavedStream(protocol, prefix, suffix); let visible = '';
+    const positioned: { id: string; text: string; offset: number }[] = []; const events: ModelActivityEvent[] = []; const captured = vi.fn();
+    const service = await upstream((_body, response) => { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(Buffer.from(raw)); });
+    const result = await generateText(config(protocol, service.baseUrl, true), { system: '中性测试', prompt: '正文', onResponse: captured, onTextDelta: text => { visible += text; }, onActivity: value => { events.push(value); if (value.type === 'thinking') positioned.push({ id: value.id, text: value.text, offset: visible.length }); } });
+    expect(result.text).toBe(prefix + (['openai-responses', 'claude'].includes(protocol) ? '\n' : '') + suffix); expect(visible).toBe(prefix + suffix);
+    expect(positioned.map(value => ({ text: value.text, offset: value.offset }))).toEqual([{ text: '第一段思考。', offset: 0 }, { text: '第二段思考。', offset: prefix.length }]);
+    expect(new Set(positioned.map(value => value.id)).size).toBe(2);
+    expect(events.filter(value => value.type === 'thinking_done').map(value => value.id)).toEqual(positioned.map(value => value.id));
+    expect(captured.mock.calls[0][0].rawResponse).toBe(raw); expect(service.bodies).toHaveLength(1);
+  });
+
+  it('preserves Gemini part order inside one frame without changing raw signatures or finishing each part', async () => {
+    const prefix = '途中🙂；', suffix = '走进城门。'; let visible = ''; const captured = vi.fn();
+    const events: ModelActivityEvent[] = []; const positions: number[] = [];
+    const raw = sse({ candidates: [{ content: { parts: [{ thought: true, text: '第一段思考。', thoughtSignature: opaque }, { text: prefix }, { thought: true, text: '第二段思考。', thoughtSignature: opaque }, { text: suffix }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 } });
+    const service = await upstream((_body, response) => { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(raw); });
+    const result = await generateText(config('gemini', service.baseUrl, true), { system: '中性测试', prompt: '正文', onResponse: captured, onTextDelta: text => { visible += text; }, onActivity: value => { events.push(value); if (value.type === 'thinking') positions.push(visible.length); } });
+    expect(result.text).toBe(prefix + suffix); expect(visible).toBe(prefix + suffix); expect(positions).toEqual([0, prefix.length]);
+    expect(thinkingText(events)).toBe('第一段思考。第二段思考。'); expect(new Set(events.filter(value => value.type === 'thinking').map(value => value.id)).size).toBe(2);
+    expect(events.filter(value => value.type === 'thinking_done')).toHaveLength(2); expect(JSON.stringify(events)).not.toContain(opaque);
+    expect(captured.mock.calls[0][0].rawResponse).toBe(raw); expect(captured.mock.calls[0][0]).toMatchObject({ incomplete: false, inputTokens: 10, outputTokens: 5 });
+  });
+
+  it('anchors thoughts to visible prose while a cross-delta key prefix is safely buffered, before tool execution', async () => {
+    const prefix = '已经可见；'; const suffix = '继续正文。'; let visible = ''; const offsets: number[] = []; const toolsAt: string[] = [];
+    const service = await upstream((_body, response, index) => {
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      response.end(index ? sse({ choices: [{ delta: { content: prose }, finish_reason: 'stop' }] }) + sse('[DONE]') : sse({ choices: [{ delta: { content: prefix + apiKey.slice(0, 12) } }] }) + sse({ choices: [{ delta: { reasoning_content: '缓冲时的思考。' } }] }) + sse({ choices: [{ delta: { content: apiKey.slice(12) + suffix } }] }) + sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'lookup', type: 'function', function: { name: 'lookup', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] }) + sse('[DONE]'));
+    });
+    const result = await generateText(config('openai-chat', service.baseUrl, true), { system: '中性测试', prompt: '正文', tools: [{ name: 'lookup', description: '中性查询', parameters: { type: 'object' }, execute: () => { toolsAt.push(visible); return {}; } }], onTextDelta: text => { visible += text; }, onActivity: value => { if (value.type === 'thinking') offsets.push(visible.length); if (value.type === 'tool_call') toolsAt.push(visible); } });
+    const beforeTool = prefix + '[REDACTED]' + suffix;
+    expect(offsets).toEqual([prefix.length]); expect(toolsAt).toEqual([beforeTool, beforeTool]); expect(visible).toBe(beforeTool + prose); expect(result.text).toBe(visible);
+    expect(visible).not.toContain(apiKey); expect(service.bodies).toHaveLength(2);
+  });
+
+  it('does not release a known key prefix when prose closes one thought block before the next block', async () => {
+    const events: ModelActivityEvent[] = [];
+    const service = await upstream((_body, response) => { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(sse({ choices: [{ delta: { reasoning_content: '检查 ' + apiKey.slice(0, 12) } }] }) + sse({ choices: [{ delta: { content: '正文隔开两次思考。' } }] }) + sse({ choices: [{ delta: { reasoning_content: apiKey.slice(12) } }] }) + sse({ choices: [{ delta: { content: prose }, finish_reason: 'stop' }] }) + sse('[DONE]')); });
+    await generateText(config('openai-chat', service.baseUrl, true), { system: '中性测试', prompt: '正文', onActivity: value => events.push(value) });
+    expect(thinkingText(events)).not.toContain(apiKey); expect(thinkingText(events)).toContain('[REDACTED]');
+    expect(new Set(events.filter(value => value.type === 'thinking').map(value => value.id)).size).toBe(2);
+  });
+
   it.each(protocols.flatMap(protocol => [false, true].map(streaming => ({ protocol, streaming }))))('$protocol streaming=$streaming exposes public thought text once while keeping signatures and thoughts out of prose', async ({ protocol, streaming }) => {
     const events: ModelActivityEvent[] = []; const deltas: string[] = [];
     const service = await upstream((_body, response) => { response.writeHead(200, { 'Content-Type': streaming ? 'text/event-stream' : 'application/json' }); response.end(streaming ? stream(protocol) : JSON.stringify(envelope(protocol))); });

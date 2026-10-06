@@ -68,7 +68,7 @@ const rpgSessionSchema = rpgSetupSchema.extend({ character: rpgSetupSchema.shape
 const sourceReferenceSchema = z.object({ branchId: z.string().min(1), revisionId: z.string().min(1), sourceIds: z.array(z.string().min(1)).refine(values => new Set(values).size === values.length).optional() }).strict();
 const stateSchema = z.object({ sourceReference: sourceReferenceSchema.optional(), rpg: rpgSessionSchema.optional(), activeImageIds: z.array(z.string().min(1)).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
 const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
-const writingActivitySchema = z.object({ id: z.string().min(1), kind: z.enum(['thinking', 'tool']), text: z.string().optional(), name: z.string().optional(), arguments: z.record(z.string(), z.unknown()).optional(), result: z.unknown().optional(), status: z.enum(['running', 'completed', 'failed']), error: z.string().optional() });
+const writingActivitySchema = z.object({ id: z.string().min(1), kind: z.enum(['thinking', 'tool']), text: z.string().optional(), name: z.string().optional(), arguments: z.record(z.string(), z.unknown()).optional(), result: z.unknown().optional(), status: z.enum(['running', 'completed', 'failed']), error: z.string().optional(), proseOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() });
 const backupSchema = z.object({ images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), createdAt: z.string() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: z.unknown().optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1).max(RESTORE_MAX_REVISIONS), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
 
 /** Decode each historical state once, sharing one cumulative expansion budget. */
@@ -139,9 +139,25 @@ export class Store {
     else if (event.type === 'thinking_done') { if (!previous || previous.kind !== 'thinking') return undefined; activity = { ...previous, status: 'completed' }; }
     else if (event.type === 'tool_call') activity = { id: event.id, kind: 'tool', name: event.name, arguments: clone(event.arguments), status: 'running' };
     else activity = { ...previous, id: event.id, kind: 'tool', name: event.name, result: clone(event.result), status: event.error ? 'failed' : 'completed', error: event.error };
+    // Updates keep the original position, including legacy records without one.
+    if (previous) { if (previous.proseOffset !== undefined) activity.proseOffset = previous.proseOffset; }
+    else {
+      const draft = this.db.prepare('SELECT text FROM job_writing_drafts WHERE job_id=?').get(jobId);
+      const text = String(draft?.text ?? '');
+      activity.proseOffset = (redact ? parse<{ text: string }>(redact(JSON.stringify({ text }))).text : text).length;
+    }
     const safe = redact ? parse<WritingActivity>(redact(JSON.stringify(activity))) : activity;
     this.db.prepare('INSERT INTO job_writing_activities VALUES(?,?,?) ON CONFLICT(job_id,activity_id) DO UPDATE SET data=excluded.data').run(jobId, safe.id, JSON.stringify(safe));
     return safe;
+  }
+  shiftWritingActivityOffsets(jobId: string, prefixLength: number) {
+    if (!Number.isSafeInteger(prefixLength) || prefixLength < 0) throw new HttpError('正文过程前缀位置无效');
+    if (!prefixLength) return;
+    for (const activity of this.listWritingActivities(jobId)) if (activity.proseOffset !== undefined) {
+      const offset = activity.proseOffset + prefixLength;
+      if (!Number.isSafeInteger(offset)) throw new HttpError('正文过程位置无效');
+      this.db.prepare('UPDATE job_writing_activities SET data=? WHERE job_id=? AND activity_id=?').run(JSON.stringify({ ...activity, proseOffset: offset }), jobId, activity.id);
+    }
   }
   finishWritingActivities(jobId: string, error?: string): WritingActivity[] {
     const finished = this.listWritingActivities(jobId).filter(activity => activity.status === 'running').map(activity => ({ ...activity, status: error ? 'failed' as const : 'completed' as const, ...(error ? { error } : {}) }));

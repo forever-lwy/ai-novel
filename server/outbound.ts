@@ -53,16 +53,19 @@ export async function checkedProviderAddresses(hostname: string, allowPrivate: b
 }
 
 /** The validated DNS results are the exact addresses used by the socket connector. */
-export async function providerFetch(input: string | URL, init: RequestInit): Promise<Response> {
+export async function providerFetch(input: string | URL, init: RequestInit, options: { timeoutManagedBySignal?: boolean } = {}): Promise<Response> {
   const policy = providerNetworkPolicy(input);
-  if (!policy.enforce) return fetch(policy.url, { ...init, redirect: 'error' });
+  const managedTimeout = Boolean(options.timeoutManagedBySignal && init.signal);
+  if (!policy.enforce && !managedTimeout) return fetch(policy.url, { ...init, redirect: 'error' });
   const checkedLookup: LookupFunction = (hostname, options, callback) => {
     void checkedProviderAddresses(hostname, policy.allowPrivate).then(addresses => {
       if (options.all) callback(null, addresses as never);
       else { const result = addresses.find(item => !options.family || item.family === options.family) || addresses[0]; callback(null, result.address, result.family); }
     }, error => callback(error as NodeJS.ErrnoException, '', 4));
   };
-  const dispatcher = new Agent({ connect: { lookup: checkedLookup }, connections: 2 });
+  // Text requests own first-content/idle deadlines through their AbortSignal;
+  // Undici's independent connect/header/body limits must not cut them off early.
+  const dispatcher = new Agent({ connect: { ...(policy.enforce ? { lookup: checkedLookup } : {}), ...(managedTimeout ? { timeout: 0 } : {}) }, ...(managedTimeout ? { headersTimeout: 0, bodyTimeout: 0 } : {}), connections: 2 });
   try {
     const response = await fetch(policy.url, { ...init, redirect: 'error', dispatcher } as RequestInit & { dispatcher: Agent });
     // close drains the response body without retaining an unbounded origin pool.

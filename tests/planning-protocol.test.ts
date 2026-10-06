@@ -15,8 +15,8 @@ afterEach(async () => {
 });
 const text = '阿青走到港口，看见一艘旧船。';
 const plan = (): PlanningResult => ({
-  fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `港口规划${chapter}`, goal: `尚未发生的港口事件${chapter}` })),
-  foreshadows: [{ title: '旧船秘密', detail: '船底藏着尚未揭晓的秘密。', status: 'planned', dueChapter: 4, revealCondition: '第四章调查船底', relatedNames: [] }],
+  fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `港口规划${chapter}`, goal: `尚未发生的港口事件${chapter}` })),
+  foreshadows: [{ title: '旧船秘密', detail: '船底藏着尚未揭晓的秘密。', status: 'planned', dueChapter: 5, revealCondition: '第五章调查船底', relatedNames: [] }],
 });
 const sse = (data: unknown) => `data: ${typeof data === 'string' ? data : JSON.stringify(data)}\n\n`;
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
@@ -51,8 +51,10 @@ async function harness(protocol: ProviderProtocol, continuation?: (response: Ser
     const model = body.model ?? decodeURIComponent(url.match(/\/models\/([^/:]+)/)?.[1] ?? ''); requests.push({ url, model, body });
     if (model === 'extractor') { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(extractionReply(protocol))); return; }
     if (model !== 'writer') { response.writeHead(500); response.end('禁止调用独立规划模型'); return; }
-    if (writingRequests++ === 0) { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(toolRound(protocol, initialPlan)); return; }
-    if (continuation) await continuation(response, writingRequests - 1);
+    const index = writingRequests++;
+    if (index === 0) { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(proseRound(protocol)); return; }
+    if (index === 1) { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(toolRound(protocol, initialPlan)); return; }
+    if (continuation) await continuation(response, index - 1);
     else { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(proseRound(protocol)); }
   });
   servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -69,17 +71,17 @@ async function harness(protocol: ProviderProtocol, continuation?: (response: Ser
 }
 
 describe('writing planning tools through real provider adapters', () => {
-  it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s returns staged planning to the same writing model and saves prose with its future plan atomically', async protocol => {
+  it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s finishes and saves prose before returning staged planning to the writing model', async protocol => {
     const held = deferred(); const finish = deferred();
     const ctx = await harness(protocol, async response => { held.resolve(); await finish.promise; response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(proseRound(protocol)); });
     try {
       await held.promise;
       const staged = ctx.store.state(ctx.branchId);
-      expect(ctx.store.getBranch(ctx.branchId).revisionId).toBe(ctx.baseRevisionId);
-      expect(staged.chapters).toHaveLength(0); expect(staged.outline.fine).toEqual([]); expect(staged.foreshadows).toEqual([]);
-      const writingRequests = ctx.requests.filter(request => request.model === 'writer'); expect(writingRequests).toHaveLength(2);
-      const first = writingRequests[0].body; const second = writingRequests[1].body;
-      expect(JSON.stringify(first.tools)).toContain('update_plot_plan');
+      expect(ctx.store.getBranch(ctx.branchId).revisionId).not.toBe(ctx.baseRevisionId);
+      expect(staged.chapters).toHaveLength(1); expect(staged.outline.fine).toEqual([]); expect(staged.foreshadows).toEqual([]); expect(ctx.store.chapter(ctx.branchId, staged.chapters[0].id).text).toBe(text);
+      const writingRequests = ctx.requests.filter(request => request.model === 'writer'); expect(writingRequests).toHaveLength(3);
+      const first = writingRequests[0].body; const second = writingRequests[2].body;
+      expect(JSON.stringify(first.tools)).not.toContain('update_plot_plan'); expect(JSON.stringify(writingRequests[1].body.tools)).toContain('update_plot_plan');
       expect(JSON.stringify(second)).toContain('港口规划4'); expect(JSON.stringify(second)).toContain('staged');
       if (protocol === 'openai-chat') expect(second.messages.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'plan-call' });
       else if (protocol === 'openai-responses') expect(second.input.at(-1)).toMatchObject({ type: 'function_call_output', call_id: 'plan-call' });
@@ -87,10 +89,10 @@ describe('writing planning tools through real provider adapters', () => {
       else expect(second.messages.at(-1).content[0]).toMatchObject({ type: 'tool_result', tool_use_id: 'plan-call' });
       if (protocol !== 'openai-chat') expect(JSON.stringify(second)).toContain('plan-signature');
       finish.resolve(); await until(() => ['completed', 'failed', 'stale'].includes(ctx.job().status));
-      expect(ctx.job()).toMatchObject({ status: 'completed', inputTokens: 40, outputTokens: 28 });
+      expect(ctx.job()).toMatchObject({ status: 'completed', inputTokens: 70, outputTokens: 36 });
       const saved = ctx.store.revisionState(ctx.job().baseRevisionId);
-      expect(saved.chapters).toHaveLength(1); expect(saved.outline.fine).toEqual(plan().fine.slice(1));
-      expect(saved.foreshadows).toMatchObject([{ title: '旧船秘密', status: 'planned', dueChapter: 4, relatedEntityIds: [] }]);
+      expect(saved.chapters).toHaveLength(1); expect(saved.outline.fine).toEqual(plan().fine);
+      expect(saved.foreshadows).toMatchObject([{ title: '旧船秘密', status: 'planned', dueChapter: 5, relatedEntityIds: [] }]);
       expect(ctx.store.chapter(ctx.branchId, saved.chapters[0].id).text).toBe(text);
       expect(ctx.store.exportText(ctx.branchId)).toBe(`第 1 章\n\n${text}`);
       const output = ctx.engine.listOutputs(ctx.writing.id).find(output => output.status === 'applied')!;
@@ -98,16 +100,16 @@ describe('writing planning tools through real provider adapters', () => {
       expect(ctx.engine.listWritingActivities(ctx.writing.id)).toContainEqual(expect.objectContaining({ kind: 'tool', name: 'update_plot_plan', status: 'completed', result: expect.objectContaining({ status: 'staged' }) }));
       await until(() => ctx.engine.listJobs(ctx.project.id).some(job => job.kind === 'extract' && ['completed', 'failed'].includes(job.status)));
       expect(ctx.engine.listJobs(ctx.project.id).find(job => job.kind === 'extract')?.status).toBe('completed');
-      expect(ctx.requests.map(request => request.model)).toEqual(['writer', 'writer', 'extractor']);
+      expect(ctx.requests.map(request => request.model)).toEqual(['writer', 'writer', 'writer', 'extractor']);
     } finally { finish.resolve(); }
   });
 
   it('retains failed HTTP output without applying staged planning or implicitly regenerating prose', async () => {
     const ctx = await harness('openai-chat', response => { response.writeHead(503, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ error: { message: 'fixture continuation failure' } })); });
     await until(() => ctx.job().status === 'failed');
-    expect(ctx.requests.map(request => request.model)).toEqual(['writer', 'writer']);
-    expect(ctx.store.getBranch(ctx.branchId).revisionId).toBe(ctx.baseRevisionId);
-    expect(ctx.store.state(ctx.branchId).chapters).toEqual([]); expect(ctx.store.state(ctx.branchId).outline.fine).toEqual([]); expect(ctx.store.state(ctx.branchId).foreshadows).toEqual([]);
+    expect(ctx.requests.map(request => request.model)).toEqual(['writer', 'writer', 'writer']);
+    expect(ctx.store.getBranch(ctx.branchId).revisionId).not.toBe(ctx.baseRevisionId);
+    expect(ctx.store.state(ctx.branchId).chapters).toHaveLength(1); expect(ctx.store.chapter(ctx.branchId, ctx.store.state(ctx.branchId).chapters[0].id).text).toBe(text); expect(ctx.store.state(ctx.branchId).outline.fine).toEqual([]); expect(ctx.store.state(ctx.branchId).foreshadows).toEqual([]);
     expect(ctx.engine.listOutputs(ctx.writing.id).some(output => output.httpStatus === 503)).toBe(true);
   });
 
@@ -124,13 +126,13 @@ describe('writing planning tools through real provider adapters', () => {
     } finally { finish.resolve(); }
   });
 
-  it('feeds invalid planning parameters back to the writing model so it can correct them and continue prose', async () => {
+  it('feeds invalid post-prose planning parameters back to the model without continuing prose', async () => {
     const ctx = await harness('openai-chat', (response, index) => { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(index === 1 ? toolRound('openai-chat') : proseRound('openai-chat')); }, { fine: plan().fine.slice(0, 3), foreshadows: [] });
     await until(() => ['completed', 'failed'].includes(ctx.job().status)); expect(ctx.job().status).toBe('completed');
-    const writingRequests = ctx.requests.filter(request => request.model === 'writer'); expect(writingRequests).toHaveLength(3);
-    expect(JSON.parse(writingRequests[1].body.messages.at(-1).content)).toMatchObject({ error: expect.stringContaining('四项规划') });
-    expect(JSON.parse(writingRequests[2].body.messages.at(-1).content)).toMatchObject({ status: 'staged' });
-    const saved = ctx.store.revisionState(ctx.job().baseRevisionId); expect(saved.outline.fine).toEqual(plan().fine.slice(1));
+    const writingRequests = ctx.requests.filter(request => request.model === 'writer'); expect(writingRequests).toHaveLength(4);
+    expect(JSON.parse(writingRequests[2].body.messages.at(-1).content)).toMatchObject({ error: expect.stringContaining('四项规划') });
+    expect(JSON.parse(writingRequests[3].body.messages.at(-1).content)).toMatchObject({ status: 'staged' });
+    const saved = ctx.store.revisionState(ctx.job().baseRevisionId); expect(saved.outline.fine).toEqual(plan().fine);
     expect(saved.foreshadows).toMatchObject([{ title: '旧船秘密', status: 'planned' }]); expect(ctx.store.chapter(ctx.branchId, saved.chapters[0].id).text).toBe(text);
     expect(ctx.requests.some(request => request.model === 'planner-forbidden')).toBe(false);
   });

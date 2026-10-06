@@ -123,6 +123,25 @@ describe('streaming prose, detached extraction and regeneration', () => {
     expect(request.prompt).not.toContain('第二章内容'); expect(request.prompt).not.toContain('第一章内容');
   });
 
+  it('publishes the complete rewritten chapter and shifts fragment activity before post-planning', async () => {
+    const prefix = '原文开头🙂\n'; const old = '旧片段'; const suffix = '\n原文结尾。'; const replacement = '新的片段。'; const expected = prefix + replacement + suffix;
+    const events: WritingEvent[] = []; let writingId = ''; const config = settings(); config.taskSettings = { extraction: { autoRetry: false, maxRetries: 0, retryDelayMs: 0 }, planning: { enabled: true, mode: 'tool' } };
+    const models = mockModels(); let ctx!: ReturnType<typeof harness>;
+    models.generateText = vi.fn(async (_provider, request) => {
+      if (request.tools?.some(tool => tool.name === 'update_plot_plan')) {
+        const snapshots = events.filter((event): event is Extract<WritingEvent, { type: 'snapshot' }> => event.type === 'snapshot'); expect(snapshots.at(-1)?.text).toBe(expected);
+        expect(ctx.engine.writingSnapshot(writingId).text).toBe(expected); expect(ctx.engine.listWritingActivities(writingId).find(activity => activity.id === 'rewrite-thought')?.proseOffset).toBe(prefix.length);
+        request.onActivity?.({ type: 'thinking', id: 'post-thought', text: '根据完成正文安排后续。' }); expect(ctx.engine.listWritingActivities(writingId).find(activity => activity.id.includes('post-thought'))?.proseOffset).toBe(expected.length);
+        throw new Error('规划暂时失败');
+      }
+      request.onActivity?.({ type: 'thinking', id: 'rewrite-thought', text: '只替换指定片段。' }); request.onActivity?.({ type: 'thinking_done', id: 'rewrite-thought' }); request.onTextDelta?.(replacement); return { text: replacement, inputTokens: 10, outputTokens: 5 };
+    });
+    ctx = harness(models, config); const saved = readyChapter(ctx.store, ctx.project.mainBranchId, prefix + old + suffix);
+    const writing = start(ctx, { mode: 'rewrite', chapterId: saved.state.chapters[0].id, selection: { start: prefix.length, end: prefix.length + old.length } }); writingId = writing.id; ctx.engine.subscribeWriting(writing.id, event => events.push(event));
+    expect((await terminal(ctx.engine, writing.id)).status).toBe('failed'); expect(ctx.engine.writingSnapshot(writing.id).text).toBe(expected); expect(ctx.store.chapter(writing.branchId, ctx.engine.listJobs().find(job => job.id === writing.id)!.generatedChapterId!).text).toBe(expected);
+    expect(models.generateStructured).not.toHaveBeenCalled();
+  });
+
   it('restores historical AI role classification while carrying explicit author choices into regeneration', async () => {
     const ctx = harness(mockModels()); const first = readyChapter(ctx.store, ctx.project.mainBranchId, '第一章。');
     first.state.entities.push({ id: 'role', kind: 'character', name: '林舟', aliases: [], description: '旅人', visibility: 'public', locked: false, facts: [], isMain: false, isMainSource: 'extraction' });

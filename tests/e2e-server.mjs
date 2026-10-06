@@ -114,6 +114,28 @@ const modelServer = createServer(async (req, res) => {
       setTimeout(() => { if (res.destroyed) return; res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Deliberate local HTTP 500 fixture' } })); }, 100);
       return;
     }
+    if (body.model === 'e2e-post-planning') {
+      const attempt = modelRequestsByModel[modelName];
+      if (attempt === 2) { res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Deliberate post-writing planning failure' } })); return; }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const frames = []; const frame = (delta, finish_reason = null) => frames.push(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+      if (attempt === 1) { frame({ content: '林舟来到白石城，推开城门。\n\n他望向星光下的街道。' }); frame({}, 'stop'); }
+      else if (attempt === 3) {
+        const tool = body.tools?.find(value => value.function?.name === 'update_plot_plan'); const next = Number(tool?.function?.description?.match(/第\s+(\d+)\s+章至第/)?.[1] || 2);
+        frame({ reasoning_content: 'POST_PLANNING_THINK：根据已经保存的正文安排后续四章。' });
+        frame({ tool_calls: [{ index: 0, id: 'post-planning-tool', type: 'function', function: { name: 'update_plot_plan', arguments: JSON.stringify({ fine: Array.from({ length: 4 }, (_, index) => ({ chapter: next + index, title: `第${next + index}章 星光街道`, goal: '从城门线索继续调查。' })), foreshadows: [] }) } }] }); frame({}, 'tool_calls');
+      } else { frame({ reasoning_content: 'POST_PLANNING_AFTER_TOOL：确认后续安排已经提交。' }); frame({ content: 'POST_PLANNING_ACK：后续规划完成。' }); frame({}, 'stop'); }
+      res.end(frames.join('') + 'data: [DONE]\n\n'); return;
+    }
+    if (body.model === 'e2e-inline-control') {
+      const attempt = modelRequestsByModel[modelName];
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const frame = (content, finish_reason = null) => { if (!res.destroyed) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: content ? { content } : {}, finish_reason }] })}\n\n`); };
+      setTimeout(() => frame(`INLINE_CONTROL_ATTEMPT_${attempt}：林舟来到白石城，等待城门打开。`), 100);
+      if (attempt === 1) setTimeout(() => { if (!res.destroyed) res.destroy(); }, 350);
+      else setTimeout(() => { if (!res.destroyed) { frame('\n\n他继续等待新的线索。', 'stop'); res.end('data: [DONE]\n\n'); } }, 6000);
+      return;
+    }
     if (body.model === 'e2e-original-reference') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const outputs = body.messages?.filter(message => message.role === 'tool') || [];
@@ -144,16 +166,23 @@ const modelServer = createServer(async (req, res) => {
         try { const value = JSON.parse(message.content); return value.text ? [value.text] : value.answer ? [value.answer] : value.customText ? [value.customText] : value.label ? [value.label] : []; } catch { return []; }
       }) || [];
       const asked = body.messages?.some(message => message.role === 'assistant' && message.tool_calls?.some(call => call.function?.name === 'ask_user'));
-      const frame = delta => res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+      const afterChoiceSearch = body.messages?.some(message => message.role === 'assistant' && message.tool_calls?.some(call => call.id === 'rpg-after-search'));
+      const frames = []; const frame = delta => frames.push(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
       if (!asked) {
+        frame({ reasoning_content: 'RPG_START_THINK：先观察城门前的环境。' });
         frame({ content: '你站在白石城门前，石碑上的纹路隐约发亮。\n\n' });
         frame({ tool_calls: [{ index: 0, id: 'rpg-decision', type: 'function', function: { name: 'ask_user', arguments: JSON.stringify({ question: '城门前出现两条道路，你准备怎么做？', options: [{ id: 'investigate', label: '查看石碑', description: '先调查石碑上的纹路。' }, { id: 'enter', label: '进入城中', description: '走进城门寻找线索。' }] }) } }] });
-        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 15 } })}\n\n`);
+        frames.push(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 15 } })}\n\n`);
+      } else if (!afterChoiceSearch) {
+        frame({ reasoning_content: 'RPG_AFTER_CHOICE_THINK：根据玩家刚才的选择核对石碑线索。' });
+        frame({ tool_calls: [{ index: 0, id: 'rpg-after-search', type: 'function', function: { name: 'search_story', arguments: JSON.stringify({ keywords: ['石碑'], scope: 'chapters' }) } }] });
+        frames.push(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 25, completion_tokens: 15 } })}\n\n`);
       } else {
+        frame({ reasoning_content: 'RPG_AFTER_TOOL_THINK：将已确认的线索用于当前场景。' });
         frame({ content: `你选择了「${answers.at(-1) || '继续探索'}」，眼前的故事随之展开。` });
-        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 30, completion_tokens: 20 } })}\n\n`);
+        frames.push(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 30, completion_tokens: 20 } })}\n\n`);
       }
-      res.end('data: [DONE]\n\n'); return;
+      res.end(frames.join('') + 'data: [DONE]\n\n'); return;
     }
     if (body.model === 'e2e-images' && !body.messages?.some(message => message.role === 'tool')) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -174,6 +203,7 @@ const modelServer = createServer(async (req, res) => {
       frame({ reasoning_content: queried ? 'AUTHOR_PUBLIC_THINK_2：根据查询结果安排人物行动。' : 'AUTHOR_PUBLIC_THINK_1：先核对故事资料，' });
       if (!queried) {
         setTimeout(() => frame({ reasoning_content: '再检查尚未确认的人物身份。' }), 250);
+        setTimeout(() => frame({ content: '林舟来到白石城，' }), 450);
         setTimeout(() => {
           frame({ tool_calls: [
             { index: 0, id: 'activity-search', type: 'function', function: { name: 'search_story', arguments: JSON.stringify({ query: '林舟', scope: 'entities' }) } },
@@ -182,7 +212,7 @@ const modelServer = createServer(async (req, res) => {
           frame({}, 'tool_calls'); done();
         }, 900);
       } else {
-        const prose = '林舟来到白石城，循着石碑上的纹路找到一处旧门。\n\n他握住钥匙，推开了门。'; const middle = Math.floor(prose.length / 2);
+        const prose = '循着石碑上的纹路找到一处旧门。\n\n他握住钥匙，推开了门。'; const middle = Math.floor(prose.length / 2);
         setTimeout(() => frame({ content: prose.slice(0, middle) }), 150);
         setTimeout(() => { frame({ content: prose.slice(middle) }); frame({}, 'stop'); done(); }, 6000);
       }

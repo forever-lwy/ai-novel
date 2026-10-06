@@ -191,7 +191,7 @@ describe('single-request context and output limits', () => {
   });
 
   it('uses independent task limits when planning, writing and extraction share the same connection and model', async () => {
-    const planning = JSON.stringify({ coarse: '旅人寻找灯塔', fine: [1, 2, 3, 4].map(chapter => ({ chapter, title: `第 ${chapter} 章`, goal: '寻找线索' })), foreshadows: [] });
+    const planning = JSON.stringify({ coarse: '旅人寻找灯塔', fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `第 ${chapter} 章`, goal: '寻找线索' })), foreshadows: [] });
     const fixture = await upstream((_path, _body, index) => gemini(index === 0 ? planning : index === 1 ? '旅人来到灯塔。' : extraction));
     const config = settings(fixture.baseUrl);
     config.writingModel = config.planningModel = config.extractionModel = 'shared-model';
@@ -201,7 +201,10 @@ describe('single-request context and output limits', () => {
       { role: 'extraction', providerId: 'local', model: 'shared-model', maxOutputTokens: 64000, contextTokens: 512000 },
     ];
     const ctx = harness(config);
-    const project = ctx.store.createProject({ title: '同模型任务参数隔离' }); const branch = ctx.store.getBranch(project.mainBranchId);
+    const project = ctx.store.createProject({ title: '同模型任务参数隔离' });
+    const saved = ctx.store.saveChapter(project.mainBranchId, { baseRevisionId: ctx.store.getBranch(project.mainBranchId).revisionId, title: '已有开场', text: '旅人离开村庄。' });
+    ctx.store.applyExtraction(project.mainBranchId, saved.branch.revisionId, saved.state.chapters[0].id, { summary: '旅人离开村庄。', entities: [], relations: [], foreshadows: [] }, true);
+    const branch = ctx.store.getBranch(project.mainBranchId);
     const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId }); ctx.engine.start();
     expect((await terminal(ctx.engine, planJob.id)).status).toBe('completed');
     const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '写开场' });

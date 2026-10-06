@@ -51,6 +51,22 @@ describe('provider network boundary', () => {
     vi.stubEnv('OUTBOUND_ALLOWED_ORIGINS', redirect);
     await expect(providerFetch(redirect, { method: 'GET' })).rejects.toThrow();
   });
+  it('keeps signal-managed streams open while enforcing the same origin and redirect boundaries', async () => {
+    let targetRequests = 0;
+    const url = await fixture((_req, response) => { targetRequests++; response.writeHead(200, { 'content-type': 'text/event-stream' }); response.write('local fixture content'); });
+    vi.stubEnv('NODE_ENV', 'production'); vi.stubEnv('OUTBOUND_ALLOWED_ORIGINS', url);
+    const controller = new AbortController();
+    const response = await providerFetch(url, { method: 'GET', signal: controller.signal }, { timeoutManagedBySignal: true });
+    const reader = response.body!.getReader(); expect(new TextDecoder().decode((await reader.read()).value)).toBe('local fixture content');
+    controller.abort(); await expect(reader.read()).rejects.toThrow(); reader.releaseLock();
+    const redirect = await fixture((_req, reply) => { reply.writeHead(302, { Location: url }); reply.end(); });
+    vi.stubEnv('OUTBOUND_ALLOWED_ORIGINS', redirect);
+    await expect(providerFetch(redirect, { signal: new AbortController().signal }, { timeoutManagedBySignal: true })).rejects.toThrow();
+    expect(targetRequests).toBe(1);
+    await expect(providerFetch(url, { signal: new AbortController().signal }, { timeoutManagedBySignal: true })).rejects.toThrow('未列入');
+    vi.stubEnv('OUTBOUND_ALLOWED_ORIGINS', 'http://169.254.169.254');
+    await expect(providerFetch('http://169.254.169.254', { signal: new AbortController().signal }, { timeoutManagedBySignal: true })).rejects.toThrow('不允许的网络');
+  });
 });
 
 describe('stream credential redaction', () => {

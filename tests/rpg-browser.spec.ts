@@ -23,6 +23,7 @@ test.afterEach(async ({ page }) => { await page.request.put('/api/settings', { d
 
 async function branch(page: Page, id: string): Promise<BranchView> { return (await page.request.get(`/api/branches/${id}?view=author`)).json(); }
 async function jobs(page: Page, projectId: string): Promise<Job[]> { return (await page.request.get(`/api/jobs?projectId=${projectId}&view=author`)).json(); }
+async function visibleProse(page: Page) { return (await page.locator('.manuscript .prose').allTextContents()).join(''); }
 async function waitReady(page: Page, id: string, count: number) { await expect.poll(async () => (await branch(page, id)).state.chapters.filter(chapter => chapter.status === 'ready').length).toBe(count); }
 async function seedNovel(page: Page, title: string, laterText = '林舟在白石城找到一盏旧灯。') {
   const response = await page.request.post('/api/projects', { data: { title, mode: 'continuation', premise: '林舟来到白石城。' } });
@@ -49,7 +50,7 @@ async function waitChoice(page: Page) {
 }
 async function showChoiceWithProse(page: Page, scrollToProse = true) {
   const choice = page.getByRole('region', { name: '决定接下来的剧情', exact: true });
-  const paragraph = page.locator('article.streaming-manuscript > .streaming-prose p').last();
+  const paragraph = page.locator('article.streaming-manuscript > .streaming-prose.prose > p, article.streaming-manuscript > .streaming-prose .prose > p').last();
   if (scrollToProse) await paragraph.evaluate(element => element.scrollIntoView({ block: 'center', behavior: 'instant' }));
   await expect.poll(async () => {
     const bounds = await paragraph.boundingBox(); const tabs = await page.locator('.workspace-tabs').boundingBox(); const viewport = page.viewportSize();
@@ -95,14 +96,24 @@ test('原创角色从章末穿越，入场草稿保留，选择决定后续正�
   await page.setViewportSize({ width: 1440, height: 1000 });
   await showChoiceWithProse(page);
   await page.screenshot({ path: testInfo.outputPath('rpg-inline-choice-desktop.png'), animations: 'disabled' });
-  const paragraph = page.locator('.streaming-prose p').first();
+  const paragraph = page.locator('.streaming-prose.prose > p, .streaming-prose .prose > p').first();
   await paragraph.click({ clickCount: 3 });
   const selectedText = await page.evaluate(() => window.getSelection()?.toString().trim() || '');
   expect(selectedText.length).toBeGreaterThan(0); expect(await paragraph.textContent()).toContain(selectedText);
   await choice.getByRole('radio', { name: /查看石碑/ }).check();
   await choice.getByRole('button', { name: '确认选择并继续', exact: true }).click();
   await expect(choice).toHaveCount(0); await waitReady(page, rpgBranchId, 2);
-  await expect(page.locator('.manuscript .prose')).toContainText('查看石碑');
+  await expect.poll(() => visibleProse(page)).toContain('查看石碑');
+  const written = (await jobs(page, project.id)).find(job => job.id === paused.id)!;
+  const records = await (await page.request.get(`/api/jobs/${written.id}/activities?view=author`)).json();
+  const afterChoice = records.find((record: any) => record.text?.includes('RPG_AFTER_CHOICE_THINK'));
+  const afterTool = records.find((record: any) => record.text?.includes('RPG_AFTER_TOOL_THINK'));
+  const prefix = '你站在白石城门前，石碑上的纹路隐约发亮。\n\n';
+  expect(afterChoice.proseOffset).toBe(prefix.length); expect(afterTool.proseOffset).toBe(prefix.length);
+  const chosenPosition = page.locator(`.writing-activities[data-prose-offset="${prefix.length}"]`);
+  await expect(chosenPosition.locator(`[data-activity-id="${afterChoice.id}"]`)).toHaveCount(1);
+  expect(await chosenPosition.evaluate(element => element.previousElementSibling?.matches('.prose') && element.previousElementSibling.textContent?.includes('你站在白石城门前'))).toBeTruthy();
+  await expect.poll(() => visibleProse(page)).not.toContain('RPG_AFTER_CHOICE_THINK');
   await expect(page.getByRole('button', { name: '重新生成', exact: true })).toHaveCount(0);
   expect((await branch(page, project.mainBranchId)).state.chapters.map(chapter => chapter.id)).toEqual(original.state.chapters.map(chapter => chapter.id));
   await page.getByLabel('当前故事线', { exact: true }).selectOption(project.mainBranchId);
@@ -155,7 +166,7 @@ test('已有角色待选节点刷新恢复，自定义行动提交失败保留�
   await page.screenshot({ path: testInfo.outputPath('rpg-inline-custom-error-mobile.png'), animations: 'disabled' });
   await choice.getByRole('button', { name: '确认选择并继续', exact: true }).click(); await expect(choice).toHaveCount(0);
   expect(choiceRequests).toBe(2);
-  await waitReady(page, rpgBranchId, 3); await expect(page.locator('.manuscript .prose')).toContainText('我先询问守门人');
+  await waitReady(page, rpgBranchId, 3); await expect.poll(() => visibleProse(page)).toContain('我先询问守门人');
 });
 
 test('新建作品支持 RPG，切线与阅读视图不答题，任务页可恢复正文节点并取消', async ({ page }) => {
@@ -228,6 +239,6 @@ test('从早期章节穿越，AI 读取原作后续摘要、未来物品及指�
   await choice.getByRole('button', { name: '确认选择并继续', exact: true }).click();
   await expect(choice).toHaveCount(0);
   await waitReady(page, experienceId, 2);
-  await expect(page.locator('.manuscript .prose')).toContainText('你按自己的选择回应守门人');
+  await expect.poll(() => visibleProse(page)).toContain('你按自己的选择回应守门人');
   expect((await branch(page, project.mainBranchId)).state.chapters.map(chapter => chapter.id)).toEqual(original.state.chapters.map(chapter => chapter.id));
 });

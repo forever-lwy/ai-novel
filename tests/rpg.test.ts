@@ -222,6 +222,27 @@ describe('durable RPG story choices', () => {
     expect(finished.inputTokens).toBeGreaterThan(waiting.inputTokens); expect(finished.outputTokens).toBeGreaterThan(waiting.outputTokens);
   });
 
+  it('retries RPG post-planning without restoring the old prose continuation or duplicating billed usage', async () => {
+    const plan = { fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `后续${chapter}`, goal: '按玩家选择发展' })), foreshadows: [] };
+    const service = await upstream((_body, reply, index) => {
+      if (index === 0) response(reply, '你站在岔路口。', [{ id: 'choose', name: 'ask_user', args: { question: '去哪里？', options } }]);
+      else if (index === 1) response(reply, '你走向桥头。');
+      else if (index === 2) response(reply, '未调用规划工具，本次规划无效。');
+      else if (index === 3) response(reply, '', [{ id: 'post-plan', name: 'update_plot_plan', args: plan }]);
+      else response(reply, '这条后置完成消息不能成为小说正文。');
+    });
+    const store = makeStore(), config = settings(service.url); config.taskSettings = { extraction: { autoRetry: false, maxRetries: 0, retryDelayMs: 0 }, planning: { enabled: true, mode: 'tool' } };
+    const engine = engineFor(store, config), project = store.createProject({ title: 'RPG 后置规划' });
+    const queued = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'rpg', instruction: '', rpg: originalSetup() });
+    const waiting = await paused(engine, queued.id); expect(service.bodies).toHaveLength(1); expect(service.bodies[0].tools.some((tool: any) => tool.function?.name === 'update_plot_plan')).toBe(false);
+    engine.choose(queued.id, { choiceId: waiting.pendingChoice!.id, optionId: 'bridge' }); expect((await completed(engine, queued.id)).status).toBe('failed');
+    const savedText = '你站在岔路口。你走向桥头。'; expect(engine.writingSnapshot(queued.id).text).toBe(savedText); expect(job(engine, queued.id)).toMatchObject({ inputTokens: 30, outputTokens: 15 });
+    config.writingModel = 'different'; engine.action(queued.id, 'retry'); expect(engine.writingSnapshot(queued.id).text).toBe(savedText); expect((await completed(engine, queued.id)).status).toBe('completed');
+    expect(service.bodies).toHaveLength(5); expect(service.bodies.map(body => body.model)).toEqual(['writer', 'writer', 'writer', 'different', 'different']);
+    expect(job(engine, queued.id)).toMatchObject({ inputTokens: 50, outputTokens: 25 }); expect(engine.writingSnapshot(queued.id).text).toBe(savedText); expect(store.state(queued.branchId).outline.fine).toEqual(plan.fine);
+    expect(engine.listWritingActivities(queued.id).find(activity => activity.name === 'update_plot_plan')?.proseOffset).toBe(savedText.length);
+  });
+
   it('requires author view for RPG generation and choices, and omits role setup and choices from reader JSON', async () => {
     const ctx = await buildApp({ initialPassword: 'story-password-123', dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-rpg-api-')), startEngine: false }); apps.push(ctx);
     const login = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'story-password-123' } }); const session = login.cookies.find(cookie => cookie.name === 'session')!.value;
