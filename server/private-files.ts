@@ -20,17 +20,19 @@ while ($queue.Count -gt 0) {
   $path = $queue.Dequeue()
   $item = Get-Item -LiteralPath $path -Force
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw '数据目录不能包含链接。' }
-  $acl = Get-Acl -LiteralPath $path
-  $owner = if ($acl.Owner -match '^S-1-') { [Security.Principal.SecurityIdentifier]::new($acl.Owner) } else { ([Security.Principal.NTAccount]::new($acl.Owner)).Translate([Security.Principal.SecurityIdentifier]) }
+  $ownerSection = [Security.AccessControl.AccessControlSections]::Owner
+  $existing = if ($item.PSIsContainer) { [IO.Directory]::GetAccessControl($path, $ownerSection) } else { [IO.File]::GetAccessControl($path, $ownerSection) }
+  $owner = $existing.GetOwner([Security.Principal.SecurityIdentifier])
+  # A fresh descriptor only marks Access as modified; owner and audit stay untouched.
+  $acl = if ($item.PSIsContainer) { [Security.AccessControl.DirectorySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }
   $acl.SetAccessRuleProtection($true, $false)
-  foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleSpecific($rule) }
   $inherit = [Security.AccessControl.InheritanceFlags]::None
   if ($item.PSIsContainer) { $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' }
   foreach ($sid in @($owner, $current, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'), [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
     $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, $inherit, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
     [void]$acl.AddAccessRule($rule)
   }
-  Set-Acl -LiteralPath $path -AclObject $acl
+  if ($item.PSIsContainer) { [IO.Directory]::SetAccessControl($path, $acl) } else { [IO.File]::SetAccessControl($path, $acl) }
   if ($item.PSIsContainer) { foreach ($child in Get-ChildItem -LiteralPath $path -Force) { $queue.Enqueue($child.FullName) } }
 }
 `;

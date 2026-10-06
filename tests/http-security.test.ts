@@ -124,14 +124,38 @@ describe('HTTP authentication and deployment boundaries', () => {
 });
 
 describe('private data permissions', () => {
-  it('keeps existing fixture contents and confines permissions to owner and service accounts', () => {
+  it('keeps contents and ownership while repeatedly securing already protected data with Access rules only', () => {
     const directory = mkdtempSync(join(tmpdir(), 'novel-private-files-')); directories.push(directory); mkdirSync(join(directory, 'sources')); writeFileSync(join(directory, 'sources', 'fixture'), 'private fixture');
-    secureDataDirectory(directory); expect(readFileSync(join(directory, 'sources', 'fixture'), 'utf8')).toBe('private fixture');
+    let readPermissions: (() => { current: string; entries: { path: string; owner: string; group: string; protected: boolean; rules: { sid: string; rights: number; inherited: boolean }[] }[] }) | undefined;
     if (process.platform === 'win32') {
       const powershellDir = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0');
-      const childEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toLowerCase() !== 'psmodulepath'));
-      const rules = execFileSync(join(powershellDir, 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', "Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop; (Get-Acl -LiteralPath $env:AI_NOVEL_PRIVATE_DIR).Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }"], { env: { ...childEnv, PSModulePath: join(powershellDir, 'Modules'), AI_NOVEL_PRIVATE_DIR: directory }, windowsHide: true, encoding: 'utf8' });
-      for (const sid of ['S-1-1-0', 'S-1-5-11', 'S-1-5-32-545']) expect(rules).not.toContain(sid);
-    } else { expect(statSync(directory).mode & 0o777).toBe(0o700); expect(statSync(join(directory, 'sources', 'fixture')).mode & 0o777).toBe(0o600); }
+      const childEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !['psmodulepath', 'initial_password'].includes(name.toLowerCase())));
+      const probe = `
+$ErrorActionPreference = 'Stop'
+$sections = [Security.AccessControl.AccessControlSections]'Access,Owner,Group'
+$paths = @($env:AI_NOVEL_PRIVATE_DIR) + @(Get-ChildItem -LiteralPath $env:AI_NOVEL_PRIVATE_DIR -Recurse -Force | ForEach-Object { $_.FullName })
+$entries = foreach ($path in $paths) {
+  $item = Get-Item -LiteralPath $path -Force
+  $acl = if ($item.PSIsContainer) { [IO.Directory]::GetAccessControl($path, $sections) } else { [IO.File]::GetAccessControl($path, $sections) }
+  @{ path = $path; owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; group = $acl.GetGroup([Security.Principal.SecurityIdentifier]).Value; protected = $acl.AreAccessRulesProtected; rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { @{ sid = $_.IdentityReference.Value; rights = [int]$_.FileSystemRights; inherited = $_.IsInherited } }) }
+}
+@{ current = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; entries = @($entries) } | ConvertTo-Json -Depth 6 -Compress
+`;
+      readPermissions = () => JSON.parse(execFileSync(join(powershellDir, 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', probe], { env: { ...childEnv, PSModulePath: join(powershellDir, 'Modules'), AI_NOVEL_PRIVATE_DIR: directory }, windowsHide: true, encoding: 'utf8' }));
+    }
+    const before = readPermissions?.();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      secureDataDirectory(directory); expect(readFileSync(join(directory, 'sources', 'fixture'), 'utf8')).toBe('private fixture');
+      if (readPermissions && before) {
+        const after = readPermissions(); expect(after.entries).toHaveLength(before.entries.length);
+        for (const entry of after.entries) {
+          const original = before.entries.find(value => value.path === entry.path)!;
+          expect(entry.owner).toBe(original.owner); expect(entry.group).toBe(original.group); expect(entry.protected).toBe(true);
+          const permitted = new Set([original.owner, after.current, 'S-1-5-18', 'S-1-5-32-544']);
+          expect(new Set(entry.rules.map(rule => rule.sid))).toEqual(permitted);
+          for (const rule of entry.rules) { expect(rule.rights).toBe(2032127); expect(rule.inherited).toBe(false); }
+        }
+      } else { expect(statSync(directory).mode & 0o777).toBe(0o700); expect(statSync(join(directory, 'sources', 'fixture')).mode & 0o777).toBe(0o600); }
+    }
   });
 });
