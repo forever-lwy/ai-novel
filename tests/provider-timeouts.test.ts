@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { generateText } from '../server/providers.js';
@@ -6,15 +6,12 @@ import type { ModelActivityEvent, ProviderConfig, ProviderProtocol } from '../sh
 
 const protocols: ProviderProtocol[] = ['openai-chat', 'openai-responses', 'gemini', 'claude'];
 const servers: Server[] = [];
-const deadlineMs = 250, gapMs = 80;
+// A global timer spy also changes Undici's timers; keep network deadlines real.
+const deadlineMs = 1000, gapMs = 320;
 const request = { system: '只输出正文。', prompt: '本地超时边界验证。' };
 const event = (value: unknown) => `data: ${typeof value === 'string' ? value : JSON.stringify(value)}\n\n`;
 const config = (protocol: ProviderProtocol, baseUrl: string): ProviderConfig => ({ id: 'fixture', name: '本地计时验证', protocol, baseUrl, model: 'fixture', timeoutMs: 1000, stream: true, maxOutputTokens: 1000, contextTokens: 64000 });
 
-beforeEach(() => {
-  const realSetTimeout = globalThis.setTimeout;
-  vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback: (...args: any[]) => void, delay?: number, ...args: any[]) => realSetTimeout(callback, delay === 1000 ? deadlineMs : delay, ...args)) as typeof setTimeout);
-});
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }

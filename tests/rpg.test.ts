@@ -22,6 +22,7 @@ afterEach(async () => {
 const extraction = (): ExtractionResult => ({ summary: '已完成本段体验', entities: [], relations: [], foreshadows: [] });
 function makeStore() { const store = new Store(mkdtempSync(join(tmpdir(), 'ai-novel-rpg-'))); stores.push(store); return store; }
 const options = [{ id: 'bridge', label: '前往桥头' }, { id: 'inn', label: '留在客栈', description: '向店主询问附近的情况' }];
+const withoutBudget = (messages: any[]) => messages.filter(message => !(message.role === 'system' && typeof message.content === 'string' && message.content.startsWith('[ai-novel:rpg-chapter-budget]\n')));
 function response(response: ServerResponse, text: string, calls?: { id: string; name: string; args: unknown }[]) {
   response.writeHead(200, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify({ choices: [{ message: { content: text, ...(calls ? { tool_calls: calls.map(call => ({ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.args) } })) } : {}) }, finish_reason: calls ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
@@ -116,7 +117,8 @@ describe('durable RPG story choices', () => {
     config.promptTemplates = validatePromptTemplates(templates);
     engine.choose(queued.id, { choiceId: waiting.pendingChoice!.id, optionId: 'bridge' });
     expect((await completed(engine, queued.id)).status).toBe('completed'); expect(service.bodies).toHaveLength(2);
-    expect(service.bodies[1].messages.slice(0, service.bodies[0].messages.length)).toEqual(service.bodies[0].messages);
+    const initialMessages = withoutBudget(service.bodies[0].messages);
+    expect(withoutBudget(service.bodies[1].messages).slice(0, initialMessages.length)).toEqual(initialMessages);
     await until(() => store.state(queued.branchId).chapters, chapters => chapters.length === 1 && chapters[0].status === 'ready');
     const next = engine.enqueue(queued.branchId, 'generate', { baseRevisionId: store.getBranch(queued.branchId).revisionId, mode: 'rpg', instruction: '下一章使用新预设' });
     const failed = await completed(engine, next.id); expect(failed.status).toBe('failed'); expect(failed.error).toContain('变量展开后没有非空 user');
@@ -157,7 +159,8 @@ describe('durable RPG story choices', () => {
     expect(store.state(copy.branchId).rpg?.character.entityId).not.toBe(oldEntityId);
     replacement.choose(copy.id, { choiceId: copy.pendingChoice!.id, optionId: 'bridge' });
     expect((await completed(replacement, copy.id)).status).toBe('completed'); expect(service.bodies).toHaveLength(3);
-    expect(JSON.stringify(service.bodies[2].messages.at(-1))).toContain('林舟'); expect(JSON.stringify(service.bodies[2].messages.at(-1))).not.toContain('没有此资料');
+    const lookupResult = service.bodies[2].messages.filter((message: any) => message.role === 'tool').at(-1);
+    expect(JSON.stringify(lookupResult)).toContain('林舟'); expect(JSON.stringify(lookupResult)).not.toContain('没有此资料');
     expect(job(replacement, waiting.id).status).toBe('paused'); expect(store.state(waiting.branchId).chapters).toHaveLength(0);
   });
 
@@ -185,7 +188,8 @@ describe('durable RPG story choices', () => {
     expect(second.pendingChoice?.question).toBe('如何回答守卫？'); expect(service.bodies).toHaveLength(1);
     engine.choose(queued.id, { choiceId: second.pendingChoice!.id, customText: '我向守卫解释来意' });
     expect((await completed(engine, queued.id)).status).toBe('completed'); expect(service.bodies).toHaveLength(2);
-    expect(service.bodies[1].messages.at(-2).content).toContain('前往桥头'); expect(service.bodies[1].messages.at(-1).content).toContain('我向守卫解释来意');
+    const answers = service.bodies[1].messages.filter((message: any) => message.role === 'tool');
+    expect(answers.at(-2).content).toContain('前往桥头'); expect(answers.at(-1).content).toContain('我向守卫解释来意');
     expect(job(engine, queued.id)).toMatchObject({ inputTokens: 20, outputTokens: 10 });
   });
 

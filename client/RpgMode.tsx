@@ -1,5 +1,5 @@
 import type { FormEvent, Ref } from 'react';
-import type { Entity, Job, RpgSetup, RpgCharacter, ChapterRef } from '../shared/types';
+import type { Entity, RpgChoice, RpgSetup, RpgCharacter, ChapterRef } from '../shared/types';
 import { Notice } from './ui';
 
 export function RpgSetupFields({ value, onChange, onCharacterKind, entities, chapters }: { value: RpgSetup; onChange: (value: RpgSetup) => void; onCharacterKind: (kind: RpgCharacter['kind']) => void; entities: Entity[]; chapters: ChapterRef[] }) {
@@ -15,22 +15,22 @@ export function RpgSetupFields({ value, onChange, onCharacterKind, entities, cha
 }
 
 export type RpgChoiceDraft = { selected: { optionId?: string; custom: boolean } | null; customText: string };
-export function RpgChoicePanel({ job, draft, busy, error, panelRef, onDraft, onSubmit }: { job: Job; draft: RpgChoiceDraft; busy: boolean; error?: string; panelRef: Ref<HTMLHeadingElement>; onDraft: (draft: RpgChoiceDraft) => void; onSubmit: (answer: { optionId?: string; customText?: string }) => Promise<void> }) {
+export function RpgChoicePanel({ choice, startsNextChapter = false, blockedReason, draft, busy, error, panelRef, onDraft, onSubmit }: { choice: RpgChoice; startsNextChapter?: boolean; blockedReason?: string; draft: RpgChoiceDraft; busy: boolean; error?: string; panelRef: Ref<HTMLHeadingElement>; onDraft: (draft: RpgChoiceDraft) => void; onSubmit: (answer: { optionId?: string; customText?: string }) => Promise<void> }) {
   const { selected, customText } = draft;
   const setSelected = (value: RpgChoiceDraft['selected']) => onDraft({ ...draft, selected: value });
   const setCustomText = (value: string) => onDraft({ ...draft, customText: value });
-  const choice = job.pendingChoice;
-  if (!choice) return null;
   async function submit(event: FormEvent) {
-    event.preventDefault(); if (busy || !selected || (selected.custom && !customText.trim())) return;
+    event.preventDefault(); if (busy || blockedReason || !selected || (selected.custom && !customText.trim())) return;
     await onSubmit(selected.custom ? { customText: customText.trim() } : { optionId: selected.optionId });
   }
   return <section className="rpg-choice" aria-label="决定接下来的剧情"><h2 ref={panelRef}>决定接下来的剧情</h2><form className="form-stack" onSubmit={submit} aria-busy={busy}>
+    {startsNextChapter && <p className="notice">本章已结束，此次选择将进入下一章。</p>}
     <p className="rpg-choice-question">{choice.question}</p>
     <fieldset className="rpg-choice-options" disabled={busy}><legend>选择你的行动</legend>{choice.options.map(option => <label className={`rpg-choice-option ${selected?.optionId === option.id ? 'selected' : ''}`} key={option.id}><input type="radio" name="rpg-action" value={option.id} checked={selected?.optionId === option.id} onChange={() => setSelected({ optionId: option.id, custom: false })} /><span><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span></label>)}<label className={`rpg-choice-option ${selected?.custom ? 'selected' : ''}`}><input type="radio" name="rpg-action" checked={selected?.custom === true} onChange={() => setSelected({ custom: true })} /><span><strong>自定义行动</strong><small>按自己的想法决定接下来怎么做。</small></span></label></fieldset>
     {selected?.custom && <label>你想怎么做？<textarea aria-label="你想怎么做？" required maxLength={10000} rows={4} value={customText} disabled={busy} onChange={event => setCustomText(event.target.value)} placeholder="写下你的行动、台词或选择" /></label>}
-    <p className="hint">可以回看上方正文，再决定怎么做。确认后，AI 会根据你的选择继续。</p>
+    <p className="hint">可以回看上方正文，再决定怎么做。{startsNextChapter ? '确认后，AI 会从所选行动开始下一章。' : '确认后，AI 会根据你的选择继续。'}</p>
+    {blockedReason && <p className="hint" role="status">{blockedReason}</p>}
     {error && <Notice error={error} />}
-    <div className="row end wrap"><button className="button primary" type="submit" disabled={busy || !selected || (selected.custom && !customText.trim())}>{busy ? '正在提交…' : '确认选择并继续'}</button></div>
+    <div className="row end wrap"><button className="button primary" type="submit" disabled={busy || !!blockedReason || !selected || (selected.custom && !customText.trim())}>{busy ? '正在提交…' : startsNextChapter ? '确认选择并开始下一章' : '确认选择并继续'}</button></div>
   </form></section>;
 }

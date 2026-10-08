@@ -4,6 +4,7 @@ import { createSecretStreamRedactor, redactSseFragments, secretVariants } from '
 import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequestSnapshot, ModelResult, ModelToolCall, ModelToolContinuation, ModelTransportDiagnostics, OutputIssue, ProviderConfig } from '../shared/types.js';
 import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions } from './provider-options.js';
 import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream, streamFrameFragments } from './model-stream.js';
+import { chapterBudgetInstruction, chapterBudgetReached } from '../shared/rpg-chapter.js';
 export { validateProviderOptions } from './provider-options.js';
 
 export const MODEL_TIMEOUT_MS = DEFAULT_MODEL_TIMEOUT_MS;
@@ -33,6 +34,14 @@ export class ModelInteractionPause extends Error {
   constructor(message = '等待用户选择。') {
     super(message);
     this.name = 'ModelInteractionPause';
+  }
+}
+
+/** A chapter boundary preserves its next choice instead of continuing this request. */
+export class ModelChapterComplete extends Error {
+  constructor() {
+    super('本章已到达自然分章节点。');
+    this.name = 'ModelChapterComplete';
   }
 }
 
@@ -522,7 +531,38 @@ function continuationWire(config: ProviderConfig, request: ModelRequest): Return
     if (state.pending && (!object(state.pending.data) || !Array.isArray(state.pending.calls) || !Array.isArray(state.pending.results) || !Number.isSafeInteger(state.pending.nextIndex) || state.pending.nextIndex < 0 || state.pending.nextIndex > state.pending.calls.length || state.pending.results.length !== state.pending.nextIndex)) throw new Error('保存的工具续接记录不完整，无法继续本次选择。');
     wire.body = structuredClone(state.body) as typeof wire.body;
   }
+  if (request.chapterBudget) updateChapterBudget(config, wire.body, state?.text ?? '', request.chapterBudget.targetWords);
   return wire;
+}
+
+const CHAPTER_BUDGET_MESSAGE = '[ai-novel:rpg-chapter-budget]\n';
+const isChapterBudgetMessage = (value: unknown): boolean => typeof value === 'string' && value.startsWith(CHAPTER_BUDGET_MESSAGE);
+
+/** Refresh only our own reminder, leaving original conversation and signatures intact. */
+function updateChapterBudget(config: ProviderConfig, body: JsonObject, text: string, targetWords: number): void {
+  const instruction = CHAPTER_BUDGET_MESSAGE + chapterBudgetInstruction(text, targetWords);
+  if (config.protocol === 'openai-chat') {
+    body.messages = body.messages.filter((message: JsonObject) => !(message.role === 'system' && isChapterBudgetMessage(message.content)));
+    body.messages.push({ role: 'system', content: instruction });
+  } else if (config.protocol === 'openai-responses') {
+    if (typeof body.input === 'string') body.input = [{ role: 'user', content: body.input }];
+    body.input = body.input.filter((message: JsonObject) => !(message.role === 'system' && isChapterBudgetMessage(message.content)));
+    body.input.push({ role: 'system', content: instruction });
+  } else if (config.protocol === 'gemini') {
+    body.contents = body.contents.map((message: JsonObject) => message.role === 'user' ? { ...message, parts: message.parts.filter((part: JsonObject) => !isChapterBudgetMessage(part.text)) } : message)
+      .filter((message: JsonObject) => message.role !== 'user' || message.parts.length);
+    const last = body.contents.at(-1);
+    if (last?.role === 'user') last.parts.push({ text: instruction });
+    else body.contents.push({ role: 'user', parts: [{ text: instruction }] });
+  } else {
+    body.messages = body.messages.map((message: JsonObject) => message.role === 'user' && Array.isArray(message.content) ? { ...message, content: message.content.filter((part: JsonObject) => !(part.type === 'text' && isChapterBudgetMessage(part.text))) } : message)
+      .filter((message: JsonObject) => message.role !== 'user' || !Array.isArray(message.content) || message.content.length);
+    const last = body.messages.at(-1);
+    if (last?.role === 'user') {
+      if (typeof last.content === 'string') last.content = [{ type: 'text', text: last.content }];
+      last.content.push({ type: 'text', text: instruction });
+    } else body.messages.push({ role: 'user', content: [{ type: 'text', text: instruction }] });
+  }
 }
 
 /** Redact whole normalized events, including credential fields inside tool objects and thought JSON. */
@@ -568,6 +608,8 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
   let round = saved?.round ?? 0;
   let usageEstimated = saved?.usageEstimated ?? false;
   let pending = saved?.pending ? structuredClone(saved.pending) : undefined;
+  const complete = (): ModelResult => ({ text: text.trim(), ...tokens, ...(usageEstimated ? { usageEstimated: true } : {}) });
+  const chapterComplete = () => Boolean(request.chapterBudget && chapterBudgetReached(text, request.chapterBudget.targetWords));
   const checkpoint = async () => {
     if (request.onContinuation) await request.onContinuation(structuredClone({ protocol: config.protocol, model: config.model, body, text, ...tokens, round, callCount, ...(usageEstimated ? { usageEstimated: true } : {}), ...(pending ? { pending } : {}) } satisfies ModelToolContinuation));
   };
@@ -575,6 +617,7 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
     while (round < maxRounds || pending) {
       if (request.signal?.aborted) throw new Error('模型请求已取消。');
       if (!pending) {
+        if (request.chapterBudget) updateChapterBudget(config, body, text, request.chapterBudget.targetWords);
         if (tools.length) {
           // Each request reserves its complete output allowance; historical usage
           // never reduces that allowance, including after a human decision.
@@ -591,9 +634,9 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         text += result.text;
         round++;
         const calls = responseToolCalls(config.protocol, data);
-        if (!calls.length) return { text: text.trim(), ...tokens, ...(usageEstimated ? { usageEstimated: true } : {}) };
+        if (!calls.length) return complete();
         callCount += calls.length;
-        if (round === maxRounds || callCount > maxRounds * 4) throw new Error('模型检索次数超过上限，请缩小本次写作范围后手动重试。');
+        if ((round === maxRounds && !chapterComplete()) || callCount > maxRounds * 4) throw new Error('模型检索次数超过上限，请缩小本次写作范围后手动重试。');
         pending = { data, calls, results: [], nextIndex: 0 };
         // Persist the full response, signatures and billed usage before any tool
         // can pause or change the story. Completed tools are saved separately.
@@ -618,7 +661,7 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
           output = JSON.stringify(await tool.execute(args)) ?? 'null';
           if (request.signal?.aborted) throw new Error('模型请求已取消。');
         } catch (error) {
-          if (!(error instanceof ModelInteractionPause)) emitActivity({ type: 'tool_result', id: activityId, name: call.name, error: error instanceof Error ? error.message : '资料检索失败。' });
+          if (!(error instanceof ModelInteractionPause) && !(error instanceof ModelChapterComplete)) emitActivity({ type: 'tool_result', id: activityId, name: call.name, error: error instanceof Error ? error.message : '资料检索失败。' });
           throw error;
         }
         results.push({ call, output }); pending.nextIndex = index + 1;
@@ -644,9 +687,11 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
       }
       pending = undefined;
       await checkpoint();
+      if (chapterComplete() && round > (saved?.round ?? 0)) return complete();
     }
     throw new Error('模型未在资料检索后完成正文。');
   } catch (error) {
+    if (error instanceof ModelChapterComplete) return complete();
     if (error instanceof ModelInteractionPause) {
       error.inputTokens = tokens.inputTokens; error.outputTokens = tokens.outputTokens;
       if (usageEstimated) error.usageEstimated = true;

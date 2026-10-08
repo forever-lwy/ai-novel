@@ -64,7 +64,9 @@ const factSchema = z.object({ id: z.string().min(1), text: z.string(), attribute
 const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string(), aliases: z.array(z.string()), description: z.string(), visibility: z.enum(['public', 'secret']), locked: z.boolean(), facts: z.array(factSchema), mergedInto: z.string().optional(), isMain: z.boolean().optional(), isMainSource: z.enum(['author', 'extraction']).optional(), nameStatus: z.enum(['placeholder', 'confirmed']).optional() });
 const refSchema = z.object({ id: z.string().min(1), title: z.string(), sourceId: z.string().optional(), summary: z.string(), status: z.enum(['pending', 'ready', 'failed']), createdAt: z.string() });
 export const rpgSetupSchema = z.object({ character: z.object({ kind: z.enum(['original', 'existing']), name: z.string().trim().max(300).default(''), description: z.string().max(30000).default(''), entityId: z.string().min(1).max(100).optional() }).strict(), entryChapterId: z.string().min(1).max(100).optional(), entryInstruction: z.string().max(10000).default('') }).strict();
-const rpgSessionSchema = rpgSetupSchema.extend({ character: rpgSetupSchema.shape.character.extend({ name: z.string(), description: z.string() }) });
+export const rpgChoiceSchema = z.object({ question: z.string().trim().min(1).max(3000), options: z.array(z.object({ id: z.string().trim().min(1).max(100), label: z.string().trim().min(1).max(500), description: z.string().max(2000).optional() }).strict()).min(2).max(6).refine(options => new Set(options.map(option => option.id)).size === options.length, '选项标识不能重复') }).strict();
+const savedRpgChoiceSchema = rpgChoiceSchema.extend({ id: z.string().min(1) });
+const rpgSessionSchema = rpgSetupSchema.extend({ character: rpgSetupSchema.shape.character.extend({ name: z.string(), description: z.string() }), nextChoice: savedRpgChoiceSchema.extend({ jobId: z.string().min(1), chapterId: z.string().min(1), maxWords: z.number().int().min(100).max(20000), instruction: z.string().max(30000), followingChoices: z.array(savedRpgChoiceSchema).max(95).optional() }).optional() });
 const sourceReferenceSchema = z.object({ branchId: z.string().min(1), revisionId: z.string().min(1), sourceIds: z.array(z.string().min(1)).refine(values => new Set(values).size === values.length).optional() }).strict();
 const stateSchema = z.object({ sourceReference: sourceReferenceSchema.optional(), rpg: rpgSessionSchema.optional(), activeImageIds: z.array(z.string().min(1)).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
 const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
@@ -417,9 +419,10 @@ export class Store {
       }
       state = previous;
     } else if (state.chapters.some(c => c.status !== 'ready')) throw new HttpError('上一章资料尚未整理完成，请先重试整理', 409);
-    // Writing tools can stage a plan; include it in the same revision as their completed prose.
-    prepareState?.(state);
     const chapter = this.putChapter(input.title, input.text); state.chapters.push(chapter);
+    // A chapter-end choice is tied to immutable prose; manual replacement cannot advance the old scene.
+    if (state.rpg?.nextChoice && state.rpg.nextChoice.chapterId !== chapter.id) delete state.rpg.nextChoice;
+    prepareState?.(state);
     state.outline.fine = state.outline.fine.filter(plan => plan.chapter > state.chapters.length);
     return this.commit(branch.id, branch.revisionId, state, input.chapterId ? '修订正文，等待资料整理' : '保存正文，等待资料整理', checkpoint);
   }
@@ -643,6 +646,10 @@ export class Store {
     for (const revision of restored.revisions) { const visited = new Set<string>(); let current: string | undefined = revision.revision.id; while (current && !validatedParents.has(current)) { if (visited.has(current)) throw new HttpError('备份版本存在循环引用'); visited.add(current); current = parents.get(current); } for (const revisionId of visited) validatedParents.add(revisionId); }
     const jobs = new Map(restored.jobs.map(j => [j.id, j])); const importPositions = new Set<string>();
     if (jobs.size !== restored.jobs.length || restored.jobs.some(j => j.projectId !== restored.project.id || !branchIds.has(j.branchId) || !revisionIds.has(j.baseRevisionId) || j.progress > j.total)) throw new HttpError('备份存在无效任务关联');
+    for (const state of states) if (state.rpg?.nextChoice) {
+      const choice = state.rpg.nextChoice; const owner = jobs.get(choice.jobId);
+      if (!owner || owner.kind !== 'generate' || owner.payload.mode !== 'rpg' || owner.payload.generatedChapterId !== choice.chapterId || state.chapters.at(-1)?.id !== choice.chapterId) throw new HttpError('备份章末选择关联无效');
+    }
     for (const part of restored.importChapters) { const key = `${part.jobId}:${part.position}`; if (jobs.get(part.jobId)?.kind !== 'import' || importPositions.has(key) || part.position >= jobs.get(part.jobId)!.total) throw new HttpError('备份导入章节关联无效'); importPositions.add(key); }
     for (const job of restored.jobs) {
       if (job.payload.rpgContinuation) {
@@ -673,7 +680,7 @@ export class Store {
         activityJobs.add(entry.jobId);
         const owner = jobs.get(entry.jobId)!;
         for (const activity of entry.activities) {
-          const recovered: WritingActivity = activity.status === 'running' && ['completed', 'paused', 'failed', 'cancelled', 'stale'].includes(owner.status) && !(owner.status === 'paused' && owner.payload.rpgChoice && !owner.payload.rpgChoiceAnswer && activity.name === 'ask_user')
+          const recovered: WritingActivity = activity.status === 'running' && ['completed', 'paused', 'failed', 'cancelled', 'stale'].includes(owner.status) && !(owner.status === 'paused' && owner.payload.rpgChoice && !owner.payload.rpgChoiceAnswer && !owner.payload.generatedChapterId && !owner.payload.rpgNextChoice && activity.name === 'ask_user')
             ? { ...activity, status: owner.status === 'completed' ? 'completed' : 'failed', ...(owner.status === 'completed' ? {} : { error: owner.message || '任务已暂停，过程已停止' }) } : activity;
           this.db.prepare('INSERT INTO job_writing_activities VALUES(?,?,?)').run(entry.jobId, activity.id, JSON.stringify(recovered));
         }

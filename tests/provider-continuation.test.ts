@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import type { ModelActivityEvent, ModelRequest, ModelToolContinuation, ProviderConfig, ProviderProtocol } from '../shared/types.js';
-import { buildRequestSnapshot, estimateModelRequestInputTokens, generateText, ModelInteractionPause, ModelOutputError } from '../server/providers.js';
+import { buildRequestSnapshot, estimateModelRequestInputTokens, generateText, ModelChapterComplete, ModelInteractionPause, ModelOutputError } from '../server/providers.js';
+import { chapterBudgetInstruction, chapterBudgetReached, countProseWords, normalizeChapterWords } from '../shared/rpg-chapter.js';
 
 const servers: Server[] = [];
 afterEach(async () => { for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); } });
@@ -142,5 +143,115 @@ describe('persistent human decisions inside provider tool rounds', () => {
       response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(data));
     });
     expect(await generateText(config('openai-chat', service.baseUrl), request(() => ({}), () => ({ answer: '渡河' })))).toEqual({ text: '你来到河边。你决定渡河。', inputTokens: 0, outputTokens: 0 });
+  });
+});
+
+function budgetMessage(protocol: ProviderProtocol, body: any): string {
+  if (protocol === 'openai-chat') return body.messages.find((message: any) => message.role === 'system' && message.content.startsWith('[ai-novel:rpg-chapter-budget]')).content;
+  if (protocol === 'openai-responses') return body.input.find((message: any) => message.role === 'system' && message.content.startsWith('[ai-novel:rpg-chapter-budget]')).content;
+  if (protocol === 'gemini') return body.contents.flatMap((message: any) => message.parts).find((part: any) => part.text?.startsWith('[ai-novel:rpg-chapter-budget]')).text;
+  return body.messages.flatMap((message: any) => Array.isArray(message.content) ? message.content : []).find((part: any) => part.text?.startsWith('[ai-novel:rpg-chapter-budget]')).text;
+}
+
+function chapterTurn(protocol: ProviderProtocol, text: string, includeChoice: boolean) {
+  const data: any = toolTurn(protocol);
+  if (protocol === 'openai-chat') {
+    data.choices![0].message.content = text;
+    if (!includeChoice) data.choices![0].message.tool_calls = data.choices![0].message.tool_calls!.filter((call: any) => call.function.name !== 'ask_user');
+  } else if (protocol === 'openai-responses') {
+    const message = data.output!.find((item: any) => item.type === 'message')!;
+    (message.content as { text: string }[])[0].text = text;
+    if (!includeChoice) data.output = data.output!.filter((item: any) => !('name' in item) || item.name !== 'ask_user');
+  } else if (protocol === 'gemini') {
+    data.candidates![0].content.parts[0].text = text;
+    if (!includeChoice) data.candidates![0].content.parts = data.candidates![0].content.parts.filter((part: any) => !part.functionCall || part.functionCall.name !== 'ask_user');
+  } else {
+    data.content!.find((item: any) => item.type === 'text')!.text = text;
+    if (!includeChoice) data.content = data.content!.filter((item: any) => !('name' in item) || item.name !== 'ask_user');
+  }
+  return data;
+}
+
+describe('RPG cumulative chapter budget', () => {
+  it('counts Unicode prose without whitespace and prepares natural closing instructions', () => {
+    expect(normalizeChapterWords()).toBe(2000); expect(normalizeChapterWords(50)).toBe(100); expect(normalizeChapterWords(30000)).toBe(20000);
+    expect(countProseWords(' 你\n好\t😀。 ')).toBe(4);
+    expect(chapterBudgetReached('字'.repeat(100), 100)).toBe(true);
+    expect(chapterBudgetInstruction('字'.repeat(85), 100)).toContain('收尾阶段');
+  });
+
+  it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s refreshes the budget across choices without reducing output tokens or breaking signed tool turns', async protocol => {
+    const service = await upstream((_body, response, index) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(index < 2 ? toolTurn(protocol) : prose(protocol)));
+    });
+    const model = config(protocol, service.baseUrl);
+    let continuation!: ModelToolContinuation, answered = false;
+    const ask = () => { if (!answered) throw new ModelInteractionPause(); answered = false; return { answer: '渡河' }; };
+    const incoming: ModelRequest = { ...request(() => ({}), ask), chapterBudget: { targetWords: 100 }, onContinuation: state => { continuation = state; } };
+    await expect(generateText(model, incoming)).rejects.toBeInstanceOf(ModelInteractionPause);
+    answered = true;
+    await expect(generateText(model, { ...incoming, continuation })).rejects.toBeInstanceOf(ModelInteractionPause);
+    answered = true;
+    expect(await generateText(model, { ...incoming, continuation })).toMatchObject({ text: '你来到河边。你来到河边。你决定渡河。', inputTokens: 31, outputTokens: 8 });
+    expect(service.bodies).toHaveLength(3);
+    for (const [index, body] of service.bodies.entries()) {
+      expect(budgetMessage(protocol, body)).toContain(`已累计生成正文 ${index * 6} 字`);
+      expect(budgetMessage(protocol, body)).toContain(`剩余约 ${100 - index * 6} 字`);
+      expect(JSON.stringify(body).match(/\[ai-novel:rpg-chapter-budget\]/g)).toHaveLength(1);
+      expect(protocol === 'gemini' ? body.generationConfig.maxOutputTokens : protocol === 'openai-responses' ? body.max_output_tokens : body.max_tokens).toBe(1000);
+      if (index) {
+        expect(JSON.stringify(body)).toContain(protocol === 'openai-chat' ? '内部思考' : 'signed-reasoning');
+        if (protocol === 'gemini') {
+          expect(body.contents.at(-1).parts.slice(0, -1).every((part: any) => part.functionResponse)).toBe(true);
+          expect(body.contents.at(-1).parts.at(-1).text).toContain('[ai-novel:rpg-chapter-budget]');
+        } else if (protocol === 'claude') {
+          expect(body.messages.at(-1).content.slice(0, -1).every((part: any) => part.type === 'tool_result')).toBe(true);
+          expect(body.messages.at(-1).content.at(-1).text).toContain('[ai-novel:rpg-chapter-budget]');
+        }
+      }
+    }
+  });
+
+  it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s preserves a whole over-budget turn and completes without another paid request after retrieval', async protocol => {
+    const text = '完整的一轮正文。'.repeat(20);
+    const service = await upstream((_body, response) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(chapterTurn(protocol, text, false))); });
+    const read = vi.fn(() => ({})), ask = vi.fn(() => ({ answer: '渡河' }));
+    let continuation!: ModelToolContinuation;
+    const result = await generateText(config(protocol, service.baseUrl), { ...request(read, ask), maxToolRounds: 1, chapterBudget: { targetWords: 100 }, onContinuation: state => { continuation = state; } });
+    expect(result).toMatchObject({ text, inputTokens: 10, outputTokens: 2 });
+    expect(service.bodies).toHaveLength(1); expect(read).toHaveBeenCalledTimes(2); expect(ask).not.toHaveBeenCalled();
+    expect(continuation.pending).toBeUndefined(); expect(continuation.text).toBe(text);
+  });
+
+  it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s completes a choice boundary successfully without reporting a tool error or discarding prose', async protocol => {
+    const text = '完整的一轮正文。'.repeat(20);
+    const service = await upstream((_body, response) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(chapterTurn(protocol, text, true))); });
+    const read = vi.fn(() => ({})), activities: ModelActivityEvent[] = [];
+    let continuation!: ModelToolContinuation;
+    const result = await generateText(config(protocol, service.baseUrl), { ...request(read, () => { throw new ModelChapterComplete(); }), maxToolRounds: 1, chapterBudget: { targetWords: 100 }, onContinuation: state => { continuation = state; }, onActivity: event => activities.push(event) });
+    expect(result).toMatchObject({ text, inputTokens: 10, outputTokens: 2 });
+    expect(service.bodies).toHaveLength(1); expect(read).toHaveBeenCalledTimes(1);
+    expect(continuation.pending?.nextIndex).toBe(1);
+    expect(activities.filter(activity => activity.type === 'tool_result' && activity.error)).toEqual([]);
+  });
+
+  it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s describes an already-confirmed action once before closing an old over-budget paused chapter', async protocol => {
+    const text = '完整的一轮正文。'.repeat(20);
+    const service = await upstream((_body, response, index) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(index ? prose(protocol) : chapterTurn(protocol, text, true))); });
+    let continuation!: ModelToolContinuation;
+    await expect(generateText(config(protocol, service.baseUrl), { ...request(() => ({}), () => { throw new ModelInteractionPause(); }), onContinuation: state => { continuation = state; } })).rejects.toBeInstanceOf(ModelInteractionPause);
+    const answer = vi.fn(() => ({ answer: '渡河' }));
+    const result = await generateText(config(protocol, service.baseUrl), { ...request(() => ({}), answer), continuation, chapterBudget: { targetWords: 100 }, onContinuation: state => { continuation = state; } });
+    expect(result).toMatchObject({ text: text + '你决定渡河。', inputTokens: 21, outputTokens: 6 });
+    expect(answer).toHaveBeenCalledTimes(1); expect(service.bodies).toHaveLength(2);
+    expect(budgetMessage(protocol, service.bodies[1])).toContain('剩余约 0 字');
+  });
+
+  it('retains ordinary tool continuation behavior when no chapter budget is provided', async () => {
+    const text = '完整的一轮正文。'.repeat(20);
+    const service = await upstream((_body, response, index) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(index ? prose('openai-chat') : chapterTurn('openai-chat', text, false))); });
+    const result = await generateText(config('openai-chat', service.baseUrl), request(() => ({}), () => ({})));
+    expect(result.text).toBe(text + '你决定渡河。'); expect(service.bodies).toHaveLength(2);
+    expect(JSON.stringify(service.bodies)).not.toContain('[ai-novel:rpg-chapter-budget]');
   });
 });

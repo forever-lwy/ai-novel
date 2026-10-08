@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { BranchView, Job, Project, Settings } from '../shared/types';
+import { countProseWords } from '../shared/rpg-chapter';
 
 // UI/server acceptance uses a local model fixture and isolated SQLite data.
 test.describe.configure({ mode: 'serial' });
@@ -241,4 +242,120 @@ test('从早期章节穿越，AI 读取原作后续摘要、未来物品及指�
   await waitReady(page, experienceId, 2);
   await expect.poll(() => visibleProse(page)).toContain('你按自己的选择回应守门人');
   expect((await branch(page, project.mainBranchId)).state.chapters.map(chapter => chapter.id)).toEqual(original.state.chapters.map(chapter => chapter.id));
+});
+
+test('整章累计字数封章，章末选择刷新恢复并只开启一次下一章', async ({ page }, testInfo) => {
+  const project = await seedNovel(page, 'E2E RPG 章节预算'); const original = await branch(page, project.mainBranchId);
+  const config: Settings = await (await page.request.get('/api/settings')).json();
+  expect((await page.request.put('/api/settings', { data: { ...config, writingModel: 'e2e-rpg-budget' } })).ok()).toBeTruthy();
+  await openProject(page, project); await page.getByRole('button', { name: '穿越体验', exact: true }).click();
+  const setup = page.getByRole('dialog'); await setup.getByLabel('角色姓名', { exact: true }).fill('顾星');
+  await setup.getByLabel('进入小说的起点', { exact: true }).selectOption(original.state.chapters[0].id);
+  await setup.getByLabel('目标字数', { exact: true }).fill('200'); await setup.getByRole('button', { name: '开始体验', exact: true }).click();
+  const choice = await waitChoice(page); const rpgBranchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+  const firstJob = (await jobs(page, project.id)).find(job => job.branchId === rpgBranchId && job.pendingChoice)!;
+  await expect(page.getByTestId('rpg-chapter-budget')).toContainText('180 / 200 字');
+  await expect(page.getByText('本章接近目标字数，正在收束；章末选择将由下一章承接。', { exact: true })).toBeVisible();
+  expect((await page.request.put('/api/settings', { data: { ...config, writingModel: 'e2e-rpg-budget', extractionModel: 'e2e-slow-extraction' } })).ok()).toBeTruthy();
+  await choice.getByRole('radio', { name: /查看石碑/ }).check(); await choice.getByRole('button', { name: '确认选择并继续', exact: true }).click();
+  await expect(choice.getByText('本章已结束，此次选择将进入下一章。', { exact: true })).toBeVisible();
+  const continueButton = choice.getByRole('button', { name: '确认选择并开始下一章', exact: true });
+  await choice.getByRole('radio', { name: /进入东门/ }).check(); await expect(continueButton).toBeDisabled();
+  await expect(choice.getByRole('status')).toContainText('资料整理完成');
+  await waitReady(page, rpgBranchId, 2); await expect(continueButton).toBeEnabled();
+  const sealed = await branch(page, rpgBranchId); const chapterChoice = sealed.state.rpg!.nextChoice!;
+  expect(chapterChoice).toMatchObject({ jobId: firstJob.id, maxWords: 200 });
+  const sealedChapter = await (await page.request.get(`/api/branches/${rpgBranchId}/chapters/${chapterChoice.chapterId}`)).json();
+  expect(countProseWords(sealedChapter.text)).toBeGreaterThanOrEqual(200);
+  expect((await jobs(page, project.id)).find(job => job.id === firstJob.id)).toMatchObject({ status: 'completed', generatedChapterId: chapterChoice.chapterId });
+
+  await page.reload(); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+  await expect(choice).toHaveCount(0); await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await expect(choice.getByText('本章已结束，此次选择将进入下一章。', { exact: true })).toBeVisible();
+  await expect.poll(() => visibleProse(page)).toContain(sealedChapter.text.replace(/\s+/g, ''));
+  await choice.getByRole('radio', { name: /自定义行动/ }).check();
+  await choice.getByLabel('你想怎么做？', { exact: true }).fill('下一章承接：先问守门人再进入东门。');
+  await page.locator('.chapter-list .chapter-item').first().click(); await expect(choice).toHaveCount(0);
+  await page.getByRole('button', { name: '继续体验', exact: true }).click(); await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(choice.getByLabel('你想怎么做？', { exact: true })).toHaveValue('下一章承接：先问守门人再进入东门。');
+  await page.locator('.workspace-tabs').getByRole('button', { name: /^任务/ }).click(); await expect(choice).toHaveCount(0);
+  await page.locator('.workspace-tabs').getByRole('button', { name: /^正文/ }).click();
+  await expect(choice.getByLabel('你想怎么做？', { exact: true })).toHaveValue('下一章承接：先问守门人再进入东门。');
+  await page.getByLabel('当前故事线', { exact: true }).selectOption(project.mainBranchId); await expect(choice).toHaveCount(0);
+  await page.getByLabel('当前故事线', { exact: true }).selectOption(rpgBranchId);
+  await expect(choice.getByLabel('你想怎么做？', { exact: true })).toHaveValue('下一章承接：先问守门人再进入东门。');
+  await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await expect(choice).toHaveCount(0);
+  expect((await (await page.request.get(`/api/branches/${rpgBranchId}?view=reader`)).json()).state).not.toHaveProperty('rpg.nextChoice');
+  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await expect(choice.getByLabel('你想怎么做？', { exact: true })).toHaveValue('下一章承接：先问守门人再进入东门。');
+  await page.setViewportSize({ width: 390, height: 844 }); await choice.locator('h2').scrollIntoViewIfNeeded();
+  expect(await choice.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath('rpg-chapter-boundary-mobile.png'), animations: 'disabled' });
+  await continueButton.scrollIntoViewIfNeeded(); await expect(continueButton).toBeInViewport({ ratio: 1 });
+  await page.screenshot({ path: testInfo.outputPath('rpg-chapter-boundary-actions-mobile.png'), animations: 'disabled' });
+  await page.setViewportSize({ width: 1440, height: 1000 }); await choice.locator('h2').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('rpg-chapter-boundary-desktop.png'), animations: 'disabled' });
+
+  let submitRequests = 0; let submittedBody: any; let rejectNextRefresh = false; let refreshFailures = 0;
+  await page.route(`**/api/branches/${rpgBranchId}?view=author`, async route => {
+    if (rejectNextRefresh) { rejectNextRefresh = false; refreshFailures++; await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: '本地验收：选择已接受后的版本刷新暂时失败' }) }); }
+    else await route.continue();
+  });
+  await page.route('**/api/jobs/*/choice?view=author', async route => {
+    submitRequests++; submittedBody = route.request().postDataJSON();
+    if (submitRequests === 1) await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: '本地验收：章末选择暂时提交失败' }) });
+    else { const accepted = await route.fetch(); if (accepted.ok()) rejectNextRefresh = true; await route.fulfill({ response: accepted }); }
+  });
+  await continueButton.click(); await expect(choice.getByRole('alert')).toContainText('章末选择暂时提交失败');
+  await expect(choice.getByLabel('你想怎么做？', { exact: true })).toHaveValue('下一章承接：先问守门人再进入东门。');
+  const nextJobResponse = page.waitForResponse(response => response.request().method() === 'POST' && response.url().includes(`/jobs/${firstJob.id}/choice?view=author`) && response.ok());
+  await continueButton.click(); const nextJob: Job = await (await nextJobResponse).json();
+  expect(submitRequests).toBe(2); expect(submittedBody).toMatchObject({ branchId: rpgBranchId, baseRevisionId: sealed.branch.revisionId, choiceId: chapterChoice.id });
+  expect(nextJob.id).not.toBe(firstJob.id);
+  expect((await page.request.post(`/api/jobs/${firstJob.id}/choice?view=author`, { data: submittedBody })).status()).toBe(409);
+  await expect(choice).toHaveCount(0); await waitReady(page, rpgBranchId, 3);
+  await expect.poll(() => visibleProse(page)).toContain('先问守门人再进入东门');
+  expect(refreshFailures).toBe(1); expect(submitRequests).toBe(2);
+  await expect(page.getByRole('alert')).toContainText('下一章已经开始，最新资料暂未刷新');
+  await page.screenshot({ path: testInfo.outputPath('rpg-chapter-accepted-refresh-failure.png'), animations: 'disabled' });
+  const after = await branch(page, rpgBranchId); expect(after.state.rpg).not.toHaveProperty('nextChoice');
+  expect((await page.request.get(`/api/branches/${rpgBranchId}/chapters/${chapterChoice.chapterId}`)).ok()).toBeTruthy();
+  expect((await (await page.request.get(`/api/branches/${rpgBranchId}/chapters/${chapterChoice.chapterId}`)).json()).text).toBe(sealedChapter.text);
+  expect((await jobs(page, project.id)).filter(job => job.branchId === rpgBranchId && job.kind === 'generate')).toHaveLength(2);
+  expect((await branch(page, project.mainBranchId)).state.chapters.map(chapter => chapter.id)).toEqual(original.state.chapters.map(chapter => chapter.id));
+});
+
+test('章末选择已消费但POST回包丢失，只读恢复新任务且不再次提交', async ({ page }, testInfo) => {
+  const project = await seedNovel(page, 'E2E RPG 选择回包丢失'); const original = await branch(page, project.mainBranchId);
+  const config: Settings = await (await page.request.get('/api/settings')).json();
+  expect((await page.request.put('/api/settings', { data: { ...config, writingModel: 'e2e-rpg-budget' } })).ok()).toBeTruthy();
+  const beforeStats = await (await page.request.get(`${mockUrl.replace(/\/v1$/, '')}/__e2e/stats`)).json();
+  await openProject(page, project); await page.getByRole('button', { name: '穿越体验', exact: true }).click();
+  const setup = page.getByRole('dialog'); await setup.getByLabel('角色姓名', { exact: true }).fill('顾星');
+  await setup.getByLabel('进入小说的起点', { exact: true }).selectOption(original.state.chapters[0].id);
+  await setup.getByLabel('目标字数', { exact: true }).fill('200'); await setup.getByRole('button', { name: '开始体验', exact: true }).click();
+  const choice = await waitChoice(page); const rpgBranchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+  await choice.getByRole('radio', { name: /查看石碑/ }).check(); await choice.getByRole('button', { name: '确认选择并继续', exact: true }).click();
+  await waitReady(page, rpgBranchId, 2);
+  await expect(choice.getByText('本章已结束，此次选择将进入下一章。', { exact: true })).toBeVisible();
+  const sealed = await branch(page, rpgBranchId); const chapterChoice = sealed.state.rpg!.nextChoice!;
+  await choice.getByRole('radio', { name: /自定义行动/ }).check(); await choice.getByLabel('你想怎么做？', { exact: true }).fill('下一章承接：先问守门人再进入东门。');
+  let choiceSubmissions = 0; let recoveredJob: Job | undefined; let submissionAborted = false; let recoveryReads = 0;
+  page.on('request', request => { if (submissionAborted && request.method() === 'GET' && request.url().includes(`/api/jobs?projectId=${project.id}&view=author`)) recoveryReads++; });
+  await page.route('**/api/jobs/*/choice?view=author', async route => {
+    choiceSubmissions++; const accepted = await route.fetch(); expect(accepted.ok()).toBeTruthy();
+    recoveredJob = await accepted.json(); submissionAborted = true; await route.abort('failed');
+  });
+  await choice.getByRole('button', { name: '确认选择并开始下一章', exact: true }).click();
+  await expect(choice).toHaveCount(0); await waitReady(page, rpgBranchId, 3);
+  await expect.poll(() => visibleProse(page)).toContain('先问守门人再进入东门');
+  await expect(page.getByText('章末选择已经接受，已恢复下一章；无需再次提交选择。', { exact: true })).toBeVisible();
+  expect(choiceSubmissions).toBe(1); expect(recoveryReads).toBeGreaterThanOrEqual(1);
+  expect(recoveredJob).toMatchObject({ branchId: rpgBranchId, chapterStartChoiceId: chapterChoice.id });
+  expect(recoveredJob!.id).not.toBe(chapterChoice.jobId);
+  expect((await jobs(page, project.id)).filter(job => job.branchId === rpgBranchId && job.kind === 'generate')).toHaveLength(2);
+  const afterStats = await (await page.request.get(`${mockUrl.replace(/\/v1$/, '')}/__e2e/stats`)).json();
+  expect(afterStats.modelRequestsByModel['e2e-rpg-budget'] - (beforeStats.modelRequestsByModel['e2e-rpg-budget'] || 0)).toBe(3);
+  await page.screenshot({ path: testInfo.outputPath('rpg-chapter-lost-post-response-recovered.png'), animations: 'disabled' });
 });

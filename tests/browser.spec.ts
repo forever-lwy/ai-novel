@@ -1831,6 +1831,7 @@ test('规划开关和工具模式即时约束独立规划入口，已有规划�
     const providerId = 'e2e-planning-controls-provider';
     expect((await page.request.put('/api/settings', { data: {
       ...previous, providers: [{ id: providerId, name: '规划入口独立验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }],
+      modelParameters: [],
       writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
       taskSettings: taskSettingsDefaults,
       imageSettings: { providerId: '', model: '', protocol: 'openai-images', size: '1024x1024', quality: 'auto', stylePrompt: '', autoPortrait: false, autoCG: false, timeoutMs: 120000 },

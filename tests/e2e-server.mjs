@@ -160,6 +160,27 @@ const modelServer = createServer(async (req, res) => {
       res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 30, completion_tokens: 15 } })}\n\n`);
       res.end('data: [DONE]\n\n'); return;
     }
+    if (body.model === 'e2e-rpg-budget') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const frame = (delta, finish_reason = null) => { if (!res.destroyed) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`); };
+      const done = finish_reason => { frame({}, finish_reason); if (!res.destroyed) res.end('data: [DONE]\n\n'); };
+      const actionMessage = body.messages?.find(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('上一章的待选问题与玩家已确认的行动：'));
+      const carried = actionMessage ? JSON.parse(actionMessage.content.split('上一章的待选问题与玩家已确认的行动：\n')[1].split('\n')[0]) : undefined;
+      if (carried) {
+        frame({ content: `${carried.text || carried.customText || carried.optionId}\n\n你向守门人询问东门的路况，然后迈进城门。` });
+        done('stop'); return;
+      }
+      const answered = body.messages?.some(message => message.role === 'tool' && message.tool_call_id === 'budget-first-choice');
+      const prose = answered ? '你按照刚才的选择走近石碑。'.repeat(5) : '你在白石城门前等待。'.repeat(18);
+      const choice = answered ? { question: '石阶分成两路，你准备怎样进入城中？', options: [{ id: 'east', label: '进入东门' }, { id: 'watch', label: '继续观察守门人' }] } : { question: '城门前的石碑发出微光，你准备怎么做？', options: [{ id: 'investigate', label: '查看石碑' }, { id: 'enter', label: '直接进入城中' }] };
+      frame({ content: prose + '\n\n' });
+      setTimeout(() => {
+        if (res.destroyed) return;
+        frame({ tool_calls: [{ index: 0, id: answered ? 'budget-chapter-choice' : 'budget-first-choice', type: 'function', function: { name: 'ask_user', arguments: JSON.stringify(choice) } }] });
+        done('tool_calls');
+      }, 400);
+      return;
+    }
     if (body.model === 'e2e-rpg') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const answers = body.messages?.filter(message => message.role === 'tool').flatMap(message => {

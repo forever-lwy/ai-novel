@@ -1,8 +1,9 @@
 export type Mode = 'original' | 'continuation' | 'fanfiction' | 'rewrite' | 'rpg';
 export interface RpgCharacter { kind: 'original' | 'existing'; name: string; description: string; entityId?: string }
 export interface RpgSetup { character: RpgCharacter; entryChapterId?: string; entryInstruction?: string }
-export interface RpgSession { character: RpgCharacter; entryChapterId?: string; entryInstruction: string }
+export interface RpgSession { character: RpgCharacter; entryChapterId?: string; entryInstruction: string; nextChoice?: RpgChapterChoice }
 export interface RpgChoice { id: string; question: string; options: { id: string; label: string; description?: string }[] }
+export interface RpgChapterChoice extends RpgChoice { jobId: string; chapterId: string; maxWords: number; instruction: string; followingChoices?: RpgChoice[] }
 export type Visibility = 'public' | 'secret';
 export type KnowledgeKind = 'character' | 'faction' | 'location' | 'item' | 'ability' | 'rule' | 'event';
 export interface Citation { chapterId: string; paragraph: number; quote: string }
@@ -77,7 +78,7 @@ export interface TaskSettings {
 export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings; taskSettings?: TaskSettings }
 export type JobKind = 'import' | 'extract' | 'generate' | 'plan';
 export type JobStatus = 'queued' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled' | 'stale';
-export interface Job { id: string; projectId: string; branchId: string; kind: JobKind; status: JobStatus; baseRevisionId: string; progress: number; total: number; message: string; error?: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean; createdAt: string; updatedAt: string; payload: Record<string, unknown>; generatedChapterId?: string; title?: string; purpose?: 'compress-summary'; generationInput?: Pick<GenerateInput, 'mode' | 'instruction' | 'maxWords' | 'title' | 'rpg'>; pendingChoice?: RpgChoice }
+export interface Job { id: string; projectId: string; branchId: string; kind: JobKind; status: JobStatus; baseRevisionId: string; progress: number; total: number; message: string; error?: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean; createdAt: string; updatedAt: string; payload: Record<string, unknown>; generatedChapterId?: string; chapterStartChoiceId?: string; title?: string; purpose?: 'compress-summary'; generationInput?: Pick<GenerateInput, 'mode' | 'instruction' | 'maxWords' | 'title' | 'rpg'>; pendingChoice?: RpgChoice }
 export type ModelActivityEvent = { type: 'thinking'; id: string; text: string } | { type: 'thinking_done'; id: string } | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown> } | { type: 'tool_result'; id: string; name: string; result?: unknown; error?: string };
 export interface WritingActivity { id: string; kind: 'thinking' | 'tool'; text?: string; name?: string; arguments?: Record<string, unknown>; result?: unknown; status: 'running' | 'completed' | 'failed'; error?: string; /** UTF-16 offset in author-visible prose when this activity first appeared. */ proseOffset?: number }
 export type WritingEvent = { type: 'snapshot'; text: string; title: string; job: Job; chapterId?: string; activities?: WritingActivity[] } | { type: 'delta'; text: string } | { type: 'activity'; activity: WritingActivity } | { type: 'status'; job: Job; chapterId?: string };
@@ -101,7 +102,7 @@ export interface ModelToolContinuation {
   inputTokens: number; outputTokens: number; round: number; callCount: number; usageEstimated?: boolean;
   pending?: { data: Record<string, unknown>; calls: ModelToolCall[]; results: { call: ModelToolCall; output: string }[]; nextIndex: number };
 }
-export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
+export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
 export type OutputStage = 'planning' | 'writing' | 'extraction';
 export interface OutputIssue { path: string; message: string; paragraph?: number; quote?: string; sourceText?: string }
 export interface ModelOutputRecord extends CapturedModelResponse {

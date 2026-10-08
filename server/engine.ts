@@ -4,8 +4,9 @@ import type { CapturedModelResponse, ExtractionResult, GenerateInput, Job, JobKi
 import { normalizeModelSettings, resolveModelConfig } from '../shared/model-settings.js';
 import { normalizeTaskSettings } from '../shared/task-settings.js';
 import { compilePrompt, normalizePromptTemplates } from '../shared/prompt-templates.js';
-import { generateStructured, generateText, estimateModelRequestInputTokens, ModelOutputError, ModelInteractionPause, parseStructuredText, redactModelPayload, unwrapModelOutput, structuredRequest, validateProviderOptions } from './providers.js';
-import { HttpError, OutputValidationError, Store, rpgSetupSchema } from './store.js';
+import { generateStructured, generateText, estimateModelRequestInputTokens, ModelOutputError, ModelInteractionPause, ModelChapterComplete, parseStructuredText, redactModelPayload, unwrapModelOutput, structuredRequest, validateProviderOptions } from './providers.js';
+import { normalizeChapterWords, chapterBudgetReached } from '../shared/rpg-chapter.js';
+import { HttpError, OutputValidationError, Store, rpgSetupSchema, rpgChoiceSchema } from './store.js';
 import { extractionContext, normalizeExtraction, splitExtractionBlocks as splitBlocks } from './extraction.js';
 import { buildWritingContext } from './writing-context.js';
 import type { ImageService } from './images.js';
@@ -15,7 +16,6 @@ export { extractionSchema } from './extraction.js';
 
 const foreshadowSchema = z.object({ title: z.string().min(1), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedNames: z.array(z.string()) });
 export const planningSchema = z.object({ fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })).min(1), foreshadows: z.array(foreshadowSchema) });
-const rpgChoiceSchema = z.object({ question: z.string().trim().min(1).max(3000), options: z.array(z.object({ id: z.string().trim().min(1).max(100), label: z.string().trim().min(1).max(500), description: z.string().max(2000).optional() }).strict()).min(2).max(6).refine(options => new Set(options.map(option => option.id)).size === options.length, '选项标识不能重复') }).strict();
 const now = () => new Date().toISOString();
 const estimateTokens = (text: string) => Math.ceil([...text].reduce((n, c) => n + (c.charCodeAt(0) > 127 ? 1.3 : 0.3), 0));
 const MAX_COMPRESSION_PASSES = 3;
@@ -112,7 +112,7 @@ export class StoryEngine {
   private output(jobId: string, outputId: string): ModelOutputRecord { this.get(jobId); const output = this.store.outputs.get(outputId); if (!output || output.jobId !== jobId) throw new HttpError('模型输出不存在', 404); return output; }
   private outputBlocker(job: Job, output: ModelOutputRecord): string | undefined {
     if (output.status === 'applied') return '此输出已经应用，不能重复应用';
-    if (job.payload.rpgChoice && !job.payload.rpgChoiceAnswer) return '剧情正在等待用户选择，请先回答当前剧情节点';
+    if (job.payload.rpgChoice && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice) return '剧情正在等待用户选择，请先回答当前剧情节点';
     if (output.stage === 'planning' && job.payload.purpose !== 'compress-summary' && job.kind === 'plan') { try { this.assertPlanningAfterProse(job.branchId); } catch (error) { return error instanceof Error ? error.message : '当前正文尚未完成'; } }
     if (!['failed', 'paused'].includes(job.status)) return '请先暂停任务；已取消、过期或完成的任务不能应用输出';
     if (this.controllers.has(job.id)) return '请求仍在结束中，请稍后再应用';
@@ -210,7 +210,7 @@ export class StoryEngine {
     }
     finally { pending = false; }
   }
-  private publicJob(job: Job): Job { return { ...job, pendingChoice: job.status === 'paused' && !job.payload.rpgChoiceAnswer ? job.payload.rpgChoice as RpgChoice | undefined : undefined, usageEstimated: Boolean(job.payload.usageEstimated), generatedChapterId: job.payload.generatedChapterId as string | undefined, title: job.payload.title as string | undefined, generationInput: job.kind === 'generate' ? { mode: job.payload.mode as GenerateInput['mode'], instruction: String(job.payload.instruction ?? ''), maxWords: job.payload.maxWords as number | undefined, title: job.payload.title as string | undefined } : undefined, purpose: job.payload.purpose === 'compress-summary' ? 'compress-summary' : undefined, payload: {} }; }
+  private publicJob(job: Job): Job { return { ...job, chapterStartChoiceId: (job.payload.rpgChapterAnswer as { choiceId?: string } | undefined)?.choiceId, pendingChoice: job.status === 'paused' && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice ? job.payload.rpgChoice as RpgChoice | undefined : undefined, usageEstimated: Boolean(job.payload.usageEstimated), generatedChapterId: job.payload.generatedChapterId as string | undefined, title: job.payload.title as string | undefined, generationInput: job.kind === 'generate' ? { mode: job.payload.mode as GenerateInput['mode'], instruction: String(job.payload.instruction ?? ''), maxWords: job.payload.maxWords as number | undefined, title: job.payload.title as string | undefined } : undefined, purpose: job.payload.purpose === 'compress-summary' ? 'compress-summary' : undefined, payload: {} }; }
   writingSnapshot(jobId: string): Extract<WritingEvent, { type: 'snapshot' }> {
     const job = this.get(jobId); if (job.kind !== 'generate') throw new HttpError('此任务不是正文生成任务', 400);
     const row = this.store.db.prepare('SELECT text FROM job_writing_drafts WHERE job_id=?').get(job.id);
@@ -241,7 +241,7 @@ export class StoryEngine {
   private save(job: Job, publish = true) {
     job.updatedAt = now(); this.store.db.prepare('INSERT INTO jobs(id,branch_id,project_id,status,data) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET branch_id=excluded.branch_id,project_id=excluded.project_id,status=excluded.status,data=excluded.data').run(job.id, job.branchId, job.projectId, job.status, JSON.stringify(job));
     if (job.kind === 'generate') {
-      const activities = ['completed', 'failed', 'cancelled', 'stale', 'paused'].includes(job.status) && !(job.status === 'paused' && job.payload.rpgChoice && !job.payload.rpgChoiceAnswer)
+      const activities = ['completed', 'failed', 'cancelled', 'stale', 'paused'].includes(job.status) && !(job.status === 'paused' && job.payload.rpgChoice && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice)
         ? this.store.finishWritingActivities(job.id, job.status === 'completed' ? undefined : this.redact(job.error || job.message)) : [];
       if (publish) this.notifyWriting(job, activities);
     }
@@ -269,6 +269,7 @@ export class StoryEngine {
         if (payload.chapterId || payload.selection || payload.regenerate) throw new HttpError('RPG 模式不支持改写或重新生成章节，请从原作另开体验线');
         if (startingRpg) rpgSetupSchema.parse(payload.rpg);
         else if (!state.rpg) throw new HttpError('请先选择原创角色或已有角色，创建 RPG 体验线');
+        else if (state.rpg.nextChoice) throw new HttpError('本章已结束，请先回答章末选择以进入下一章', 409);
       }
       if (payload.chapterId) {
         const chapter = this.store.chapter(branchId, String(payload.chapterId));
@@ -321,7 +322,7 @@ export class StoryEngine {
       }
     } else {
       if (!['paused', 'failed'].includes(job.status)) throw new HttpError('只能继续暂停或失败的任务');
-      if (job.payload.rpgChoice && !job.payload.rpgChoiceAnswer) throw new HttpError('请先选择剧情选项或填写自定义行动', 409);
+      if (job.payload.rpgChoice && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice) throw new HttpError('请先选择剧情选项或填写自定义行动', 409);
       if (job.payload.mode === 'rpg' && job.payload.rpgContinuation && !job.payload.generatedChapterId) {
         this.assertRpgProvider(job);
         const continuation = job.payload.rpgContinuation as ModelToolContinuation;
@@ -339,22 +340,50 @@ export class StoryEngine {
     }
     return this.publicJob(job);
   }
-  choose(jobId: string, input: { choiceId: string; optionId?: string; customText?: string }): Job {
+  choose(jobId: string, input: { choiceId: string; optionId?: string; customText?: string; baseRevisionId?: string; branchId?: string }): Job {
     const job = this.get(jobId);
     if (this.deletingProjects.has(job.projectId)) throw new HttpError('作品正在删除，不能提交剧情选择', 409);
+    const branchId = input.branchId ?? job.branchId;
+    const branch = this.store.getBranch(branchId);
+    if (branch.projectId !== job.projectId) throw new HttpError('此剧情选项不属于当前作品', 409);
+    const state = this.store.state(branchId);
+    const nextChoice = state.rpg?.nextChoice;
+    if (job.kind === 'generate' && job.payload.mode === 'rpg' && nextChoice?.jobId === job.id && nextChoice.id === input.choiceId) {
+      if (!input.baseRevisionId) throw new HttpError('章末选择需要当前故事版本，请刷新后重试', 409);
+      this.store.assertVersion(branchId, input.baseRevisionId);
+      if (state.chapters.at(-1)?.id !== nextChoice.chapterId || nextChoice.chapterId !== job.payload.generatedChapterId) throw new HttpError('章末剧情已经变化，此选项已失效', 409);
+      if (state.chapters.some(chapter => chapter.status !== 'ready')) throw new HttpError('请先完成本章资料整理，再选择进入下一章', 409);
+      if (this.jobsInternal(undefined, true).some(other => other.branchId === branchId)) throw new HttpError('故事线已有进行中或暂停的任务，请先完成或取消', 409);
+      const answer = this.choiceAnswer(nextChoice, input);
+      // The choice, new version and next job commit together; a duplicate cannot queue another request.
+      delete state.rpg!.nextChoice;
+      const reference = this.store.resolveSourceReference(branchId);
+      const title = (normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled && state.outline.fine.find(plan => plan.chapter === state.chapters.length + 1)?.title) || `第 ${state.chapters.length + 1} 章`;
+      let nextJob!: Job;
+      this.store.commit(branchId, branch.revisionId, state, '确认章末选择，开始下一章', revisionId => {
+        nextJob = { id: randomUUID(), projectId: job.projectId, branchId, kind: 'generate', status: 'queued', baseRevisionId: revisionId, progress: 0, total: 1, message: '已保存章末选择，等待开始下一章', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { mode: 'rpg', instruction: nextChoice.instruction, maxWords: nextChoice.maxWords, title, rpgChapterAnswer: { question: nextChoice.question, ...answer, ...(nextChoice.followingChoices?.length ? { unansweredQuestions: nextChoice.followingChoices } : {}) }, sourceReferenceCaptured: true, ...(reference ? { sourceReference: reference } : {}) } };
+        this.save(nextJob, false);
+      });
+      this.notifyWriting(nextJob); queueMicrotask(() => this.pump()); return this.publicJob(nextJob);
+    }
+    if (branchId !== job.branchId) throw new HttpError('此剧情选项已失效或不属于当前故事线', 409);
     const choice = job.payload.rpgChoice as RpgChoice | undefined;
     if (job.kind !== 'generate' || job.payload.mode !== 'rpg' || job.status !== 'paused' || !choice || choice.id !== input.choiceId || job.payload.rpgChoiceAnswer) throw new HttpError('此剧情选项已失效或已经回答，请刷新后重试', 409);
     this.store.assertVersion(job.branchId, job.baseRevisionId);
     this.assertRpgProvider(job);
+    const answer = this.choiceAnswer(choice, input);
+    if (this.jobsInternal(undefined, true).some(other => other.id !== job.id && other.branchId === job.branchId)) throw new HttpError('故事线已有其他任务', 409);
+    job.payload.rpgChoiceAnswer = answer;
+    job.status = 'queued'; job.error = undefined; job.message = '已保存选择，等待继续剧情'; this.save(job);
+    queueMicrotask(() => this.pump()); return this.publicJob(job);
+  }
+  private choiceAnswer(choice: RpgChoice, input: { optionId?: string; customText?: string }) {
     const customText = input.customText?.trim(); const hasOption = Boolean(input.optionId); const hasCustom = Boolean(customText);
     if (hasOption === hasCustom) throw new HttpError('请选择一个选项，或填写一条自定义行动');
     const option = hasOption ? choice.options.find(option => option.id === input.optionId) : undefined;
     if (hasOption && !option) throw new HttpError('所选选项不存在');
     if (customText && customText.length > 10000) throw new HttpError('自定义行动最多 10000 字符');
-    if (this.jobsInternal(undefined, true).some(other => other.id !== job.id && other.branchId === job.branchId)) throw new HttpError('故事线已有其他任务', 409);
-    job.payload.rpgChoiceAnswer = option ? { choiceId: choice.id, optionId: option.id, text: option.label, ...(option.description ? { description: option.description } : {}) } : { choiceId: choice.id, customText, text: customText };
-    job.status = 'queued'; job.error = undefined; job.message = '已保存选择，等待继续剧情'; this.save(job);
-    queueMicrotask(() => this.pump()); return this.publicJob(job);
+    return option ? { choiceId: choice.id, optionId: option.id, text: option.label, ...(option.description ? { description: option.description } : {}) } : { choiceId: choice.id, customText, text: customText! };
   }
   private assertRpgProvider(job: Job) {
     const provider = this.provider('writing'); const previous = job.payload.rpgProvider as { id: string; protocol: string; model: string; baseUrl: string } | undefined;
@@ -496,6 +525,14 @@ export class StoryEngine {
         if (job.payload.rpgChoiceCallKey === callKey && job.payload.rpgChoiceAnswer) return { status: 'answered', ...(job.payload.rpgChoiceAnswer as Record<string, unknown>), message: '这是用户确认的选择。只按该选择继续剧情；下一个关键决定仍须询问用户。' };
         const choice: RpgChoice = { id: randomUUID(), ...parsed.data };
         job.payload.rpgChoice = choice; job.payload.rpgChoiceCallKey = callKey; delete job.payload.rpgChoiceAnswer;
+        if (chapterBudgetReached(continuation!.text, normalizeChapterWords(job.payload.maxWords as number | undefined))) {
+          const followingChoices = pending!.calls.slice(pending!.nextIndex + 1).flatMap(other => {
+            if (other.name !== 'ask_user') return [];
+            try { const value = rpgChoiceSchema.safeParse(typeof other.arguments === 'string' ? JSON.parse(other.arguments) : other.arguments); return value.success ? [{ id: randomUUID(), ...value.data }] : []; } catch { return []; }
+          });
+          job.payload.rpgNextChoice = { ...choice, ...(followingChoices.length ? { followingChoices } : {}) }; job.message = '本章达到目标字数，正在保存正文与章末选择'; this.save(job);
+          throw new ModelChapterComplete();
+        }
         job.status = 'paused'; job.message = '剧情停在选择节点，等待你的决定'; job.error = undefined; this.save(job);
         throw new ModelInteractionPause('剧情等待用户选择。');
       },
@@ -503,7 +540,7 @@ export class StoryEngine {
   }
   private applyWriting(job: Job, output: ModelOutputRecord, prose: string, local: boolean) {
     if (!prose.trim()) throw new OutputValidationError([{ path: '$', message: '小说正文不能为空' }]);
-    if (job.payload.mode === 'rpg' && !job.payload.rpgChoice) throw new OutputValidationError([{ path: '$', message: 'RPG 剧情没有询问玩家的选择节点，请使用支持工具调用的写作模型并重新生成；正文已保留供作者查看' }]);
+    if (job.payload.mode === 'rpg' && !job.payload.rpgChoice && !job.payload.rpgChapterAnswer) throw new OutputValidationError([{ path: '$', message: 'RPG 剧情没有询问玩家的选择节点，请使用支持工具调用的写作模型并重新生成；正文已保留供作者查看' }]);
     const input = job.payload as unknown as GenerateInput; const original = job.payload.sourceChapterId ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined; const state = this.store.state(job.branchId);
     const text = original && input.selection ? String(original.text).slice(0, input.selection.start) + prose + String(original.text).slice(input.selection.end) : prose;
     const planning = normalizeTaskSettings(this.getSettings().taskSettings).planning;
@@ -517,6 +554,7 @@ export class StoryEngine {
       if (!postPlanning) this.queueExtraction(job, saved.id, local);
     }, state => {
       if (job.payload.sourceReference) state.sourceReference = structuredClone(job.payload.sourceReference as StoryReference);
+      if (state.rpg && job.payload.rpgNextChoice) state.rpg.nextChoice = { ...structuredClone(job.payload.rpgNextChoice as RpgChoice), jobId: job.id, chapterId: state.chapters.at(-1)!.id, maxWords: normalizeChapterWords(input.maxWords), instruction: input.instruction };
     });
     if (postPlanning) this.emitWriting(job.id, this.writingSnapshot(job.id)); this.notifyWriting(job);
     queueMicrotask(() => this.pump());
@@ -816,6 +854,11 @@ export class StoryEngine {
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
           writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : `请写第 ${state.chapters.length + 1} 章。`,
         });
+        if (!continuation && job.payload.rpgChapterAnswer) {
+          const action = `上一章的待选问题与玩家已确认的行动：\n${JSON.stringify(job.payload.rpgChapterAnswer)}\n本章从这条已确认行动的直接后果开始，不重复上一章正文，不再次询问同一决定；unansweredQuestions 若存在，是上个回合尚未回答的问题，不能当作已确认行动，须根据行动后的实际场景逐个调用 ask_user 等待玩家决定。后续自主行动仍须等待玩家选择。`;
+          if (prompt.messages) prompt.messages.push({ role: 'user', content: action });
+          else prompt.prompt += `\n${action}`;
+        }
         const instruction = illustrations.instruction + rpg.instruction + '\n当前阶段只生成正文，正文完整返回并保存之前禁止生成或提交新的剧情规划；后续规划会在正文保存后另行处理。';
         const messages = prompt.messages && instruction ? [{ role: 'system' as const, content: instruction }, ...prompt.messages] : prompt.messages;
         const aliases = job.payload.rpgLookupAliases as Record<string, string> | undefined;
@@ -831,7 +874,7 @@ export class StoryEngine {
           if (continuation && previous && (previous.id !== provider.id || previous.protocol !== provider.protocol || previous.model !== provider.model || previous.baseUrl !== provider.baseUrl)) throw new HttpError('RPG 续接需要使用原供应商、协议、服务地址和模型，请恢复原配置后继续');
           job.payload.rpgProvider = { id: provider.id, protocol: provider.protocol, model: provider.model, baseUrl: provider.baseUrl }; this.save(job);
         }
-        const request = this.budget(job, provider, { ...prompt, system: prompt.system + instruction, messages, signal: controller.signal, tools, onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event), ...(input.mode === 'rpg' ? { continuation, maxToolRounds: 24, onContinuation: (value: ModelToolContinuation) => { const fresh = this.live(jobId); fresh.payload.rpgContinuation = JSON.parse(this.redact(JSON.stringify(value))) as ModelToolContinuation; this.save(fresh); } } : {}) });
+        const request = this.budget(job, provider, { ...prompt, system: prompt.system + instruction, messages, signal: controller.signal, tools, onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event), ...(input.mode === 'rpg' ? { continuation, chapterBudget: { targetWords: normalizeChapterWords(input.maxWords) }, maxToolRounds: 24, onContinuation: (value: ModelToolContinuation) => { const fresh = this.live(jobId); fresh.payload.rpgContinuation = JSON.parse(this.redact(JSON.stringify(value))) as ModelToolContinuation; this.save(fresh); } } : {}) });
         const { result, output } = await this.requestCaptured(jobId, 'writing', request, req => this.models.generateText(provider, req), result => result.text);
         this.applyWriting(this.live(jobId), output, result.text, false);
         if (this.get(jobId).payload.postWritingPlanning === 'pending') await this.postWritingPlan(jobId, controller.signal);
