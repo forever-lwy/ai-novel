@@ -124,6 +124,53 @@ describe('HTTP authentication and deployment boundaries', () => {
 });
 
 describe('private data permissions', () => {
+  const windowsPermissions = (directory: string, script: string) => {
+    const powershellDir = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0');
+    const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !['psmodulepath', 'initial_password'].includes(name.toLowerCase())));
+    return execFileSync(join(powershellDir, 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; $target = $env:AI_NOVEL_PRIVATE_DIR; ${script}`], { env: { ...environment, PSModulePath: join(powershellDir, 'Modules'), AI_NOVEL_PRIVATE_DIR: directory }, windowsHide: true, encoding: 'utf8' }).trim();
+  };
+  const limitedAcl = `
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = [Security.AccessControl.DirectorySecurity]::new()
+$acl.SetAccessRuleProtection($true, $false)
+$inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]'Modify,Synchronize', $inherit, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-3-4'), [Security.AccessControl.FileSystemRights]::ChangePermissions, [Security.AccessControl.AccessControlType]::Deny))
+`;
+  it.skipIf(process.platform !== 'win32')('starts with compliant permissions when ordinary read/write is allowed but changing the ACL is denied', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'novel-private-files-')); directories.push(directory); writeFileSync(join(directory, 'fixture'), 'private fixture');
+    const setup = JSON.parse(windowsPermissions(directory, `${limitedAcl}
+[IO.Directory]::SetAccessControl($target, $acl)
+$before = [IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')
+$denied = $false
+try { ${limitedAcl} [IO.Directory]::SetAccessControl($target, $acl) } catch { $denied = $true }
+@{ denied = $denied; sddl = $before } | ConvertTo-Json -Compress`));
+    expect(setup.denied).toBe(true);
+    secureDataDirectory(directory); secureDataDirectory(directory);
+    writeFileSync(join(directory, 'fixture'), 'still writable'); expect(readFileSync(join(directory, 'fixture'), 'utf8')).toBe('still writable');
+    const after = windowsPermissions(directory, `[IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')`);
+    expect(after).toBe(setup.sddl);
+    const context = await buildApp({ dataDir: directory, startEngine: false, initialPassword: password }); contexts.push(context);
+    expect((await context.app.inject({ url: '/api/health' })).statusCode).toBe(200);
+    expect((await context.app.inject({ url: '/api/auth/status' })).statusCode).toBe(200);
+  });
+  it.skipIf(process.platform !== 'win32')('repairs an unsafe child while leaving a compliant parent ACL untouched', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'novel-private-files-')); directories.push(directory); secureDataDirectory(directory);
+    const child = join(directory, 'sources'); mkdirSync(child); writeFileSync(join(child, 'fixture'), 'retained');
+    const before = windowsPermissions(directory, `[IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')`);
+    windowsPermissions(child, `$acl = [IO.Directory]::GetAccessControl($target); $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-11'), [Security.AccessControl.FileSystemRights]::Read, [Security.AccessControl.AccessControlType]::Allow)); [IO.Directory]::SetAccessControl($target, $acl)`);
+    secureDataDirectory(directory);
+    expect(readFileSync(join(child, 'fixture'), 'utf8')).toBe('retained');
+    expect(windowsPermissions(directory, `[IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')`)).toBe(before);
+    expect(windowsPermissions(child, `@([IO.Directory]::GetAccessControl($target).GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-11' }).Count`)).toBe('0');
+  });
+  it.skipIf(process.platform !== 'win32')('rejects insecure data without ACL modification rights and keeps its contents intact', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'novel-private-files-')); directories.push(directory); writeFileSync(join(directory, 'fixture'), 'retained');
+    windowsPermissions(directory, `${limitedAcl}
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-11'), [Security.AccessControl.FileSystemRights]::Read, [Security.AccessControl.AccessControlType]::Allow))
+[IO.Directory]::SetAccessControl($target, $acl)`);
+    expect(() => secureDataDirectory(directory)).toThrow('WRITE_DAC'); expect(readFileSync(join(directory, 'fixture'), 'utf8')).toBe('retained');
+  });
   it('keeps contents and ownership while repeatedly securing already protected data with Access rules only', () => {
     const directory = mkdtempSync(join(tmpdir(), 'novel-private-files-')); directories.push(directory); mkdirSync(join(directory, 'sources')); writeFileSync(join(directory, 'sources', 'fixture'), 'private fixture');
     let readPermissions: (() => { current: string; entries: { path: string; owner: string; group: string; protected: boolean; rules: { sid: string; rights: number; inherited: boolean }[] }[] }) | undefined;
@@ -150,10 +197,9 @@ $entries = foreach ($path in $paths) {
         const after = readPermissions(); expect(after.entries).toHaveLength(before.entries.length);
         for (const entry of after.entries) {
           const original = before.entries.find(value => value.path === entry.path)!;
-          expect(entry.owner).toBe(original.owner); expect(entry.group).toBe(original.group); expect(entry.protected).toBe(true);
+          expect(entry.owner).toBe(original.owner); expect(entry.group).toBe(original.group);
           const permitted = new Set([original.owner, after.current, 'S-1-5-18', 'S-1-5-32-544']);
-          expect(new Set(entry.rules.map(rule => rule.sid))).toEqual(permitted);
-          for (const rule of entry.rules) { expect(rule.rights).toBe(2032127); expect(rule.inherited).toBe(false); }
+          for (const rule of entry.rules) expect(permitted.has(rule.sid)).toBe(true);
         }
       } else { expect(statSync(directory).mode & 0o777).toBe(0o700); expect(statSync(join(directory, 'sources', 'fixture')).mode & 0o777).toBe(0o600); }
     }
