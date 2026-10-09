@@ -1,4 +1,5 @@
 import type { ProviderConnection, ProviderModel } from '../shared/types.js';
+import type { Response } from 'undici';
 import { providerFetch } from './outbound.js';
 import { redactModelPayload } from './providers.js';
 

@@ -1,6 +1,6 @@
 import { lookup } from 'node:dns/promises';
 import { BlockList, isIP, type LookupFunction } from 'node:net';
-import { Agent } from 'undici';
+import { Agent, fetch, type RequestInit, type Response } from 'undici';
 import { hasUrlCredentials } from './security.js';
 
 const blocked = new BlockList();
@@ -54,6 +54,8 @@ export async function checkedProviderAddresses(hostname: string, allowPrivate: b
 
 /** The validated DNS results are the exact addresses used by the socket connector. */
 export async function providerFetch(input: string | URL, init: RequestInit, options: { timeoutManagedBySignal?: boolean } = {}): Promise<Response> {
+  // Use the installed fetch as well as Agent. Older Node-bundled fetch versions
+  // can lose abort listeners after GC with redirect: 'error' (Undici #4627).
   const policy = providerNetworkPolicy(input);
   const managedTimeout = Boolean(options.timeoutManagedBySignal && init.signal);
   if (!policy.enforce && !managedTimeout) return fetch(policy.url, { ...init, redirect: 'error' });
@@ -67,7 +69,7 @@ export async function providerFetch(input: string | URL, init: RequestInit, opti
   // Undici's independent connect/header/body limits must not cut them off early.
   const dispatcher = new Agent({ connect: { ...(policy.enforce ? { lookup: checkedLookup } : {}), ...(managedTimeout ? { timeout: 0 } : {}) }, ...(managedTimeout ? { headersTimeout: 0, bodyTimeout: 0 } : {}), connections: 2 });
   try {
-    const response = await fetch(policy.url, { ...init, redirect: 'error', dispatcher } as RequestInit & { dispatcher: Agent });
+    const response = await fetch(policy.url, { ...init, redirect: 'error', dispatcher });
     // close drains the response body without retaining an unbounded origin pool.
     void dispatcher.close().catch(() => undefined);
     return response;

@@ -1,5 +1,6 @@
 import type { ImageSettings, ProviderConnection } from '../shared/types.js';
 import { providerFetch } from './outbound.js';
+import { FormData, type Response } from 'undici';
 import { imageModelCapabilities, type ImageModelCapabilities } from '../shared/image-capabilities.js';
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;

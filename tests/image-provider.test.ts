@@ -1,7 +1,11 @@
 import { createServer, type Server } from 'node:http';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fetch, FormData, Response } from 'undici';
 import { generateImage, ImageProviderError, MAX_IMAGE_BYTES } from '../server/image-provider.js';
 import type { ImageSettings, ProviderConnection } from '../shared/types.js';
+
+vi.mock('undici', async importOriginal => ({ ...await importOriginal<typeof import('undici')>(), fetch: vi.fn() }));
+beforeEach(async () => { vi.mocked(fetch).mockReset().mockImplementation((await vi.importActual<typeof import('undici')>('undici')).fetch); });
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF4QAAAAASUVORK5CYII=', 'base64');
 const secret = 'image-test-secret';
@@ -14,7 +18,7 @@ const imageResponse = () => json({ data: [{ b64_json: png.toString('base64') }] 
 function mockFetch(...responses: Response[]) {
   const mock = vi.fn<typeof fetch>();
   for (const response of responses) mock.mockResolvedValueOnce(response);
-  vi.stubGlobal('fetch', mock);
+  vi.mocked(fetch).mockImplementation(mock);
   return mock;
 }
 const geminiResponse = (extra: Record<string, unknown> = {}) => json({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '已生成' }, { inlineData: { mimeType: 'image/png', data: png.toString('base64') } }] }, ...extra }] });
@@ -178,7 +182,7 @@ describe('image provider validation, bounds and cancellation', () => {
 
   it('redacts transport exceptions by returning a static error', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockRejectedValue(new Error(`network error for ${secret}`));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(fetch).mockImplementation(fetchMock);
     const error = await generateImage(provider, settings, '场景').catch(error => error);
     expect(error.message).toContain('无法连接或读取');
     expect(error.message).not.toContain(secret);
@@ -212,7 +216,7 @@ describe('image provider validation, bounds and cancellation', () => {
     const fetchMock = vi.fn<typeof fetch>().mockImplementation((_url, init) => new Promise((_resolve, reject) => {
       init!.signal!.addEventListener('abort', () => reject(new Error(secret)), { once: true });
     }));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(fetch).mockImplementation(fetchMock);
     const controller = new AbortController();
     const request = generateImage(provider, settings, '场景', controller.signal);
     controller.abort();
@@ -225,7 +229,7 @@ describe('image provider validation, bounds and cancellation', () => {
     const fetchMock = vi.fn<typeof fetch>().mockImplementation((_url, init) => new Promise((_resolve, reject) => {
       init!.signal!.addEventListener('abort', () => reject(new Error(secret)), { once: true });
     }));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(fetch).mockImplementation(fetchMock);
     const request = generateImage(provider, { ...settings, timeoutMs: 1000 }, '场景');
     const assertion = expect(request).rejects.toThrow('超时（1 秒）');
     await vi.advanceTimersByTimeAsync(1000);
@@ -241,7 +245,7 @@ describe('image provider validation, bounds and cancellation', () => {
         init!.signal!.addEventListener('abort', () => controller.error(new Error(secret)), { once: true });
       },
     })));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(fetch).mockImplementation(fetchMock);
     const request = generateImage(provider, settings, '场景', caller.signal);
     await Promise.resolve(); await Promise.resolve();
     caller.abort();

@@ -1,4 +1,5 @@
 import { ZodError } from 'zod';
+import type { Response } from 'undici';
 import { providerFetch } from './outbound.js';
 import { createSecretStreamRedactor, redactSseFragments, secretVariants } from './stream-redaction.js';
 import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequestSnapshot, ModelResult, ModelToolCall, ModelToolContinuation, ModelTransportDiagnostics, OutputIssue, ProviderConfig } from '../shared/types.js';

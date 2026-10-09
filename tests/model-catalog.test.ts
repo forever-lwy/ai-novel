@@ -1,7 +1,11 @@
 import { createServer, type Server } from 'node:http';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fetch, Response } from 'undici';
 import { listProviderModels } from '../server/model-catalog.js';
 import type { ProviderConnection, ProviderProtocol } from '../shared/types.js';
+
+vi.mock('undici', async importOriginal => ({ ...await importOriginal<typeof import('undici')>(), fetch: vi.fn() }));
+beforeEach(async () => { vi.mocked(fetch).mockReset().mockImplementation((await vi.importActual<typeof import('undici')>('undici')).fetch); });
 
 const secret = 'catalog-test-api-key';
 const servers: Server[] = [];
@@ -13,7 +17,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 function mockFetch(...responses: Response[]) {
   const mock = vi.fn<typeof fetch>();
   for (const response of responses) mock.mockResolvedValueOnce(response);
-  vi.stubGlobal('fetch', mock);
+  vi.mocked(fetch).mockImplementation(mock);
   return mock;
 }
 
@@ -125,7 +129,7 @@ describe('provider model catalogs', () => {
 
   it('does not disclose network exceptions, provider URLs or credentials', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockRejectedValue(new TypeError(`connect failed https://gateway.example/?token=route-secret ${secret}`));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(fetch).mockImplementation(fetchMock);
     const error = await listProviderModels(config('claude')).catch(error => error);
     expect(error.message).toContain('无法读取供应商模型列表');
     for (const text of [secret, 'route-secret', 'gateway.example', 'connect failed']) expect(error.message).not.toContain(text);
@@ -175,7 +179,7 @@ describe('provider model catalogs', () => {
   it('bounds pagination rather than following an unlimited catalog', async () => {
     let page = 0;
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => json({ models: [], nextPageToken: `cursor-${++page}` }));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(fetch).mockImplementation(fetchMock);
     await expect(listProviderModels(config('gemini'))).rejects.toThrow('超过 20 页');
     expect(fetchMock).toHaveBeenCalledTimes(20);
   });
@@ -206,7 +210,7 @@ describe('provider model catalogs', () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve(json({ models: [], nextPageToken: 'next' })), 600)))
       .mockImplementationOnce((_url, init) => new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error(secret)), { once: true })));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.mocked(fetch).mockImplementation(fetchMock);
     const result = listProviderModels(config('gemini', { timeoutMs: 1000 })).catch(error => error);
     await vi.advanceTimersByTimeAsync(999);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -220,7 +224,7 @@ describe('provider model catalogs', () => {
 
   it('caps long provider timeouts at 30 seconds while loading models', async () => {
     vi.useFakeTimers();
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation((_url, init) => new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))));
+    vi.mocked(fetch).mockImplementation(vi.fn<typeof fetch>().mockImplementation((_url, init) => new Promise((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))));
     const result = listProviderModels(config('openai-chat', { timeoutMs: 3600000 })).catch(error => error);
     await vi.advanceTimersByTimeAsync(30000);
     expect((await result).message).toContain('超时（30 秒）');
@@ -228,7 +232,7 @@ describe('provider model catalogs', () => {
 
   it('keeps the timeout active when an upstream body stops arriving', async () => {
     vi.useFakeTimers();
-    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async (_url, init) => new Response(new ReadableStream<Uint8Array>({
+    vi.mocked(fetch).mockImplementation(vi.fn<typeof fetch>().mockImplementation(async (_url, init) => new Response(new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new TextEncoder().encode('{"data":['));
         init?.signal?.addEventListener('abort', () => controller.error(new Error(secret)), { once: true });
