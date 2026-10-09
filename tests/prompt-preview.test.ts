@@ -26,7 +26,11 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     expect(response.statusCode).toBe(200);
     const preview = response.json<PromptPreviewResult>();
     const dialogue = preview.messages.filter(message => message.role !== 'system');
-    expect(dialogue.map(message => message.role)).toEqual(task === 'compression' ? ['user'] : ['user', 'assistant', 'user']);
+    expect(dialogue.map(message => message.role)).toEqual(task === 'compression' || task === 'extraction' ? ['user'] : ['user', 'assistant', 'user']);
+    if (task === 'extraction') {
+      expect(dialogue[0].content).toContain(variables.context);
+      expect(dialogue[0].content).toContain(variables.blockText);
+    }
     for (const block of preview.runtimeBlocks) expect(preview.messages.map(message => message.content).join('\n')).toContain(block.content);
     expect(preview.tools.length).toBe(task === 'writing' ? 6 : 0);
     if (task !== 'writing') {

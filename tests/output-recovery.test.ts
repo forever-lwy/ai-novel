@@ -30,6 +30,22 @@ function enqueueExtract(context: ReturnType<typeof make>) { return context.engin
 const apply = (engine: StoryEngine, job: Job, outputId: string, text: string) => engine.applyOutput(job.id, outputId, { baseRevisionId: engine.outputDetail(job.id, outputId).output.baseRevisionId, text });
 
 describe('author-only persisted model output recovery (neutral, simulated responses)', () => {
+  it('keeps the actual upstream failure in output summaries with credential redaction', async () => {
+    const model = provider(() => '');
+    model.generateStructured = async (_config, request) => {
+      request.onResponse?.({ rawResponse: '{"error":{"code":500,"message":"Internal Server Error"}}', text: '', httpStatus: 500, inputTokens: 0, outputTokens: 0 });
+      throw new Error('模型服务请求失败（HTTP 500）。test-configured-key-DO-NOT-PERSIST');
+    };
+    const context = make(model, '记录员检查灯塔。'); const job = enqueueExtract(context);
+    expect((await waitJob(context.engine, job.id)).status).toBe('failed');
+    expect(context.engine.listOutputs(job.id)[0]).toMatchObject({ status: 'invalid', httpStatus: 500, error: '模型服务请求失败（HTTP 500）。[REDACTED]' });
+    const detail = context.engine.outputDetail(job.id, context.engine.listOutputs(job.id)[0].id);
+    expect(detail.output.text).toBe('');
+    expect(detail.output.rawResponse).toContain('Internal Server Error');
+    expect(detail.output.issues[0].message).toBe('模型服务请求失败（HTTP 500）。[REDACTED]');
+    expect(context.store.state(context.project.mainBranchId).chapters[0].status).toBe('pending');
+  });
+
   it('persists invalid JSON before parsing, keeps failed edits, and applies a corrected result without another request', async () => {
     let calls = 0; const original = '{"summary":'; const context = make(provider(() => { calls++; return original; }), '记录员检查灯塔。'); const job = enqueueExtract(context);
     expect((await waitJob(context.engine, job.id)).status).toBe('failed');

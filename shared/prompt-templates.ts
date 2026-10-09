@@ -149,6 +149,7 @@ export const promptVariables: Record<PromptTask, PromptVariable[]> = {
 };
 
 const block = (id: string, name: string, role: PromptBlock['role'], content: string): PromptBlock => ({ id, name, role, enabled: true, content });
+const extractionAcknowledgment = '已收到索引。新资料只依据接下来提供的编号片段；无法确认的身份、属性和关系不补造，每条事实与关系都核对本片段证据。';
 /** Each call returns independent objects so editing or reset cannot mutate shared defaults. */
 export function defaultPromptTemplates(): PromptTemplateSettings {
   return {
@@ -169,7 +170,6 @@ export function defaultPromptTemplates(): PromptTemplateSettings {
       extraction: [{ id: 'default-extraction', name: '默认资料提取', blocks: [
         block('extraction-rules', '提取约定与输出格式', 'system', EXTRACT_SYSTEM),
         block('context', '已有名称与伏笔索引', 'user', '# 名称与伏笔索引\n以下仅辅助身份对照，不作为新事实的证据。\n{{context}}'),
-        block('context-ack', '证据边界确认', 'assistant', '已收到索引。新资料只依据接下来提供的编号片段；无法确认的身份、属性和关系不补造，每条事实与关系都核对本片段证据。'),
         block('extraction-request', '本次提取原文', 'user', '# 本次提取任务\n待整理章节：{{chapterTitle}}\n仅提取以下片段，保留原段落编号。\n\n## 编号原文\n{{blockText}}\n\n## 提交要求\n返回 summary、entities、relations、foreshadows。没有依据的条目不填；仅输出合法 JSON 对象。'),
       ] }],
       compression: [{ id: 'default-compression', name: '默认摘要压缩', blocks: [
@@ -275,6 +275,14 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
   // Only a byte-for-byte equivalent preset is upgraded. Author edits and copies remain intact.
   for (const task of promptTasks) settings.presets[task] = settings.presets[task].map(preset =>
     JSON.stringify(preset) === JSON.stringify(legacyPromptTemplates.presets[task][0]) ? defaults.presets[task][0] : preset);
+  // Extraction is a single-turn task. Only upgrade the former default, including
+  // editor-generated block IDs; retain author edits, copies and intentional examples.
+  const current = defaults.presets.extraction[0];
+  const acknowledged: PromptPreset = { ...current, blocks: [...current.blocks.slice(0, 2), block('context-ack', '证据边界确认', 'assistant', extractionAcknowledgment), ...current.blocks.slice(2)] };
+  settings.presets.extraction = settings.presets.extraction.map(preset => {
+    const comparable = { ...preset, blocks: preset.blocks.map((value, index) => ({ ...value, id: acknowledged.blocks[index]?.id ?? value.id })) };
+    return JSON.stringify(comparable) === JSON.stringify(acknowledged) ? { ...preset, blocks: preset.blocks.filter((_value, index) => index !== 2) } : preset;
+  });
   return settings;
 }
 export function activePromptPreset(config: PromptTemplateSettings | undefined, task: PromptTask): PromptPreset {

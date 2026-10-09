@@ -11,7 +11,7 @@ const variables = {
 const messageBlock = (id: string, role: PromptBlock['role'], content: string): PromptBlock => ({ id, name: id, role, content, enabled: true });
 
 describe('editable task prompt templates', () => {
-  it('provides independent Markdown defaults and alternates the conversation for every task and writing mode', () => {
+  it('provides independent Markdown defaults and uses single-turn extraction and compression', () => {
     const first = normalizePromptTemplates(); const second = normalizePromptTemplates();
     first.presets.writing[0].blocks[0].content = 'changed';
     expect(second.presets.writing[0].blocks[0].content).toBe(BASE_SYSTEM);
@@ -25,10 +25,35 @@ describe('editable task prompt templates', () => {
     expect(requests.compression).toMatchObject({ system: COMPRESSION_SYSTEM, prompt: expect.stringContaining(variables.summaryText) });
     for (const task of promptTasks) for (const mode of ['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']) {
       const dialogue = compileTaskPrompt(undefined, task, { ...variables, mode }).messages.filter(message => message.role !== 'system');
-      expect(dialogue.map(message => message.role)).toEqual(task === 'compression' ? ['user'] : ['user', 'assistant', 'user']);
+      expect(dialogue.map(message => message.role)).toEqual(task === 'compression' || task === 'extraction' ? ['user'] : ['user', 'assistant', 'user']);
       expect(dialogue[0].content).toMatch(/^# /);
+      if (task === 'extraction') {
+        expect(dialogue[0].content).toContain(variables.context);
+        expect(dialogue[0].content).toContain(`## 编号原文\n${variables.blockText}`);
+        expect(dialogue[0].content).not.toContain('已收到索引');
+      }
     }
     expect(validatePromptTemplates(second)).toEqual(second);
+  });
+
+  it.each([false, true])('upgrades untouched acknowledged extraction with editor IDs=%s while preserving edits and copies', editorIds => {
+    const settings = defaultPromptTemplates();
+    const old = structuredClone(settings.presets.extraction[0]);
+    old.blocks.splice(2, 0, { id: 'context-ack', name: '证据边界确认', role: 'assistant', enabled: true, content: '已收到索引。新资料只依据接下来提供的编号片段；无法确认的身份、属性和关系不补造，每条事实与关系都核对本片段证据。' });
+    if (editorIds) old.blocks.forEach((value, index) => { value.id = `editor-${index}`; });
+    const edited = structuredClone(old); edited.id = 'edited'; edited.blocks[0].content += '\n作者的提取要求';
+    const copy = structuredClone(old); copy.id = 'copy'; copy.name = '我的提取预设';
+    settings.presets.extraction = [old, edited, copy]; settings.selected.extraction = 'copy';
+    const before = structuredClone(settings);
+    const normalized = normalizePromptTemplates(settings);
+    expect(settings).toEqual(before);
+    expect(normalized.presets.extraction[0]).toEqual({ ...old, blocks: old.blocks.filter((_value, index) => index !== 2) });
+    expect(normalized.presets.extraction.slice(1)).toEqual([edited, copy]);
+    expect(normalized.selected.extraction).toBe('copy');
+    expect(normalizePromptTemplates(normalized)).toEqual(normalized);
+    const customizedDefault = structuredClone(before);
+    customizedDefault.presets.extraction[0].blocks[0].content += '\n作者的证据要求';
+    expect(normalizePromptTemplates(customizedDefault)).toEqual(customizedDefault);
   });
 
   it('upgrades only untouched legacy presets and leaves author changes and input data intact', () => {
