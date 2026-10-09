@@ -1,12 +1,17 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Copy, Download, GripVertical, Plus, RotateCcw, Trash2, Upload } from 'lucide-react';
-import type { Mode, PromptBlock, PromptPreset, PromptTask, PromptTemplateSettings, Settings } from '../shared/types';
+import type { Mode, PromptBlock, PromptPreset, PromptTask, PromptTemplateSettings, ProviderProtocol, Settings } from '../shared/types';
+import type { PromptPreviewInput, PromptPreviewResult } from '../shared/prompt-runtime';
+import { normalizeTaskSettings } from '../shared/task-settings';
+import { normalizeImageSettings } from '../shared/image-settings';
+import { api } from './api';
 import { activePromptPreset, compilePrompt, defaultPromptTemplates, promptPresetVariables, promptTaskLabels, promptTasks, promptVariables, validatePromptTemplates } from '../shared/prompt-templates';
 import { Notice } from './ui';
 
 const roleLabels = { system: '系统', user: '用户', assistant: '助手' };
 const modeLabels: Record<Mode, string> = { original: '原创', continuation: '续写', fanfiction: '同人', rewrite: '改写', rpg: '穿越小说 · RPG' };
 const modes = Object.keys(modeLabels) as Mode[];
+const protocolLabels: Record<ProviderProtocol, string> = { 'openai-chat': 'OpenAI Chat', 'openai-responses': 'OpenAI Responses', gemini: 'Gemini', claude: 'Claude' };
 
 function sampleValue(key: string) {
   const samples: Record<string, string> = {
@@ -24,7 +29,7 @@ function sampleValue(key: string) {
     worldRules: '[]', mainCharacters: '[{"name":"林舟","description":"没有超自然能力的年轻信使"}]', mainCharacterRelations: '[]',
     unrevealedForeshadows: '[]', plotSummaries: '第一章：林舟收到船长失踪前寄出的信，决定赶往码头。',
     recentChapters: '林舟拿着神秘来信，在城门关闭之前赶到了雾港。', currentChapterPlan: '{"chapter":2,"title":"雨夜码头","goal":"在码头发现船长留下的怀表"}',
-    writingTarget: '请写第 2 章，只写当前这一章。', sourceText: '雨水浸透了林舟的斗篷。他沿着码头寻找失踪船长。',
+    writingTarget: '请写第 2 章，只写当前这一章。', sourceText: '雨水浸透了林舟的斗篷。他沿着码头寻找失踪船长。', originalReference: '',
   };
   return samples[key] ?? `示例${key}`;
 }
@@ -52,7 +57,12 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
   const [expandedBlock, setExpandedBlock] = useState('');
   const [insertBlock, setInsertBlock] = useState('');
   const [draggedBlock, setDraggedBlock] = useState('');
-  const [samples, setSamples] = useState<Record<PromptTask, Record<string, string>>>(() => Object.fromEntries(promptTasks.map(value => [value, Object.fromEntries(promptVariables[value].map(variable => [variable.key, sampleValue(variable.key)]))])) as Record<PromptTask, Record<string, string>>);
+  const [protocolOverride, setProtocolOverride] = useState<ProviderProtocol | ''>('');
+  const [planningMode, setPlanningMode] = useState<'separate' | 'tool' | ''>('');
+  const [rpgSample, setRpgSample] = useState({ character: { kind: 'original' as 'original' | 'existing', name: '林舟', description: '没有超自然能力的年轻信使。' }, entryInstruction: '从雨夜码头进入故事。' });
+  const [chapterAnswer, setChapterAnswer] = useState('');
+  const [compiledPreview, setCompiledPreview] = useState<{ key: string; result?: PromptPreviewResult; error?: string }>();
+  const [samples, setSamples] = useState<Record<PromptTask, Record<string, string>>>(() => Object.fromEntries(promptTasks.map(value => [value, Object.fromEntries(promptVariables[value].map(variable => [variable.key, value === 'extraction' && variable.key === 'context' ? '名称对照（仅用于统一称呼，不是新增事实的证据）：[{"kind":"character","name":"林舟","aliases":[]}]\n尚未揭晓的伏笔索引（不可据此推断答案）：[]' : sampleValue(variable.key)]))])) as Record<PromptTask, Record<string, string>>);
   const fileInput = useRef<HTMLInputElement>(null);
   const textareas = useRef(new Map<string, HTMLTextAreaElement>());
   const currentSettings = useRef(settings);
@@ -65,9 +75,35 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
   const targetBlock = preset.blocks.find(block => block.id === insertBlock) || preset.blocks[0];
   let validationError = '';
   try { validatePromptTemplates(templates); } catch (error) { validationError = (error as Error).message; }
-  let preview: ReturnType<typeof compilePrompt> | undefined;
-  let previewError = '';
-  try { preview = compilePrompt(templates, task, { ...preset.variables, ...samples[task] }); } catch (error) { previewError = (error as Error).message; }
+  let compileError = '';
+  try { compilePrompt(templates, task, { ...preset.variables, ...samples[task] }); } catch (error) { compileError = (error as Error).message; }
+  const planning = normalizeTaskSettings(settings.taskSettings).planning;
+  const effectivePlanningMode = planningMode || planning.mode;
+  const providerId = task === 'writing' || task === 'planning' && effectivePlanningMode === 'tool' ? settings.writingProviderId : task === 'extraction' ? settings.extractionProviderId : settings.planningProviderId;
+  const protocol = protocolOverride || settings.providers.find(provider => provider.id === providerId)?.protocol || 'openai-chat';
+  const images = normalizeImageSettings(settings.imageSettings);
+  const previewInput: PromptPreviewInput = { task, templates, variables: { ...preset.variables, ...samples[task] }, protocol, runtime: {
+    planningMode: effectivePlanningMode,
+    illustrations: { portrait: Boolean(images.providerId && images.model && images.autoPortrait), cg: Boolean(images.providerId && images.model && images.autoCG) },
+    ...(task === 'writing' && samples.writing.mode === 'rpg' ? { rpg: rpgSample, chapterAnswer } : {}),
+  } };
+  const previewKey = JSON.stringify(previewInput);
+  const preview = compiledPreview?.key === previewKey ? compiledPreview.result : undefined;
+  const previewError = compileError || (compiledPreview?.key === previewKey ? compiledPreview.error : '');
+  useEffect(() => {
+    if (compileError) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void api<PromptPreviewResult>('/settings/prompt-preview', { method: 'POST', body: previewKey, signal: controller.signal })
+        .then(result => {
+          if (!result || !Array.isArray(result.messages) || !Array.isArray(result.runtimeBlocks) || !Array.isArray(result.tools) || typeof result.body !== 'string') throw new Error('预览响应不完整，请刷新页面后重试。');
+          JSON.parse(result.body);
+          if (!controller.signal.aborted) setCompiledPreview({ key: previewKey, result });
+        })
+        .catch(error => { if (!controller.signal.aborted) setCompiledPreview({ key: previewKey, error: (error as Error).message }); });
+    }, 150);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [previewKey, compileError]);
 
   function change(next: PromptTemplateSettings) { if (disabledRef.current) return; setActionError(''); setFeedback(''); onChange({ ...currentSettings.current, promptTemplates: next }); }
   function updatePreset(patch: Partial<PromptPreset>) { change({ ...templates, presets: { ...templates.presets, [task]: templates.presets[task].map(value => value.id === preset.id ? { ...value, ...patch } : value) } }); }
@@ -138,7 +174,7 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
   }
 
   const body = <div className="prompt-templates-body form-stack">
-      <p className="hint">为正文写作、剧情规划、资料提取和摘要压缩分别编排提示词。启用的块按顺序发送，使用 {'{{变量名}}'} 引入本次任务的素材。修改后点击下方“保存设置”生效。</p>
+      <p className="hint">为四类任务分别编排 Markdown 提示词，使用 {'{{变量名}}'} 引入素材。默认按用户、助手交替组织对话；相邻同角色对话块发送时合并。下方最终预览包含全部消息、程序规则与工具定义。修改后点击“保存设置”生效。</p>
       <div className="prompt-task-tabs" role="tablist" aria-label="提示词任务">{promptTasks.map(value => <button type="button" key={value} role="tab" aria-selected={task === value} className={task === value ? 'active' : ''} disabled={disabled} onClick={() => selectTask(value)}>{promptTaskLabels[value]}</button>)}</div>
       <section className="prompt-preset-editor form-stack" aria-label={`${promptTaskLabels[task]}提示词预设`}>
         <div className="prompt-preset-heading"><label>当前预设<select aria-label="当前提示词预设" disabled={disabled} value={preset.id} onChange={event => { change({ ...templates, selected: { ...templates.selected, [task]: event.target.value } }); setInsertBlock(''); setExpandedBlock(''); }}>{templates.presets[task].map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label><div className="row wrap"><button type="button" className="button secondary small" disabled={disabled} onClick={() => addPreset()}><Plus size={14} />新建预设</button><button type="button" className="button secondary small" disabled={disabled} onClick={() => addPreset(true)}><Copy size={14} />复制预设</button><button type="button" className="icon-button danger-text" aria-label="删除当前提示词预设" title="删除当前预设（每个任务至少保留一个）" disabled={disabled || templates.presets[task].length <= 1} onClick={() => { const remaining = templates.presets[task].filter(value => value.id !== preset.id); change({ ...templates, presets: { ...templates.presets, [task]: remaining }, selected: { ...templates.selected, [task]: remaining[0].id } }); }}><Trash2 size={15} /></button></div></div>
@@ -162,11 +198,18 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
           <p className="hint">变量名使用英文字母、数字和下划线，以英文字母开头；不能覆盖内置变量。变量值可写风格规则或常用要求，属于当前预设。</p>
           {Object.entries(preset.variables || {}).map(([key, value], index) => <div className="prompt-custom-variable" key={index}><label>变量名<input aria-label={`自定义变量 ${index + 1} 名称`} value={key} disabled={disabled} onChange={event => renameVariable(index, event.target.value)} spellCheck={false} /></label><label>变量值<textarea aria-label={`自定义变量 ${index + 1} 值`} rows={2} value={value} disabled={disabled} onChange={event => updatePreset({ variables: { ...preset.variables, [key]: event.target.value } })} /></label><button type="button" className="icon-button danger-text" aria-label={`删除自定义变量 ${index + 1}`} disabled={disabled} onClick={() => updatePreset({ variables: Object.fromEntries(Object.entries(preset.variables || {}).filter(([name]) => name !== key)) })}><Trash2 size={15} /></button></div>)}
         </div></details>
-        <details className="prompt-inner-fold"><summary>编译预览 · 使用示例素材</summary><div className="form-stack">
-          <p className="hint">这里展示示例变量替换后的消息，不调用模型。实际任务会填入当前作品、章节和规划资料。正文写作会根据示例 mode 筛选适用的块。</p>
+        <details className="prompt-inner-fold" open><summary>最终发送预览 · 使用示例素材</summary><div className="form-stack">
+          <p className="hint">按实际发送流程展开全部提示词，包括 JSON 格式要求、写作阶段和所选场景的附加规则，不调用模型。这里使用可编辑的示例素材；实际任务会换成对应作品资料。RPG 展示新章首轮，后续真实问答及工具返回可在每轮请求诊断中查看。</p>
+          <div className="form-grid"><label>预览接口协议<select aria-label="预览接口协议" value={protocolOverride} onChange={event => setProtocolOverride(event.target.value as ProviderProtocol | '')}><option value="">跟随任务模型（{protocolLabels[settings.providers.find(provider => provider.id === providerId)?.protocol || 'openai-chat']}）</option>{Object.entries(protocolLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>{task === 'planning' && <label>规划发送方式<select aria-label="规划预览方式" value={planningMode} onChange={event => setPlanningMode(event.target.value as 'separate' | 'tool' | '')}><option value="">跟随任务设置</option><option value="separate">独立模型 · JSON 输出</option><option value="tool">正文保存后 · 工具提交</option></select></label>}</div>
+          {task === 'writing' && samples.writing.mode === 'rpg' && <fieldset className="form-stack"><legend>RPG 示例资料</legend><label>角色来源<select aria-label="示例 RPG 角色来源" value={rpgSample.character.kind} onChange={event => setRpgSample(value => ({ ...value, character: { ...value.character, kind: event.target.value as 'original' | 'existing' } }))}><option value="original">原创角色</option><option value="existing">已有角色</option></select></label><label>角色姓名<input aria-label="示例 RPG 角色姓名" value={rpgSample.character.name} onChange={event => setRpgSample(value => ({ ...value, character: { ...value.character, name: event.target.value } }))} /></label><label>角色设定<textarea aria-label="示例 RPG 角色设定" value={rpgSample.character.description} onChange={event => setRpgSample(value => ({ ...value, character: { ...value.character, description: event.target.value } }))} /></label><label>入场要求<textarea aria-label="示例 RPG 入场要求" value={rpgSample.entryInstruction} onChange={event => setRpgSample(value => ({ ...value, entryInstruction: event.target.value }))} /></label><label>上一章已确认的行动（无则留空）<textarea aria-label="示例 RPG 章末行动" value={chapterAnswer} onChange={event => setChapterAnswer(event.target.value)} /></label></fieldset>}
           <details className="prompt-example-values"><summary>编辑示例变量</summary><div className="form-stack">{promptVariables[task].map(variable => <label key={variable.key}>{variable.label} <code>{`{{${variable.key}}}`}</code>{variable.key === 'mode' ? <select aria-label={`示例变量 ${variable.key}`} value={samples[task][variable.key]} onChange={event => setSamples(value => ({ ...value, [task]: { ...value[task], [variable.key]: event.target.value } }))}>{modes.map(mode => <option key={mode} value={mode}>{modeLabels[mode]}</option>)}</select> : <textarea aria-label={`示例变量 ${variable.key}`} rows={2} value={samples[task][variable.key]} onChange={event => setSamples(value => ({ ...value, [task]: { ...value[task], [variable.key]: event.target.value } }))} />}</label>)}</div></details>
-          {previewError ? <Notice error={previewError} /> : <div className="prompt-preview-messages" aria-label="提示词编译预览">{preview?.messages.map((message, index) => <section className="prompt-preview-message" key={index}><span>{index + 1}. {roleLabels[message.role]}</span><pre>{message.content}</pre></section>)}</div>}
-          <p className="hint">这里只预览自定义消息。OpenAI Chat / Responses 保留消息顺序；Claude / Gemini 将系统块合并到系统区。规划、提取和压缩任务还会附加单个 JSON 对象的输出要求，建议保留默认格式说明。最终请求可在请求诊断中查看。</p>
+          {previewError ? <Notice error={previewError} /> : !preview ? <p className="hint" role="status">正在编排完整预览…</p> : <>
+            <p className="hint">本次程序规则（已完整列入下方消息）：{preview.runtimeBlocks.map(block => block.name).join('、')}{task === 'writing' && samples.writing.mode === 'rpg' ? '、本章累计字数提醒' : ''}。这些规则对应程序的任务边界，随任务条件变化。</p>
+            <div className="prompt-preview-messages" aria-label="提示词编译预览">{preview.messages.map((message, index) => <section className="prompt-preview-message" key={index} data-role={message.role}><span>{index + 1}. {roleLabels[message.role]}</span><pre>{message.content}</pre></section>)}</div>
+            <details className="prompt-example-values"><summary>发送的工具定义（{preview.tools.length}）</summary><div className="prompt-preview-messages" aria-label="提示词工具定义">{preview.tools.length ? preview.tools.map(tool => <section className="prompt-preview-message" key={tool.name}><span>{tool.name}</span><pre>{tool.description}</pre><pre>{JSON.stringify(tool.parameters, null, 2)}</pre></section>) : <p className="hint">本任务不发送工具。</p>}</div></details>
+            <details className="prompt-example-values"><summary>完整请求结构 · 示例模型与参数</summary><pre className="prompt-request-body" aria-label="完整提示词请求">{JSON.stringify(JSON.parse(preview.body), null, 2)}</pre></details>
+          </>}
+          <p className="hint">Chat / Responses 按消息顺序展示；Claude / Gemini 将系统块合并到系统区。规划、提取和压缩继续校验输出结构与证据。预览使用示例模型及参数，实际模型、生成参数与素材以当次请求诊断为准。</p>
         </div></details>
         <details className="prompt-inner-fold"><summary>导入与导出预设 JSON</summary><div className="form-stack">
           <p className="hint">只交换当前任务的提示词预设，包括自定义变量，不带供应商连接和 API 密钥。导入会新增预设；文件中的任务类型决定归属。</p>

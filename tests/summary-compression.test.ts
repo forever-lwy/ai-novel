@@ -22,7 +22,11 @@ function harness(reply: (call: Call, request: ModelRequest) => Promise<string> |
     generateStructured: vi.fn(async (_provider, request, validate) => {
       const active = store.db.prepare("SELECT data FROM jobs WHERE status='running' ORDER BY rowid DESC").all().map(row => JSON.parse(String(row.data)) as Job).find(job => job.payload.purpose === 'compress-summary');
       if (!active) return { value: validate({ summary: '后台仅完成剩余片段', entities: [], relations: [], foreshadows: [] }), inputTokens: 3, outputTokens: 4 };
-      const call: Call = { prompt: request.prompt, work: structuredClone(active.payload.compressionWork as Work), maxOutputTokens: request.maxOutputTokens }; calls.push(call);
+      // The fixture compresses source material, excluding the Markdown task instructions.
+      const prefix = '# 待压缩的已发生剧情\n';
+      const suffix = '\n\n## 本次要求\n保留各章关键事件、因果和状态变化，合并重复信息，输出更短且连贯的 JSON 摘要。';
+      expect(request.prompt.startsWith(prefix)).toBe(true); expect(request.prompt.endsWith(suffix)).toBe(true);
+      const call: Call = { prompt: request.prompt.slice(prefix.length, -suffix.length), work: structuredClone(active.payload.compressionWork as Work), maxOutputTokens: request.maxOutputTokens }; calls.push(call);
       const text = await reply(call, request); const raw = JSON.stringify({ text });
       request.onResponse?.({ rawResponse: raw, text: raw, inputTokens: 20, outputTokens: 8 });
       return { value: validate({ text }), inputTokens: 20, outputTokens: 8 };

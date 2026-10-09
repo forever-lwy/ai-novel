@@ -22,6 +22,7 @@ import type { Source, SourcePreview, Settings, Entity, Foreshadow, Job, Captured
 import { modelRoles, resolveModelConfig } from '../shared/model-settings.js';
 import { validatePromptTemplates } from '../shared/prompt-templates.js';
 import { parseTaskSettings } from '../shared/task-settings.js';
+import type { PromptPreviewInput } from '../shared/prompt-runtime.js';
 
 const revision = z.string().min(1).max(100);
 const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']);
@@ -52,6 +53,11 @@ const imageSettingsSchema = z.object({
   negativePrompt: z.string().max(32000).optional(), steps: z.number().int().min(1).max(100).optional(), guidanceScale: z.number().min(0).max(20).optional(), width: z.number().int().min(16).max(8192).optional(), height: z.number().int().min(16).max(8192).optional(), promptUpsampling: z.boolean().optional(), disableSafetyChecker: z.boolean().optional(),
 }).strict();
 const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional(), promptTemplates: z.unknown().optional(), imageSettings: imageSettingsSchema.optional(), taskSettings: z.unknown().optional() });
+const promptPreviewSchema = z.object({
+  task: z.enum(['writing', 'planning', 'extraction', 'compression']), templates: z.unknown(), protocol: providerSchema.shape.protocol,
+  variables: z.record(z.string().max(100), z.string().max(200000)).refine(value => Object.keys(value).length <= 150, '示例变量过多'),
+  runtime: z.object({ planningMode: z.enum(['separate', 'tool']).optional(), illustrations: z.object({ portrait: z.boolean(), cg: z.boolean() }).strict().optional(), chapterAnswer: z.string().max(20000).optional(), rpg: z.object({ character: z.object({ kind: z.enum(['original', 'existing']), name: z.string().max(300), description: z.string().max(20000) }).strict(), entryInstruction: z.string().max(20000) }).strict().optional() }).strict(),
+}).strict();
 const citationSchema = z.object({ chapterId: z.string(), paragraph: z.number().int().positive(), quote: z.string().max(10000) });
 const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(200), description: z.string().max(30000), visibility: z.enum(['public', 'secret']), locked: z.boolean(), isMain: z.boolean().optional(), nameStatus: z.enum(['placeholder', 'confirmed']).optional(), mergedInto: z.string().optional(), facts: z.array(z.object({ id: z.string(), text: z.string().max(10000), attribute: z.string().min(1).max(100).optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() })).max(5000) });
 const foreshadowSchema = z.object({ id: z.string().min(1), title: z.string().min(1).max(300), detail: z.string().max(20000), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string().max(20000), relatedEntityIds: z.array(z.string()).max(1000) });
@@ -85,7 +91,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     else if (route.url.endsWith('/import')) route.bodyLimit = 32 * 1024 * 1024 + 4096;
     else if (/\/chapters(?:\/:chapterId)?$|\/outputs(?:\/:outputId\/apply)?$/.test(route.url) || route.url === '/api/sources/:id/confirm') route.bodyLimit = 64 * 1024 * 1024;
     else if (route.url.endsWith('/entities/:entityId')) route.bodyLimit = 16 * 1024 * 1024;
-    else if (route.url === '/api/settings') route.bodyLimit = 4 * 1024 * 1024;
+    else if (['/api/settings', '/api/settings/prompt-preview'].includes(route.url)) route.bodyLimit = 4 * 1024 * 1024;
   });
   const deletionDir = join(dataDir, 'deleted-sources');
   // Originals move aside while SQLite commits. On restart, restore files if the
@@ -283,6 +289,11 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.post('/api/jobs/:id/choice', async request => { requireAuthor(request); const input = z.object({ choiceId: z.string().min(1).max(100), optionId: z.string().min(1).max(100).optional(), customText: z.string().trim().min(1).max(10000).optional(), baseRevisionId: revision.optional(), branchId: z.string().min(1).optional() }).strict().parse(request.body); return jobView(engine.choose(param(request), input), true); });
   app.post('/api/jobs/:id/:action', async request => jobView(engine.action(param(request), z.enum(['pause', 'resume', 'retry', 'cancel']).parse((request.params as any).action)), author(request)));
   app.get('/api/settings', async () => settings.public());
+  app.post('/api/settings/prompt-preview', async request => {
+    const input = promptPreviewSchema.parse(request.body);
+    try { return engine.previewPrompt({ ...input, templates: validatePromptTemplates(input.templates) } as PromptPreviewInput); }
+    catch (error) { fail(error instanceof Error ? error.message : '提示词预览失败。'); }
+  });
   app.put('/api/settings', async request => {
     const input = settingsSchema.parse(request.body) as Settings;
     if (input.providers.some(provider => hasUrlCredentials(provider.baseUrl))) fail('服务地址不能包含密钥或 Token 查询参数，请移到独立密钥字段。');

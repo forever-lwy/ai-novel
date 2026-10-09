@@ -234,9 +234,11 @@ describe('RPG chapter budgets and durable chapter-boundary choices', () => {
     expect(rawJob(store, next.id).payload.rpgChapterAnswer).toMatchObject({ question: '你准备前往哪里？', optionId: 'bridge', text: '前往桥头', unansweredQuestions: [secondQuestion] });
     offline.engine.start(); const paused = await waiting(offline.engine, next.id); expect(paused.pendingChoice).toMatchObject(secondQuestion);
     expect(service.bodies).toHaveLength(2); expect(offline.requests[0].continuationRound).toBeUndefined();
-    const actionMessage = service.bodies[1].messages.find((message: any) => String(message.content).startsWith('上一章的待选问题与玩家已确认的行动：'));
+    const actionMessage = service.bodies[1].messages.find((message: any) => message.role === 'user' && String(message.content).includes('# 上一章的待选问题与玩家已确认的行动\n'));
     expect(actionMessage).toBeDefined(); expect(actionMessage.content).toContain('不能当作已确认行动');
-    const action = JSON.parse(actionMessage.content.split('\n')[1]); expect(action.text).toBe('前往桥头'); expect(action.unansweredQuestions).toMatchObject([secondQuestion]);
+    const action = JSON.parse(actionMessage.content.split('# 上一章的待选问题与玩家已确认的行动\n')[1].split('\n')[0]); expect(action.text).toBe('前往桥头'); expect(action.unansweredQuestions).toMatchObject([secondQuestion]);
+    const dialogue = service.bodies[1].messages.filter((message: any) => message.role !== 'system');
+    expect(dialogue.map((message: any) => message.role)).toEqual(['user', 'assistant', 'user']);
     expect(action.unansweredQuestions[0].optionId).toBeUndefined(); expect(action.unansweredQuestions[0].text).toBeUndefined();
     expect(service.bodies[1].messages.some((message: any) => message.tool_calls || message.tool_call_id)).toBe(false);
     offline.engine.choose(next.id, { choiceId: paused.pendingChoice!.id, optionId: 'map' }); expect((await finished(offline.engine, next.id)).status).toBe('completed');

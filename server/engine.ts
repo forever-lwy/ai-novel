@@ -3,15 +3,17 @@ import { z } from 'zod';
 import type { CapturedModelResponse, ExtractionResult, GenerateInput, Job, JobKind, ModelActivityEvent, ModelOutputDetail, ModelOutputRecord, ModelOutputSummary, ModelRequest, OutputIssue, OutputStage, PlanningResult, ProviderConfig, Settings, StoryState, WritingActivity, WritingEvent, PromptTask } from '../shared/types.js';
 import { normalizeModelSettings, resolveModelConfig } from '../shared/model-settings.js';
 import { normalizeTaskSettings } from '../shared/task-settings.js';
-import { compilePrompt, normalizePromptTemplates } from '../shared/prompt-templates.js';
-import { generateStructured, generateText, estimateModelRequestInputTokens, ModelOutputError, ModelInteractionPause, ModelChapterComplete, parseStructuredText, redactModelPayload, unwrapModelOutput, structuredRequest, validateProviderOptions } from './providers.js';
+import { compileTaskPrompt, normalizePromptTemplates } from '../shared/prompt-templates.js';
+import type { PromptRuntime, PromptPreviewInput, PromptPreviewResult } from '../shared/prompt-runtime.js';
+import { emptyState } from '../shared/types.js';
+import { generateStructured, generateText, buildRequestSnapshot, estimateModelRequestInputTokens, ModelOutputError, ModelInteractionPause, ModelChapterComplete, parseStructuredText, redactModelPayload, unwrapModelOutput, validateProviderOptions } from './providers.js';
 import { normalizeChapterWords, chapterBudgetReached } from '../shared/rpg-chapter.js';
 import { HttpError, OutputValidationError, Store, rpgSetupSchema, rpgChoiceSchema } from './store.js';
 import { extractionContext, normalizeExtraction, splitExtractionBlocks as splitBlocks } from './extraction.js';
 import { buildWritingContext } from './writing-context.js';
 import type { ImageService } from './images.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
-import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, RpgSession, StoryReference } from '../shared/types.js';
+import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, StoryReference } from '../shared/types.js';
 export { extractionSchema } from './extraction.js';
 
 const foreshadowSchema = z.object({ title: z.string().min(1), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedNames: z.array(z.string()) });
@@ -439,14 +441,32 @@ export class StoryEngine {
     }
     return reference && !(job.kind === 'generate' && job.payload.mode === 'original' && !reference.sourceIds?.length) ? this.store.originalReference(job.branchId, reference) : undefined;
   }
-  private taskPrompt(task: PromptTask, variables: Record<string, string>): ModelRequest {
-    const request = compilePrompt(normalizePromptTemplates(this.getSettings().promptTemplates), task, variables);
-    return task === 'writing' ? request : structuredRequest(request);
+  private taskPrompt(task: PromptTask, variables: Record<string, string>, runtime: PromptRuntime = {}): ModelRequest {
+    return compileTaskPrompt(this.getSettings().promptTemplates, task, variables, runtime);
+  }
+  /** Read-only preview: uses actual prompt and tool builders, never executes a tool or reads a work. */
+  previewPrompt(input: PromptPreviewInput): PromptPreviewResult {
+    const { task, templates, variables, runtime, protocol } = input;
+    const compiled = compileTaskPrompt(templates, task, variables, runtime);
+    const tools: ModelTool[] = [];
+    if (task === 'writing' || task === 'planning' && (runtime.planningMode === 'tool' || variables.originalReference?.trim())) tools.push(...buildWritingContext({ state: emptyState(), chapterText: () => '' }).tools);
+    if (task === 'writing') {
+      tools.push(...this.imageTools('', runtime.illustrations ?? { portrait: false, cg: false }).tools);
+      if (variables.mode === 'rpg' && runtime.rpg) tools.push(...this.rpgTools('').tools);
+    }
+    if (task === 'planning' && runtime.planningMode === 'tool') tools.push(...this.planningTools('', Math.max(1, Math.trunc(Number(variables.chapterNumber) || 1))).tools);
+    const request: ModelRequest = { ...compiled, tools, ...(task === 'writing' && variables.mode === 'rpg' ? { chapterBudget: { targetWords: normalizeChapterWords(Number(variables.maxWords)) } } : {}) };
+    const body = buildRequestSnapshot({ id: 'preview', name: '提示词预览', protocol, baseUrl: 'https://preview.invalid', model: 'preview-model', maxOutputTokens: 4096, contextTokens: 2000000 }, request).body;
+    const native = JSON.parse(body);
+    const messages = protocol === 'openai-chat' ? native.messages : protocol === 'openai-responses' ? native.input : protocol === 'gemini'
+      ? [...(native.systemInstruction ? [{ role: 'system', content: native.systemInstruction.parts.map((part: { text: string }) => part.text).join('\n\n') }] : []), ...native.contents.map((message: { role: string; parts: { text: string }[] }) => ({ role: message.role === 'model' ? 'assistant' : 'user', content: message.parts.map(part => part.text).join('\n\n') }))]
+      : [...(native.system ? [{ role: 'system', content: native.system }] : []), ...native.messages.map((message: { role: string; content: string | { text: string }[] }) => ({ role: message.role, content: typeof message.content === 'string' ? message.content : message.content.map(part => part.text).join('\n\n') }))];
+    return { messages, runtimeBlocks: compiled.runtimeBlocks, tools: tools.map(({ name, description, parameters }) => ({ name, description, parameters })), body };
   }
   private compressionSegments(source: string, provider: ProviderConfig, job: Job): string[] {
     const config = normalizePromptTemplates(this.getSettings().promptTemplates);
     const variables = this.promptVariables(job);
-    return compressionChunks(source, provider, summaryText => structuredRequest(compilePrompt(config, 'compression', { ...variables, summaryText })));
+    return compressionChunks(source, provider, summaryText => compileTaskPrompt(config, 'compression', { ...variables, summaryText }));
   }
   private checkpoint(job: Job, payload: Record<string, unknown>, progress = job.progress, message = job.message) {
     return (revisionId: string, branchId: string) => { job.baseRevisionId = revisionId; job.branchId = branchId; job.payload = payload; job.progress = progress; job.message = message; this.save(job, !(job.kind === 'generate' && job.status === 'completed')); };
@@ -484,10 +504,10 @@ export class StoryEngine {
     if (job.payload.sourceReference) state.sourceReference = structuredClone(job.payload.sourceReference as StoryReference);
     this.store.commit(job.branchId, job.baseRevisionId, state, '更新未发生剧情的预期规划', this.outputCheckpoint(job, output, { ...job.payload, planned: true, pendingStage: undefined }, job.progress, '预期规划已保存', local, local && job.kind === 'plan'));
   }
-  private planningTools(jobId: string): { tools: ModelTool[]; instruction: string } {
+  private planningTools(jobId: string, previewChapter?: number): { tools: ModelTool[] } {
     const config = normalizeTaskSettings(this.getSettings().taskSettings).planning;
-    if (!config.enabled || config.mode !== 'tool') return { tools: [], instruction: '' };
-    const next = this.store.state(this.live(jobId).branchId).chapters.length + 1;
+    if (previewChapter === undefined && (!config.enabled || config.mode !== 'tool')) return { tools: [] };
+    const next = previewChapter ?? this.store.state(this.live(jobId).branchId).chapters.length + 1;
     const tool: ModelTool = {
       name: 'update_plot_plan', description: `本章正文已经完整保存。直接编写第 ${next} 章至第 ${next + 3} 章尚未发生的预期剧情及隐藏伏笔。由你提供完整规划内容，不会调用其他模型。校验成功后暂存，当前后置规划阶段成功结束后独立保存；再次调用会替换此前暂存规划，不能修改已保存正文。`,
       parameters: { type: 'object', properties: {
@@ -509,9 +529,9 @@ export class StoryEngine {
         } catch (error) { return { error: this.redact(error instanceof Error ? error.message : '剧情规划未通过校验，请修正工具参数。') }; }
       },
     };
-    return { tools: [tool], instruction: `\n当前是正文完成后的剧情规划阶段：本章正文已经完整保存且不可修改。由你直接编写第 ${next} 章和接下来三章的预期剧情，必须调用 update_plot_plan 提交 fine 与 foreshadows；不需要请求其他规划模型。遵守作者锁定设定、已有伏笔、本线已完成正文和原作参考，只规划尚未发生的事件。relatedNames 只能使用已有唯一明确的人物或实体名称，新人物留空。不要再生成正文，工具提交成功后只给出简短完成说明。` };
+    return { tools: [tool] };
   }
-  private rpgTools(jobId: string, session: RpgSession): { tools: ModelTool[]; instruction: string } {
+  private rpgTools(jobId: string): { tools: ModelTool[] } {
     return { tools: [{
       name: 'ask_user', description: '在玩家需要决定行动、台词、立场或关键剧情走向时暂停剧情并询问玩家。给出 2 至 6 个不同且基于角色当前已知信息的可行选项，玩家也可以自定义行动。调用后等待真实用户选择，不能替用户回答、代做行动或继续决定后果；不展示未来剧情和隐藏设定。',
       parameters: { type: 'object', properties: { question: { type: 'string', maxLength: 3000 }, options: { type: 'array', minItems: 2, maxItems: 6, items: { type: 'object', properties: { id: { type: 'string', maxLength: 100 }, label: { type: 'string', maxLength: 500 }, description: { type: 'string', maxLength: 2000 } }, required: ['id', 'label'], additionalProperties: false } } }, required: ['question', 'options'], additionalProperties: false },
@@ -536,7 +556,7 @@ export class StoryEngine {
         job.status = 'paused'; job.message = '剧情停在选择节点，等待你的决定'; job.error = undefined; this.save(job);
         throw new ModelInteractionPause('剧情等待用户选择。');
       },
-    }], instruction: `\nRPG 穿越体验：用户扮演${session.character.kind === 'existing' ? '原作已有角色' : '原创角色'}“${session.character.name}”。角色设定：${session.character.description}\n穿越场景与要求：${session.entryInstruction || '从当前故事边界进入小说世界。'}\n你担任剧情主持，描写用户角色眼前的环境、其他角色和已选择行动的后果。用户角色的自主行动、台词和选择由用户决定。所有关键剧情节点，以及需要玩家行动或回应时，必须调用 ask_user 给出不同选项并暂停，等真实工具结果返回再继续；不能在调用前替玩家选择，不能自行编造工具结果。允许通过原作参考工具查询后续剧情、人物、物品与伏笔来安排世界；原作后续属于主持人参考，不代表体验线已经发生或玩家已经知道，不能强制照搬原作或用参考推翻玩家选择。工具不写入正文，选项仅体现角色当前已知情况，不向玩家泄露未来规划或角色不知道的秘密。尊重原作在穿越起点之前已发生的事实，体验线之后的剧情以本线正文和用户选择为准；原创设定是用户确认内容，你临时补充的细节不能冒充用户设定。` };
+    }] };
   }
   private applyWriting(job: Job, output: ModelOutputRecord, prose: string, local: boolean) {
     if (!prose.trim()) throw new OutputValidationError([{ path: '$', message: '小说正文不能为空' }]);
@@ -592,10 +612,8 @@ export class StoryEngine {
     delete job.payload.pendingPlotPlan; job.payload.pendingStage = 'planning'; job.payload.postPlanningAttempt = Number(job.payload.postPlanningAttempt ?? 0) + 1; job.message = '正文已完整保存，正在规划后续剧情'; this.save(job);
     const attempt = Number(job.payload.postPlanningAttempt); const original = this.writingReference(job);
     const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original });
-    const planning = this.planningTools(job.id); const prompt = this.taskPrompt('planning', { ...this.promptVariables(job, state), ...context.variables, context: context.text, endChapter: String(next + 3) });
-    const instruction = planning.instruction + '\n预设要求的 JSON 内容必须作为 update_plot_plan 的参数提交，最终文本或 JSON 都不能替代工具调用。你不能改写、补充或重新生成已经保存的正文。工具提交成功后只返回简短完成说明。';
-    const messages = prompt.messages ? [...prompt.messages, { role: 'system' as const, content: instruction }] : undefined;
-    const request = this.budget(job, provider, { ...prompt, system: prompt.system + instruction, messages, signal, tools: [...context.tools, ...planning.tools], onActivity: event => this.writingActivity(jobId, { ...event, id: `post-planning-${attempt}:${event.id}` }) });
+    const planning = this.planningTools(job.id); const prompt = this.taskPrompt('planning', { ...this.promptVariables(job, state), ...context.variables, context: context.text, endChapter: String(next + 3) }, { planningMode: 'tool' });
+    const request = this.budget(job, provider, { ...prompt, signal, tools: [...context.tools, ...planning.tools], onActivity: event => this.writingActivity(jobId, { ...event, id: `post-planning-${attempt}:${event.id}` }) });
     const { output } = await this.requestCaptured(jobId, 'planning', request, req => this.models.generateText(provider, req), result => result.text);
     job = this.live(jobId); const current = normalizeTaskSettings(this.getSettings().taskSettings).planning;
     if (!current.enabled || current.mode !== 'tool') { this.finishSavedWriting(job, false, '正文已保存，后置规划已停用，资料在后台整理'); return; }
@@ -606,9 +624,9 @@ export class StoryEngine {
     const background: Job = { id: randomUUID(), projectId: writing.projectId, branchId: writing.branchId, kind: 'extract', status: paused ? 'paused' : 'queued', baseRevisionId: writing.baseRevisionId, progress: 0, total: 1, message: paused ? '正文已修复；请手动继续后台资料整理' : '正文已保存，等待后台资料整理', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { extractChapterId: chapterId, blockIndex, writingJobId: writing.id } };
     this.save(background);
   }
-  private imageTools(jobId: string): { tools: ModelTool[]; instruction: string } {
-    const config = normalizeImageSettings(this.getSettings().imageSettings);
-    if (!this.images || !config.providerId || !config.model) return { tools: [], instruction: '' };
+  private imageTools(jobId: string, preview?: PromptRuntime['illustrations']): { tools: ModelTool[] } {
+    const config = preview ? { autoPortrait: preview.portrait, autoCG: preview.cg } : normalizeImageSettings(this.getSettings().imageSettings);
+    if (!preview && (!this.images || !('providerId' in config) || !config.providerId || !config.model)) return { tools: [] };
     const tools: ModelTool[] = [];
     const register = (request: WritingImageRequest) => {
       const live = this.live(jobId);
@@ -626,7 +644,7 @@ export class StoryEngine {
       const value = z.object({ description: z.string().trim().min(1).max(6000), sourceText: z.string().trim().min(1).max(10000) }).strict().parse(args);
       return register({ kind: 'cg', ...value });
     } });
-    return { tools, instruction: tools.length ? `\n插画任务：${config.autoPortrait ? '新人物首次出场时主动调用 generate_character_portrait 工具。' : ''}${config.autoCG ? '每次切换场景或出现大场面时主动调用 generate_scene_cg，并逐字引用本章对应正文。' : ''}生图请求和工具结果只展示在生成过程与图册，不要写入小说正文。` : '' };
+    return { tools };
   }
 
   private illustrateChapter(job: Job, chapterId: string) {
@@ -848,19 +866,12 @@ export class StoryEngine {
         job.message = '正在流式生成正文'; this.save(job);
         if (!continuation) { job.payload.imageStartingEntityIds = state.entities.map(entity => entity.id); job.payload.imageRequests = []; delete job.payload.pendingPlotPlan; this.save(job); }
         const illustrations = this.imageTools(jobId);
-        const rpg = input.mode === 'rpg' && state.rpg ? this.rpgTools(jobId, state.rpg) : { tools: [], instruction: '' };
+        const rpg = input.mode === 'rpg' && state.rpg ? this.rpgTools(jobId) : { tools: [] };
         const prompt: ModelRequest = continuation ? { system: '', prompt: '' } : this.taskPrompt('writing', {
           ...this.promptVariables(job, state), ...context.variables, context: context.text, mode: input.mode,
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
           writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : `请写第 ${state.chapters.length + 1} 章。`,
-        });
-        if (!continuation && job.payload.rpgChapterAnswer) {
-          const action = `上一章的待选问题与玩家已确认的行动：\n${JSON.stringify(job.payload.rpgChapterAnswer)}\n本章从这条已确认行动的直接后果开始，不重复上一章正文，不再次询问同一决定；unansweredQuestions 若存在，是上个回合尚未回答的问题，不能当作已确认行动，须根据行动后的实际场景逐个调用 ask_user 等待玩家决定。后续自主行动仍须等待玩家选择。`;
-          if (prompt.messages) prompt.messages.push({ role: 'user', content: action });
-          else prompt.prompt += `\n${action}`;
-        }
-        const instruction = illustrations.instruction + rpg.instruction + '\n当前阶段只生成正文，正文完整返回并保存之前禁止生成或提交新的剧情规划；后续规划会在正文保存后另行处理。';
-        const messages = prompt.messages && instruction ? [{ role: 'system' as const, content: instruction }, ...prompt.messages] : prompt.messages;
+        }, { rpg: state.rpg, illustrations: { portrait: illustrations.tools.some(tool => tool.name === 'generate_character_portrait'), cg: illustrations.tools.some(tool => tool.name === 'generate_scene_cg') }, chapterAnswer: job.payload.rpgChapterAnswer ? JSON.stringify(job.payload.rpgChapterAnswer) : undefined });
         const aliases = job.payload.rpgLookupAliases as Record<string, string> | undefined;
         const retrievalTools = aliases ? context.tools.map(tool => ({ ...tool, execute: (args: Record<string, unknown>) => tool.execute({ ...args, ...(typeof args.id === 'string' ? { id: aliases[args.id] ?? args.id } : {}), ...(typeof args.chapterId === 'string' ? { chapterId: aliases[args.chapterId] ?? args.chapterId } : {}) }) })) : context.tools;
         const tools = [...retrievalTools, ...illustrations.tools, ...rpg.tools];
@@ -874,7 +885,7 @@ export class StoryEngine {
           if (continuation && previous && (previous.id !== provider.id || previous.protocol !== provider.protocol || previous.model !== provider.model || previous.baseUrl !== provider.baseUrl)) throw new HttpError('RPG 续接需要使用原供应商、协议、服务地址和模型，请恢复原配置后继续');
           job.payload.rpgProvider = { id: provider.id, protocol: provider.protocol, model: provider.model, baseUrl: provider.baseUrl }; this.save(job);
         }
-        const request = this.budget(job, provider, { ...prompt, system: prompt.system + instruction, messages, signal: controller.signal, tools, onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event), ...(input.mode === 'rpg' ? { continuation, chapterBudget: { targetWords: normalizeChapterWords(input.maxWords) }, maxToolRounds: 24, onContinuation: (value: ModelToolContinuation) => { const fresh = this.live(jobId); fresh.payload.rpgContinuation = JSON.parse(this.redact(JSON.stringify(value))) as ModelToolContinuation; this.save(fresh); } } : {}) });
+        const request = this.budget(job, provider, { ...prompt, signal: controller.signal, tools, onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event), ...(input.mode === 'rpg' ? { continuation, chapterBudget: { targetWords: normalizeChapterWords(input.maxWords) }, maxToolRounds: 24, onContinuation: (value: ModelToolContinuation) => { const fresh = this.live(jobId); fresh.payload.rpgContinuation = JSON.parse(this.redact(JSON.stringify(value))) as ModelToolContinuation; this.save(fresh); } } : {}) });
         const { result, output } = await this.requestCaptured(jobId, 'writing', request, req => this.models.generateText(provider, req), result => result.text);
         this.applyWriting(this.live(jobId), output, result.text, false);
         if (this.get(jobId).payload.postWritingPlanning === 'pending') await this.postWritingPlan(jobId, controller.signal);

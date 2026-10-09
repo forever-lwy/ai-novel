@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildWritingContext } from '../server/writing-context.js';
+import { compileTaskPrompt } from '../shared/prompt-templates.js';
 import { emptyState, type Chapter, type ChapterRef, type Entity, type OriginalReferenceData, type StoryState } from '../shared/types.js';
 
 type Collection = 'story' | 'original';
@@ -97,8 +98,9 @@ describe('original reference separated from the active story', () => {
     const { context, original } = fixture();
     const material = JSON.parse(context.text.split('\n')[1]);
     expect(material.originalReference).toMatchObject({ reference: original.reference, worldview: original.state.outline.worldview });
-    expect(material.originalReference.notice).toContain('作者参考');
-    expect(material.originalReference.notice).toContain('不能视为当前故事线已发生的事实');
+    const request = compileTaskPrompt(undefined, 'writing', { ...context.variables, context: context.text });
+    expect(request.system).toContain('作者参考');
+    expect(request.system).toContain('不能视为当前故事线已发生的事实');
     expect(JSON.parse(context.variables.originalReference)).toEqual(material.originalReference);
     expect(context.text).toContain('originalReference');
     expect(context.text).toContain(original.state.outline.worldview);

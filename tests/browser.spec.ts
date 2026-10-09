@@ -1385,7 +1385,7 @@ test('任务提示词支持编辑编排、变量预览、独立导入导出和�
     await panel.getByLabel('自定义变量 1 名称', { exact: true }).fill('style');
     await panel.getByLabel('自定义变量 1 值', { exact: true }).fill('克制叙述，重视动作细节');
     await expect(panel).not.toContainText('此任务没有变量');
-    await panel.locator('summary').filter({ hasText: '编译预览 · 使用示例素材' }).click();
+    await expect(panel.locator('summary').filter({ hasText: '最终发送预览 · 使用示例素材' })).toBeVisible();
     await expect(panel.getByLabel('提示词编译预览', { exact: true })).toContainText('使用风格：克制叙述，重视动作细节，作品：雾港来信。');
     await panel.getByLabel('提示词块 1 角色', { exact: true }).selectOption('assistant');
     await panel.getByRole('button', { name: '下移提示词块 1', exact: true }).click();
@@ -1431,6 +1431,55 @@ test('任务提示词支持编辑编排、变量预览、独立导入导出和�
     await page.screenshot({ path: testInfo.outputPath('prompt-editor-mobile.png'), animations: 'disabled' });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
     expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth)).toBeTruthy();
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('最终提示词预览显示全部程序规则、四种协议、RPG 与工具规划，且不调用模型', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  const stats = async () => (await (await page.request.get(`${mockUrl.replace('/v1', '')}/__e2e/stats`)).json()).modelRequests;
+  const before = await stats();
+  try {
+    await page.request.put('/api/settings', { data: { ...previous, promptTemplates: defaultPromptTemplates() } });
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const panel = page.getByTestId('prompt-templates-panel');
+    await page.getByTestId('settings-page').getByRole('button', { name: '提示词编排', exact: true }).click();
+    const preview = panel.getByLabel('提示词编译预览', { exact: true });
+    await expect(preview).toContainText('当前阶段只生成正文');
+    await expect(preview).toContainText('## 文风与上下文');
+    await panel.locator('summary').filter({ hasText: '发送的工具定义' }).click();
+    await expect(panel.getByLabel('提示词工具定义', { exact: true })).toContainText('read_text_file');
+    for (const protocol of ['openai-chat', 'openai-responses', 'gemini', 'claude']) {
+      await panel.getByLabel('预览接口协议', { exact: true }).selectOption(protocol);
+      await expect(preview).toContainText('当前阶段只生成正文');
+      await expect(preview.locator('[data-role="system"]')).toHaveCount(['claude', 'gemini'].includes(protocol) ? 1 : 4);
+      expect(await preview.locator('section:not([data-role="system"])').evaluateAll(elements => elements.map(element => element.getAttribute('data-role')))).toEqual(['user', 'assistant', 'user']);
+    }
+    await panel.locator('summary').filter({ hasText: '编辑示例变量' }).click();
+    await panel.getByLabel('示例变量 mode', { exact: true }).selectOption('rpg');
+    await panel.getByLabel('示例 RPG 角色姓名', { exact: true }).fill('测试信使');
+    await panel.getByLabel('示例 RPG 章末行动', { exact: true }).fill('{"text":"前往灯塔"}');
+    await expect(preview).toContainText('测试信使');
+    await expect(preview).toContainText('前往灯塔');
+    await expect(preview).toContainText('已累计生成正文 0 字');
+    await expect(preview).toContainText('必须调用 ask_user');
+    await panel.getByRole('tab', { name: '剧情规划', exact: true }).click();
+    await panel.getByLabel('规划预览方式', { exact: true }).selectOption('tool');
+    await expect(preview).toContainText('最终文本或 JSON 都不能替代工具调用');
+    await expect(preview).not.toContainText('本次返回必须是符合要求的单个 JSON 对象');
+    await expect(panel.getByLabel('提示词工具定义', { exact: true })).toContainText('update_plot_plan');
+    for (const task of ['资料提取', '摘要压缩']) {
+      await panel.getByRole('tab', { name: task, exact: true }).click();
+      await expect(preview).toContainText('本次返回必须是符合要求的单个 JSON 对象');
+    }
+    await panel.getByRole('tab', { name: '资料提取', exact: true }).click();
+    await expect(preview).toContainText('## 证据范围：硬性约束');
+    await panel.locator('summary').filter({ hasText: '编辑示例变量' }).click();
+    await preview.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('complete-prompt-desktop.png'), animations: 'disabled' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: testInfo.outputPath('complete-prompt-mobile.png'), animations: 'disabled' });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+    expect(await stats()).toBe(before);
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 

@@ -16,8 +16,8 @@ const dataDir = mkdtempSync(join(tmpdir(), 'ai-novel-browser-'));
 
 function fixtureReply(system, prompt) {
   if (system.includes('只压缩') && system.includes('剧情摘要')) return JSON.stringify({ text: '林舟调查白石城。' });
-  if (system.includes('本片段提要') || system.includes('只做当前编号片段')) {
-    const fragment = prompt.split('全文段落编号如下（仅提取本片段）：\n').at(-1) || '';
+  if (system.includes('# 当前片段资料提取')) {
+    const fragment = prompt.split('## 编号原文\n').at(-1)?.split('\n## 提交要求')[0] || '';
     const paragraphs = [...fragment.matchAll(/^\[(\d+)\]\s*(.+)$/gm)].map(match => ({ paragraph: Number(match[1]), quote: match[2] }));
     const person = paragraphs.find(p => p.quote.includes('林舟'));
     const place = paragraphs.find(p => p.quote.includes('白石城'));
@@ -33,8 +33,8 @@ function fixtureReply(system, prompt) {
       foreshadows: [],
     });
   }
-  if (system.includes('fine 必须包含')) {
-    const next = Number(prompt.match(/请为第\s+(\d+)\s+章至第/)?.[1] || 1);
+  if (system.includes('# 后续剧情规划')) {
+    const next = Number(prompt.match(/为第\s+(\d+)\s+章至第/)?.[1] || 1);
     return JSON.stringify({
       fine: Array.from({ length: 4 }, (_, index) => ({ chapter: next + index, title: `第${next + index}章 城中线索`, goal: '围绕白石城的线索推进人物行动。' })),
       foreshadows: [{ title: '旧钥匙的主人', detail: 'SECRET_E2E_FORESHADOW：旧钥匙属于失踪的守城人。', status: 'planned', dueChapter: next + 3, revealCondition: '打开钟楼后揭晓', relatedNames: [] }],
@@ -164,8 +164,8 @@ const modelServer = createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const frame = (delta, finish_reason = null) => { if (!res.destroyed) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`); };
       const done = finish_reason => { frame({}, finish_reason); if (!res.destroyed) res.end('data: [DONE]\n\n'); };
-      const actionMessage = body.messages?.find(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('上一章的待选问题与玩家已确认的行动：'));
-      const carried = actionMessage ? JSON.parse(actionMessage.content.split('上一章的待选问题与玩家已确认的行动：\n')[1].split('\n')[0]) : undefined;
+      const actionMessage = body.messages?.find(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('# 上一章的待选问题与玩家已确认的行动\n'));
+      const carried = actionMessage ? JSON.parse(actionMessage.content.split('# 上一章的待选问题与玩家已确认的行动\n')[1].split('\n')[0]) : undefined;
       if (carried) {
         frame({ content: `${carried.text || carried.customText || carried.optionId}\n\n你向守门人询问东门的路况，然后迈进城门。` });
         done('stop'); return;

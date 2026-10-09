@@ -5,6 +5,7 @@ import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequ
 import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions } from './provider-options.js';
 import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream, streamFrameFragments } from './model-stream.js';
 import { chapterBudgetInstruction, chapterBudgetReached } from '../shared/rpg-chapter.js';
+import { STRUCTURED_OUTPUT_INSTRUCTION } from '../shared/prompt-runtime.js';
 export { validateProviderOptions } from './provider-options.js';
 
 export const MODEL_TIMEOUT_MS = DEFAULT_MODEL_TIMEOUT_MS;
@@ -804,8 +805,6 @@ export function parseStructuredText<T>(text: string, validate: (value: unknown) 
     throw new ModelOutputError('资料整理结果未通过格式、引用或关联检查，请修正后重新验证。', noUsage, issues);
   }
 }
-
-const STRUCTURED_OUTPUT_INSTRUCTION = '本次返回必须是符合要求的单个 JSON 对象。不要输出解释文字或 Markdown。';
 
 /** Normalize before budgeting; repeated normalization never duplicates the output constraint. */
 export function structuredRequest(request: ModelRequest): ModelRequest {
