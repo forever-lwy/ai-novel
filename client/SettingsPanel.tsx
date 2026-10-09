@@ -235,6 +235,10 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       return <section className="settings-task-card form-stack" key={role.providerKey} aria-label={`${role.label}模型设置`}>
         <h4>{role.label}</h4>
         {role.role === 'extraction' && <>
+          <label>输出模式<select aria-label="资料提取输出模式" value={tasks.extraction.outputMode ?? 'prompt'} onChange={e => updateTaskSettings('extraction', { outputMode: e.target.value as NonNullable<TaskSettings['extraction']['outputMode']> })}>
+            <option value="prompt">提示词 JSON（默认）</option><option value="structured">结构化输出（JSON Schema）</option><option value="tool">工具调用（填写参数）</option>
+          </select></label>
+          <p className="hint">{tasks.extraction.outputMode === 'structured' ? '由接口按规定的数据结构生成资料，模型和网关需支持结构化输出。' : tasks.extraction.outputMode === 'tool' ? '让 AI 将资料填入提交工具的参数；收到参数即完成，无需再生成一轮回复。模型需支持工具调用。' : '通过提示词要求 AI 返回 JSON，兼容原有提取方式。'} 三种模式均检查原文依据；不支持时会报错，不自动切换模式。</p>
           <label className="checkbox"><input type="checkbox" aria-label="资料提取自动重试" checked={tasks.extraction.autoRetry} onChange={e => updateTaskSettings('extraction', { autoRetry: e.target.checked })} />资料提取失败后自动重试</label>
           <div hidden={!tasks.extraction.autoRetry}><div className="form-grid">
             <TaskNumber label="资料提取最多重试次数" value={tasks.extraction.maxRetries} max={10} disabled={!tasks.extraction.autoRetry} onChange={maxRetries => updateTaskSettings('extraction', { maxRetries })} />

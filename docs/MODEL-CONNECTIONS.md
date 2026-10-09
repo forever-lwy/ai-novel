@@ -8,6 +8,8 @@
 
 旧连接中的模型名按原用途迁移到任务，原供应商标识和密钥保留。任务连接测试显式使用该任务模型，仍只发送一次生成请求；目录查询不触发生成测试。
 
+资料提取有“提示词 JSON”“结构化输出”“工具调用”三种输出模式，默认保留第一种。新模式需要所选模型及网关支持对应能力；基础连接测试成功不代表这些能力可用。收到 HTTP 400 等不支持错误时检查实际请求中的 `response_format`、`text.format`、`generationConfig`、`output_config.format` 或工具定义，按需手动切换模式；程序不会自动降级重发。具体协议字段及单次提交规则见 [提取输出模式](EXTRACTION.md#输出模式)。
+
 模型目录按所选前缀追加 `/models`。两个 OpenAI 协议使用 Bearer 认证，Gemini 使用 `x-goog-api-key`，Claude 使用 `x-api-key` 与版本头。Gemini 和 Claude 自动读取后续页；模型目录最多读取 30 秒（配置更短超时时采用该值）、4 MiB、5000 条或 20 页，超限明确提示手动填写，不把不完整列表当作完整结果。不跟随目录重定向，避免把凭据转发到其他地址。
 
 接口依据：[OpenAI 模型列表](https://developers.openai.com/api/reference/resources/models/methods/list)、[OpenAI 鉴权](https://developers.openai.com/api/reference/overview)、[Gemini 模型列表](https://ai.google.dev/api/models)与[密钥用法](https://ai.google.dev/gemini-api/docs/api-key)、[Claude 模型列表](https://platform.claude.com/docs/en/api/models/list)。上游目录不保证所有返回型号都支持当前文字生成协议，Gemini 声明生成方法时仅展示支持 `generateContent` 的模型。

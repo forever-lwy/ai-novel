@@ -65,6 +65,20 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     expect(ctx.engine.previewPrompt(request).tools.map(tool => tool.name)).toContain('read_text_file');
     expect(ctx.engine.previewPrompt(request).tools.map(tool => tool.name)).not.toContain('update_plot_plan');
   });
+
+  it.each(['structured', 'tool'] as const)('previews extraction %s with the same schema and submission instructions used in real requests', async mode => {
+    const draft = input('extraction', protocol); draft.runtime.extractionOutputMode = mode;
+    const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: draft });
+    expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
+    expect(preview.body).toContain('additionalProperties'); expect(preview.body).toContain('summary');
+    if (mode === 'tool') {
+      expect(preview.tools.map(tool => tool.name)).toEqual(['submit_extraction']);
+      expect(preview.messages.map(message => message.content).join('\n')).not.toContain(STRUCTURED_OUTPUT_INSTRUCTION);
+      expect(preview.messages.filter(message => message.role === 'system').at(-1)?.content).toContain('普通文本不能替代工具调用');
+      const request = { system: '', prompt: '', messages: preview.messages, structuredOutput: { mode: 'tool' as const, name: 'submit_extraction', description: '', schema: {} } };
+      expect(structuredRequest(request)).toBe(request);
+    } else { expect(preview.tools).toEqual([]); expect(preview.messages.map(message => message.content).join('\n')).toContain('无法确定的可空字段填 null'); }
+  });
 });
 
 it('requires authentication, validates drafts, and never saves settings or creates a model job', async () => {

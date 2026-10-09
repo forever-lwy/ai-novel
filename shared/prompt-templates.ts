@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Mode, PromptBlock, PromptMessage, PromptPreset, PromptTask, PromptTemplateSettings } from './types.js';
 import { legacyPromptTemplates } from './legacy-prompt-templates.js';
 import { runtimePromptBlocks, type PromptRuntime } from './prompt-runtime.js';
+import { extractionOutputFormat } from './extraction-output.js';
 
 export const ENTITY_RESOLUTION_INSTRUCTION = '同一个人物或地点只输出一个实体。先对照已有名称与别名，姓名、本名、旧名以及原文明确指向同一人的描述性称呼应统一到同一实体，优先用本名作为 name，其他称呼写入 aliases；比如原文确认“戴兜帽的旅人”名叫“林舟”，应以“林舟”为 name，把“戴兜帽的旅人”写入 aliases。描述性称呼在后续片段获得本名时，也要保留之前的称呼以便归并。只有原文足以确认同一身份时才建立别名，不凭外貌、职业相似或名字包含关系合并；“他”“少女”“队长”等无法唯一指向的泛称不要作为别名。别名对照仅辅助统一身份，不是事实证据，也不能据此提前揭晓身份秘密。';
 export const CHARACTER_PROFILE_INSTRUCTION = '人物资料要回答“这个人是谁、有什么特点和能力、目前处于什么状态”，不能写成逐段行动流水账。正文明确披露的姓名、性别、种族、血统、年龄、外貌、身份、所属势力、能力、性格、目标、弱点、当前状态与所在地分别使用稳定属性 name、gender、race、bloodline、age、appearance、identity、affiliation、ability、personality、goal、weakness、status、location；缺失资料不补造，也不按称呼、外貌推测性别、种族或血统。可并存的能力、性格等使用稳定子属性，例如 ability:archery、ability:fire_magic、personality:courage，同一项后续变化继续使用相同子属性。只有改变身份、能力、关系、命运或后续剧情的重大/关键经历才写为 attribute=major_event 的 past 事实；吃饭、走路、递物、普通对话等日常经过只保存在 summary，不放入人物 facts 或 description。description 是已明确资料的简洁介绍，不能塞进普通经历或尚未发生的规划。nameStatus=placeholder 表示正文未披露姓名、暂用唯一称呼定位；得知明确本名后使用本名作为 name、nameStatus=confirmed，并在 aliases 中保留正文明确对应的旧称呼，不能把本名仅写进 aliases。isMain 仅在作者指定或正文明确呈现持续核心视角/主线地位时设为 true；仅出现一次、参与一段对话或与主角相识不等于主要角色；不能确定时省略该字段。每条资料仍必须引用当前正文的精确证据，已有名称索引只辅助身份对照。';
@@ -308,10 +309,11 @@ export function compileTaskPrompt(config: PromptTemplateSettings | undefined, ta
   const compiled = compilePrompt(config, task, variables);
   const runtimeBlocks = runtimePromptBlocks(task, variables, runtime);
   const messages: PromptMessage[] = [];
-  for (const message of [...runtimeBlocks.filter(block => block.role === 'system'), ...compiled.messages, ...runtimeBlocks.filter(block => block.role !== 'system')]) {
+  const submissionRule = runtimeBlocks.filter(block => block.name === '资料工具提交要求');
+  for (const message of [...runtimeBlocks.filter(block => block.role === 'system' && !submissionRule.includes(block)), ...compiled.messages, ...submissionRule, ...runtimeBlocks.filter(block => block.role !== 'system')]) {
     const previous = messages.at(-1);
     if (previous?.role === message.role && message.role !== 'system') previous.content += `\n\n${message.content}`;
     else messages.push({ role: message.role, content: message.content });
   }
-  return { system: messages.filter(message => message.role === 'system').map(message => message.content).join('\n'), prompt: messages.filter(message => message.role === 'user').map(message => message.content).join('\n'), messages, runtimeBlocks };
+  return { system: messages.filter(message => message.role === 'system').map(message => message.content).join('\n'), prompt: messages.filter(message => message.role === 'user').map(message => message.content).join('\n'), messages, runtimeBlocks, ...(task === 'extraction' ? { structuredOutput: extractionOutputFormat(runtime.extractionOutputMode) } : {}) };
 }

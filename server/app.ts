@@ -56,7 +56,7 @@ const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), wr
 const promptPreviewSchema = z.object({
   task: z.enum(['writing', 'planning', 'extraction', 'compression']), templates: z.unknown(), protocol: providerSchema.shape.protocol,
   variables: z.record(z.string().max(100), z.string().max(200000)).refine(value => Object.keys(value).length <= 150, '示例变量过多'),
-  runtime: z.object({ planningMode: z.enum(['separate', 'tool']).optional(), illustrations: z.object({ portrait: z.boolean(), cg: z.boolean() }).strict().optional(), chapterAnswer: z.string().max(20000).optional(), rpg: z.object({ character: z.object({ kind: z.enum(['original', 'existing']), name: z.string().max(300), description: z.string().max(20000) }).strict(), entryInstruction: z.string().max(20000) }).strict().optional() }).strict(),
+  runtime: z.object({ extractionOutputMode: z.enum(['prompt', 'structured', 'tool']).optional(), planningMode: z.enum(['separate', 'tool']).optional(), illustrations: z.object({ portrait: z.boolean(), cg: z.boolean() }).strict().optional(), chapterAnswer: z.string().max(20000).optional(), rpg: z.object({ character: z.object({ kind: z.enum(['original', 'existing']), name: z.string().max(300), description: z.string().max(20000) }).strict(), entryInstruction: z.string().max(20000) }).strict().optional() }).strict(),
 }).strict();
 const citationSchema = z.object({ chapterId: z.string(), paragraph: z.number().int().positive(), quote: z.string().max(10000) });
 const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(200), description: z.string().max(30000), visibility: z.enum(['public', 'secret']), locked: z.boolean(), isMain: z.boolean().optional(), nameStatus: z.enum(['placeholder', 'confirmed']).optional(), mergedInto: z.string().optional(), facts: z.array(z.object({ id: z.string(), text: z.string().max(10000), attribute: z.string().min(1).max(100).optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() })).max(5000) });
@@ -302,7 +302,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
       catch (error) { fail(error instanceof Error ? error.message : '提示词编排配置无效。'); }
     } else input.promptTemplates = settings.get().promptTemplates;
     if (input.imageSettings === undefined) input.imageSettings = settings.get().imageSettings;
-    input.taskSettings = input.taskSettings === undefined ? settings.get().taskSettings : parseTaskSettings(input.taskSettings);
+    input.taskSettings = input.taskSettings === undefined ? settings.get().taskSettings : parseTaskSettings(input.taskSettings, settings.get().taskSettings);
     const originalProfiles = new Set<string>();
     for (const profile of input.modelParameters ?? []) {
       const key = JSON.stringify([profile.role ?? null, profile.providerId, profile.model]);

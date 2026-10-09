@@ -18,7 +18,19 @@
 
 一次本地规范化不会再调用模型。正文、状态变化和实体关联的内容仍需模型理解，格式处理不能证明语义完全正确。
 
-默认提取提示词按 Markdown 分为证据范围、摘要、人物归并、时间与可见性、关系、伏笔、输出检查和格式示例。明确要求只依据当前编号片段、每条事实只表达一个可核对结论、不凭名称索引补充事实；不能确定的身份或属性不补造。默认要求输出四个顶层字段及明确的时间、确定性、可见性；本地解析仍兼容下文所列的省略字段，不因此拒绝旧输出。完整最终消息及 JSON 规则可在“设置 → 提示词编排”预览。
+默认提取提示词按 Markdown 分为证据范围、摘要、人物归并、时间与可见性、关系、伏笔、输出检查和格式示例。明确要求只依据当前编号片段、每条事实只表达一个可核对结论、不凭名称索引补充事实；不能确定的身份或属性不补造。默认要求输出四个顶层字段及明确的时间、确定性、可见性；本地解析仍兼容下文所列的省略字段，不因此拒绝旧输出。完整最终消息及对应输出模式的规则可在“设置 → 提示词编排”预览。
+
+## 输出模式
+
+`taskSettings.extraction.outputMode` 支持 `prompt`（默认提示词 JSON）、`structured`（接口 JSON Schema）和 `tool`（提交工具参数）。仅改变资料提交方式，导入、后台整理、版本检查、失败记录和人工修正继续走同一流程。
+
+两种新模式共用 [提取输出结构](../shared/extraction-output.ts)，包含 `summary/entities/relations/foreshadows`。嵌套对象拒绝额外字段并列出全部必填字段，未知的 `nameStatus/isMain/attribute/dueChapter` 可以填 `null`；本地只将这四种可选字段的 `null` 视为未填写，其他必填字段的错误值仍拒绝。引用由当前片段的 `paragraph` 补齐精确原文，不要求模型重抄 `quote`。结构约束不能代替语义和证据校验。
+
+- OpenAI Chat 使用 `response_format.json_schema`，Responses 使用 `text.format`，均开启 `strict`；规则依据 [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)。工具模式使用命名 `tool_choice` 并关闭并行调用，不要求上游具备严格结构化输出能力。
+- Gemini 使用 `generationConfig.responseMimeType/responseJsonSchema`；工具参数使用 `parametersJsonSchema`，`functionCallingConfig` 设置 `ANY` 并限定提交工具。字段见 [Gemini generateContent](https://ai.google.dev/api/generate-content)。
+- Claude 使用 `output_config.format`，保留已有 effort；工具模式使用 `auto`、关闭并行工具，并由提示词和本地校验要求提交，以保留思考设置和兼容禁止强制调用的型号。依据 [Claude 结构化输出](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)及[工具选择规则](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools)。
+
+工具模式只提供 `submit_extraction`，只接受一次同名调用并解析其 JSON 对象参数；没有执行函数，也没有工具结果回传或第二轮确认。预设中的 JSON 说明被明确解释为工具参数格式，不再叠加普通文本 JSON 规则。流式和非流式都保留实际请求、原始响应、参数文本、用量与诊断；截断、拒绝、错误调用或解析失败不会被当成完成。新结构计入发送前的上下文预算，不兼容时不自动降级或额外重发。
 
 ## 格式与证据规则
 

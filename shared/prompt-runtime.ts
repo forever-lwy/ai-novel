@@ -1,9 +1,11 @@
-import type { PromptMessage, PromptTask, PromptTemplateSettings, ProviderProtocol, RpgSession } from './types.js';
+import type { ExtractionOutputMode, PromptMessage, PromptTask, PromptTemplateSettings, ProviderProtocol, RpgSession } from './types.js';
+import { EXTRACTION_TOOL_INSTRUCTION } from './extraction-output.js';
 
 export const STRUCTURED_OUTPUT_INSTRUCTION = '本次返回必须是符合要求的单个 JSON 对象。不要输出解释文字或 Markdown。';
 export const WRITING_STAGE_INSTRUCTION = '# 正文阶段\n当前阶段只生成正文，正文完整返回并保存之前禁止生成或提交新的剧情规划；后续规划会在正文保存后另行处理。';
 
 export interface PromptRuntime {
+  extractionOutputMode?: ExtractionOutputMode;
   planningMode?: 'separate' | 'tool';
   illustrations?: { portrait: boolean; cg: boolean };
   rpg?: RpgSession;
@@ -70,6 +72,10 @@ ${runtime.chapterAnswer}
 - relatedNames 只能使用已有唯一明确的人物或实体名称，新人物留空。
 - 预设要求的 JSON 内容必须作为 update_plot_plan 的参数提交，最终文本或 JSON 都不能替代工具调用。
 - 你不能改写、补充或重新生成已经保存的正文。工具提交成功后只返回简短完成说明。`);
-  } else system('JSON 输出要求', `# 返回格式\n${STRUCTURED_OUTPUT_INSTRUCTION}`);
+  } else if (task === 'extraction' && runtime.extractionOutputMode === 'tool') system('资料工具提交要求', EXTRACTION_TOOL_INSTRUCTION);
+  else {
+    system('JSON 输出要求', `# 返回格式\n${STRUCTURED_OUTPUT_INSTRUCTION}`);
+    if (task === 'extraction' && runtime.extractionOutputMode === 'structured') system('结构化输出要求', '# 结构化输出\n按接口提供的 JSON Schema 填写全部字段，无法确定的可空字段填 null，不要编造。引用只填当前片段的 paragraph，原文由程序补齐。');
+  }
   return blocks;
 }

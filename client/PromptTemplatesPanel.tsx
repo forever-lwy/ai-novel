@@ -84,6 +84,7 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
   const images = normalizeImageSettings(settings.imageSettings);
   const previewInput: PromptPreviewInput = { task, templates, variables: { ...preset.variables, ...samples[task] }, protocol, runtime: {
     planningMode: effectivePlanningMode,
+    extractionOutputMode: normalizeTaskSettings(settings.taskSettings).extraction.outputMode,
     illustrations: { portrait: Boolean(images.providerId && images.model && images.autoPortrait), cg: Boolean(images.providerId && images.model && images.autoCG) },
     ...(task === 'writing' && samples.writing.mode === 'rpg' ? { rpg: rpgSample, chapterAnswer } : {}),
   } };

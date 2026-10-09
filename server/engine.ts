@@ -22,7 +22,7 @@ const now = () => new Date().toISOString();
 const estimateTokens = (text: string) => Math.ceil([...text].reduce((n, c) => n + (c.charCodeAt(0) > 127 ? 1.3 : 0.3), 0));
 const MAX_COMPRESSION_PASSES = 3;
 interface CompressionWork { pass: number; chunks: string[]; index: number; results: string[]; completed: number }
-const requestTokens = (provider: ProviderConfig, request: ModelRequest) => request.messages?.length || request.tools?.length ? estimateModelRequestInputTokens(provider, request) : estimateTokens(request.system + request.prompt);
+const requestTokens = (provider: ProviderConfig, request: ModelRequest) => request.messages?.length || request.tools?.length || request.structuredOutput ? estimateModelRequestInputTokens(provider, request) : estimateTokens(request.system + request.prompt);
 /** Size segments using the selected template, including repeated variables and JSON requirements. */
 function compressionChunks(source: string, provider: ProviderConfig, build: (text: string) => ModelRequest): string[] {
   // A whitespace-only sizing probe still needs a user message; it is never sent to the model.
@@ -461,7 +461,9 @@ export class StoryEngine {
     const messages = protocol === 'openai-chat' ? native.messages : protocol === 'openai-responses' ? native.input : protocol === 'gemini'
       ? [...(native.systemInstruction ? [{ role: 'system', content: native.systemInstruction.parts.map((part: { text: string }) => part.text).join('\n\n') }] : []), ...native.contents.map((message: { role: string; parts: { text: string }[] }) => ({ role: message.role === 'model' ? 'assistant' : 'user', content: message.parts.map(part => part.text).join('\n\n') }))]
       : [...(native.system ? [{ role: 'system', content: native.system }] : []), ...native.messages.map((message: { role: string; content: string | { text: string }[] }) => ({ role: message.role, content: typeof message.content === 'string' ? message.content : message.content.map(part => part.text).join('\n\n') }))];
-    return { messages, runtimeBlocks: compiled.runtimeBlocks, tools: tools.map(({ name, description, parameters }) => ({ name, description, parameters })), body };
+    const previewTools = tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+    if (compiled.structuredOutput?.mode === 'tool') previewTools.push({ name: compiled.structuredOutput.name, description: compiled.structuredOutput.description, parameters: compiled.structuredOutput.schema });
+    return { messages, runtimeBlocks: compiled.runtimeBlocks, tools: previewTools, body };
   }
   private compressionSegments(source: string, provider: ProviderConfig, job: Job): string[] {
     const config = normalizePromptTemplates(this.getSettings().promptTemplates);
@@ -780,7 +782,7 @@ export class StoryEngine {
         const message = `整理「${chapter.title}」片段 ${blockIndex + 1}/${blocks.length}`;
         job.message = failedAttempts ? `${message}；正在第 ${failedAttempts} 次自动重试` : message; this.save(job);
         // Configuration and context-budget failures require an author change, not another request.
-        const request = this.budget(job, provider, { ...this.taskPrompt('extraction', { ...this.promptVariables(job, state), chapterNumber: String(state.chapters.findIndex(value => value.id === chapterId) + 1), context, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }), signal });
+        const request = this.budget(job, provider, { ...this.taskPrompt('extraction', { ...this.promptVariables(job, state), chapterNumber: String(state.chapters.findIndex(value => value.id === chapterId) + 1), context, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }, { extractionOutputMode: retryConfig.outputMode }), signal });
         validateProviderOptions(provider, request.maxOutputTokens);
         let url: URL;
         try { url = new URL(provider.baseUrl); } catch { throw new HttpError('模型服务地址无效，请填写完整的 HTTP 或 HTTPS 地址。'); }

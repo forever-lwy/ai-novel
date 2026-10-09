@@ -93,6 +93,9 @@ export function normalizeExtraction(input: unknown, block: ExtractionBlock): { v
   const addDefault = (target: Record<string, unknown>, name: string, fallback: unknown, path: string) => {
     if (target[name] !== undefined) return; target[name] = structuredClone(fallback); adjustments.push({ path: `${path ? path + '.' : ''}${name}`, message: `省略字段已补为 ${JSON.stringify(fallback)}` });
   };
+  const omitUnknown = (target: Record<string, unknown>, names: string[], path: string) => {
+    for (const name of names) if (target[name] === null) { delete target[name]; adjustments.push({ path: `${path}.${name}`, message: '可选字段的 null 表示未确定，已保留为未填写' }); }
+  };
   const cite = (target: Record<string, unknown>, path: string) => {
     const paragraph = target.paragraph; const quote = target.quote;
     const declared = block.sources.filter(source => source.paragraph === paragraph);
@@ -117,13 +120,15 @@ export function normalizeExtraction(input: unknown, block: ExtractionBlock): { v
     addDefault(candidate, 'relations', [], ''); addDefault(candidate, 'foreshadows', [], '');
     if (Array.isArray(candidate.entities)) candidate.entities.forEach((entity, index) => {
       if (!record(entity)) return; const path = `entities[${index}]`;
+      omitUnknown(entity, ['nameStatus', 'isMain'], path);
       addDefault(entity, 'aliases', [], path); addDefault(entity, 'description', '', path); addDefault(entity, 'visibility', 'secret', path); addDefault(entity, 'facts', [], path);
       if (Array.isArray(entity.facts)) entity.facts.forEach((fact, factIndex) => { if (!record(fact)) return; const factPath = `${path}.facts[${factIndex}]`; addDefault(fact, 'temporal', 'unknown', factPath); addDefault(fact, 'certainty', 'inference', factPath); addDefault(fact, 'visibility', 'secret', factPath);
+        omitUnknown(fact, ['attribute'], factPath);
         if (typeof fact.attribute === 'string') { const normalized = normalizeProfileAttribute(fact.attribute); if (normalized !== fact.attribute) { fact.attribute = normalized; adjustments.push({ path: `${factPath}.attribute`, message: `明确的资料属性名称已统一为 ${normalized}` }); } }
         cite(fact, factPath); });
     });
     if (Array.isArray(candidate.relations)) candidate.relations.forEach((relation, index) => { if (!record(relation)) return; addDefault(relation, 'visibility', 'secret', `relations[${index}]`); cite(relation, `relations[${index}]`); });
-    if (Array.isArray(candidate.foreshadows)) candidate.foreshadows.forEach((foreshadow, index) => { if (!record(foreshadow)) return; const path = `foreshadows[${index}]`; addDefault(foreshadow, 'detail', '', path); addDefault(foreshadow, 'status', 'planned', path); addDefault(foreshadow, 'revealCondition', '', path); addDefault(foreshadow, 'relatedNames', [], path); });
+    if (Array.isArray(candidate.foreshadows)) candidate.foreshadows.forEach((foreshadow, index) => { if (!record(foreshadow)) return; const path = `foreshadows[${index}]`; omitUnknown(foreshadow, ['dueChapter'], path); addDefault(foreshadow, 'detail', '', path); addDefault(foreshadow, 'status', 'planned', path); addDefault(foreshadow, 'revealCondition', '', path); addDefault(foreshadow, 'relatedNames', [], path); });
   }
   const parsed = extractionSchema.safeParse(candidate);
   if (!parsed.success) for (const issue of parsed.error.issues) issues.push({ path: pathString(issue.path), message: issue.message });

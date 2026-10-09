@@ -71,8 +71,9 @@ export interface StoryImage { id: string; projectId: string; branchId: string; b
 export interface ImageGenerateInput { baseRevisionId: string; kind: StoryImageKind; entityId?: string; chapterId?: string; selection?: { start: number; end: number }; instruction?: string; referenceImageId?: string }
 /** Writing tools request illustrations; they bind to saved prose and confirmed entities after extraction. */
 export interface WritingImageRequest { kind: 'portrait' | 'cg'; name?: string; description: string; sourceText?: string }
+export type ExtractionOutputMode = 'prompt' | 'structured' | 'tool';
 export interface TaskSettings {
-  extraction: { autoRetry: boolean; maxRetries: number; retryDelayMs: number };
+  extraction: { outputMode?: ExtractionOutputMode; autoRetry: boolean; maxRetries: number; retryDelayMs: number };
   planning: { enabled: boolean; mode: 'separate' | 'tool' };
 }
 export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings; taskSettings?: TaskSettings }
@@ -102,7 +103,9 @@ export interface ModelToolContinuation {
   inputTokens: number; outputTokens: number; round: number; callCount: number; usageEstimated?: boolean;
   pending?: { data: Record<string, unknown>; calls: ModelToolCall[]; results: { call: ModelToolCall; output: string }[]; nextIndex: number };
 }
-export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
+/** A submission tool only returns data; it is never executed or continued. */
+export interface ModelStructuredOutput { mode: 'json_schema' | 'tool'; name: string; description: string; schema: Record<string, unknown> }
+export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; structuredOutput?: ModelStructuredOutput; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
 export type OutputStage = 'planning' | 'writing' | 'extraction';
 export interface OutputIssue { path: string; message: string; paragraph?: number; quote?: string; sourceText?: string }
 export interface ModelOutputRecord extends CapturedModelResponse {

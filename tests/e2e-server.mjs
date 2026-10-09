@@ -240,6 +240,12 @@ const modelServer = createServer(async (req, res) => {
       return;
     }
     const text = body.model === 'e2e-noncompact-summary' ? JSON.stringify({ text: prompt }) : body.model === 'e2e-compact-extraction' ? JSON.stringify({ summary: '林舟来到白石城。', entities: [{ kind: 'character', name: '林舟', visibility: 'public', facts: [{ text: '林舟走进白石城', paragraph: 1, temporal: 'current', certainty: 'fact', visibility: 'public', attribute: 'location' }] }] }) : body.model === 'e2e-quote-mismatch' ? JSON.stringify({ summary: '旅人进入古城。', entities: [{ kind: 'character', name: '林舟', aliases: [], description: '旅人', visibility: 'public', facts: [{ text: '林舟来到白石城', attribute: 'location', temporal: 'current', certainty: 'fact', visibility: 'public', paragraph: 1, quote: '回来了。林舟走进山谷。' }] }], relations: [], foreshadows: [] }) : fixtureReply(system, prompt);
+    if (body.tools?.some(tool => tool.function?.name === 'submit_extraction')) {
+      if (body.tool_choice?.function?.name !== 'submit_extraction' || body.parallel_tool_calls !== false) { res.writeHead(400); res.end('{"error":"missing submission choice"}'); return; }
+      const call = { id: 'extraction-submission', type: 'function', function: { name: 'submit_extraction', arguments: text } };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [call] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 120, completion_tokens: 80 } })); return;
+    }
     // A short real async wait exercises job polling and persisted checkpoints.
     setTimeout(() => {
       if (res.destroyed) return;

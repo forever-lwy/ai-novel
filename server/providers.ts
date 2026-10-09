@@ -7,6 +7,7 @@ import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions 
 import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream, streamFrameFragments } from './model-stream.js';
 import { chapterBudgetInstruction, chapterBudgetReached } from '../shared/rpg-chapter.js';
 import { STRUCTURED_OUTPUT_INSTRUCTION } from '../shared/prompt-runtime.js';
+import { EXTRACTION_SUBMISSION_NAME, EXTRACTION_TOOL_INSTRUCTION } from '../shared/extraction-output.js';
 export { validateProviderOptions } from './provider-options.js';
 
 export const MODEL_TIMEOUT_MS = DEFAULT_MODEL_TIMEOUT_MS;
@@ -196,7 +197,11 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
   const key = config.apiKey?.trim();
   const options = providerWireOptions(config);
   const stream = Boolean(request.onTextDelta) || (config.stream ?? false);
-  const tools = request.tools ?? [];
+  const output = request.structuredOutput;
+  if (output && (request.tools?.length || request.continuation)) throw new Error('资料输出模式不能与检索工具或多轮续接同时使用。');
+  const submission = output?.mode === 'tool' ? output : undefined;
+  const schema = output?.mode === 'json_schema' ? output.schema : undefined;
+  const tools = submission ? [{ name: submission.name, description: submission.description, parameters: submission.schema }] : request.tools ?? [];
   const messages = request.messages?.length ? request.messages : undefined;
   const system = messages ? messages.filter(message => message.role === 'system').map(message => message.content).join('\n\n') : request.system;
   if (stream) headers.Accept = 'text/event-stream';
@@ -207,12 +212,16 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
         model: config.model, messages: messages ? messages.map(message => ({ ...message })) : [{ role: 'system', content: request.system }, { role: 'user', content: request.prompt }],
         ...(tools.length ? { tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) } : {}),
         [config.openaiMaxTokensField ?? 'max_tokens']: tokens, stream, ...(stream ? { stream_options: { include_usage: true } } : {}), ...options,
+        ...(schema ? { response_format: { type: 'json_schema', json_schema: { name: output!.name, strict: true, schema } } } : {}),
+        ...(submission ? { tool_choice: { type: 'function', function: { name: submission.name } }, parallel_tool_calls: false } : {}),
       } };
     case 'openai-responses':
       if (key) headers.Authorization = `Bearer ${key}`;
       return { url: endpoint(config.baseUrl, 'responses'), headers, body: {
         model: config.model, ...(messages ? { input: messages.map(message => ({ ...message })) } : { instructions: request.system, input: request.prompt }), max_output_tokens: tokens, stream, store: false, ...options,
         ...(tools.length ? { tools: tools.map(tool => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters, strict: false })) } : {}),
+        ...(schema ? { text: { format: { type: 'json_schema', name: output!.name, strict: true, schema } } } : {}),
+        ...(submission ? { tool_choice: { type: 'function', name: submission.name }, parallel_tool_calls: false } : {}),
       } };
     case 'gemini':
       if (key) headers['x-goog-api-key'] = key;
@@ -221,8 +230,9 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
       return { url, headers, body: {
         ...(!messages || system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
         contents: messages ? messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'model' : 'user', parts: [{ text: message.content }] })) : [{ role: 'user', parts: [{ text: request.prompt }] }],
-        generationConfig: { maxOutputTokens: tokens, ...options },
-        ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, parameters: tool.parameters })) }] } : {}),
+        generationConfig: { maxOutputTokens: tokens, ...options, ...(schema ? { responseMimeType: 'application/json', responseJsonSchema: schema } : {}) },
+        ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, [submission ? 'parametersJsonSchema' : 'parameters']: tool.parameters })) }] } : {}),
+        ...(submission ? { toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [submission.name] } } } : {}),
       } };
     case 'claude':
       if (key) headers['x-api-key'] = key;
@@ -230,6 +240,10 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
       return { url: endpoint(config.baseUrl, 'messages'), headers, body: {
         model: config.model, ...(!messages || system ? { system } : {}), messages: messages ? messages.filter(message => message.role !== 'system').map(message => ({ ...message })) : [{ role: 'user', content: request.prompt }], max_tokens: tokens, stream, ...options,
         ...(tools.length ? { tools: tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })) } : {}),
+        ...(schema ? { output_config: { ...(object(options.output_config) ? options.output_config : {}), format: { type: 'json_schema', schema } } } : {}),
+        // Auto preserves thinking and supports models that reject forced tool choice.
+        // The submission instruction and response validation still require exactly one call.
+        ...(submission ? { tool_choice: { type: 'auto', disable_parallel_tool_use: true } } : {}),
       } };
     default: throw new Error('不支持的模型接口协议。');
   }
@@ -397,6 +411,7 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
   let errorCode: string | undefined;
   const capture = () => {
     const inspection = inspectBody(config, response, received);
+    if (inspection.data && request.structuredOutput?.mode === 'tool') inspection.text = submissionText(config.protocol, inspection.data, request.structuredOutput.name) ?? inspection.text;
     capturedTokens = inspection.tokens;
     if (captured) return inspection;
     captured = true;
@@ -515,6 +530,13 @@ function responseToolCalls(protocol: ProviderConfig['protocol'], data: JsonObjec
   if (protocol === 'openai-responses') return objects(data.output).filter(item => item.type === 'function_call').map(call => ({ id: call.call_id, name: call.name, arguments: call.arguments }));
   if (protocol === 'gemini') return objects(data.candidates?.[0]?.content?.parts).filter(part => object(part.functionCall)).map((part, index) => ({ id: part.functionCall.id ?? `call_${index}`, name: part.functionCall.name, arguments: part.functionCall.args }));
   return objects(data.content).filter(part => part.type === 'tool_use').map(call => ({ id: call.id, name: call.name, arguments: call.input }));
+}
+
+/** Keep the original argument string (including invalid/partial JSON) for author repair. */
+function submissionText(protocol: ProviderConfig['protocol'], data: JsonObject, name: string): string | undefined {
+  const calls = responseToolCalls(protocol, data);
+  if (calls.length !== 1 || calls[0].name !== name) return undefined;
+  return typeof calls[0].arguments === 'string' ? calls[0].arguments : JSON.stringify(calls[0].arguments);
 }
 
 const estimateTokens = (text: string) => Math.ceil([...text].reduce((sum, char) => sum + (char.charCodeAt(0) > 127 ? 1.3 : 0.3), 0));
@@ -779,7 +801,7 @@ export function unwrapModelOutput(text: string): string {
     if (!object(parsed)) return current;
     const protocol = envelopeProtocol(parsed);
     if (!protocol) return current;
-    const inner = responseText(protocol, parsed);
+    const inner = submissionText(protocol, parsed, EXTRACTION_SUBMISSION_NAME) ?? responseText(protocol, parsed);
     if (!inner.trim()) throw new ModelOutputError('粘贴的模型响应没有可用正文，请粘贴包含文本输出的响应或直接填写正文。', noUsage, [{ path: '$', message: '识别到了模型服务响应，但其中没有文本输出。' }]);
     current = inner;
   }
@@ -809,15 +831,31 @@ export function parseStructuredText<T>(text: string, validate: (value: unknown) 
 
 /** Normalize before budgeting; repeated normalization never duplicates the output constraint. */
 export function structuredRequest(request: ModelRequest): ModelRequest {
+  const instruction = request.structuredOutput?.mode === 'tool' ? EXTRACTION_TOOL_INSTRUCTION : STRUCTURED_OUTPUT_INSTRUCTION;
   if (request.messages?.length) {
-    if (request.messages.some(message => message.role === 'system' && message.content.includes(STRUCTURED_OUTPUT_INSTRUCTION))) return request;
-    return { ...request, messages: [...request.messages, { role: 'system', content: STRUCTURED_OUTPUT_INSTRUCTION }] };
+    if (request.messages.some(message => message.role === 'system' && message.content.includes(instruction))) return request;
+    return { ...request, messages: [...request.messages, { role: 'system', content: instruction }] };
   }
-  return request.system.includes(STRUCTURED_OUTPUT_INSTRUCTION) ? request : { ...request, system: `${request.system}\n\n${STRUCTURED_OUTPUT_INSTRUCTION}` };
+  return request.system.includes(instruction) ? request : { ...request, system: `${request.system}\n\n${instruction}` };
+}
+
+async function generateSubmission(config: ProviderConfig, request: ModelRequest): Promise<ModelResult> {
+  const { data, result } = await sendModelRequest(config, request, requestBody(config, request));
+  const calls = responseToolCalls(config.protocol, data);
+  const fail = (message: string): never => { throw new ModelOutputError(message, result, [{ path: '$', message }]); };
+  if (calls.length !== 1 || calls[0].name !== request.structuredOutput!.name) fail('资料提取必须且只能调用一次指定的提交工具；普通文本、其他工具或多次调用均不能作为结果。');
+  const text = submissionText(config.protocol, data, request.structuredOutput!.name);
+  let args: unknown;
+  try { args = text === undefined ? undefined : JSON.parse(text); }
+  catch { fail('资料提交工具参数不是有效 JSON，已保留输出供修正。'); }
+  if (!object(args)) fail('资料提交工具参数必须是 JSON 对象。');
+  if (request.signal?.aborted) fail('模型请求已取消。');
+  return { ...result, text: redactPayload(text!, config.apiKey) };
 }
 
 export async function generateStructured<T>(config: ProviderConfig, request: ModelRequest, validate: (value: unknown) => T): Promise<{ value: T; inputTokens: number; outputTokens: number }> {
-  const result = await generateText(config, structuredRequest(request));
+  const normalized = structuredRequest(request);
+  const result = normalized.structuredOutput?.mode === 'tool' ? await generateSubmission(config, normalized) : await generateText(config, normalized);
   try { return { value: parseStructuredText(result.text, validate), inputTokens: result.inputTokens, outputTokens: result.outputTokens }; }
   catch (error) {
     if (error instanceof ModelOutputError) throw new ModelOutputError(redactPayload(error.message, config.apiKey), result, error.issues?.map(issue => ({ ...issue, path: redactPayload(issue.path, config.apiKey), message: redactPayload(issue.message, config.apiKey), ...(issue.quote !== undefined ? { quote: redactPayload(issue.quote, config.apiKey) } : {}), ...(issue.sourceText !== undefined ? { sourceText: redactPayload(issue.sourceText, config.apiKey) } : {}) })));

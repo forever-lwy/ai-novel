@@ -1813,9 +1813,60 @@ async function taskSettingsAuthentication(page: Page) {
 }
 
 const taskSettingsDefaults = {
-  extraction: { autoRetry: false, maxRetries: 2, retryDelayMs: 5000 },
+  extraction: { outputMode: 'prompt', autoRetry: false, maxRetries: 2, retryDelayMs: 5000 },
   planning: { enabled: true, mode: 'separate' },
 };
+
+for (const mode of ['structured', 'tool'] as const) test(`资料提取 ${mode} 模式可预览、保存并完成一次真实本地请求`, async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  try {
+    const providerId = `extraction-${mode}`;
+    expect((await page.request.put('/api/settings', { data: { ...previous,
+      providers: [{ id: providerId, name: '提取模式本地模拟', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }],
+      writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
+      modelParameters: [], promptTemplates: defaultPromptTemplates(), taskSettings: taskSettingsDefaults,
+      imageSettings: { ...previous.imageSettings, providerId: '', model: '', autoPortrait: false, autoCG: false },
+    } })).ok()).toBeTruthy();
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settings = page.getByTestId('settings-page');
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    const selector = settings.getByRole('combobox', { name: '资料提取输出模式', exact: true });
+    await expect(selector).toHaveValue('prompt'); await selector.selectOption(mode);
+    await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    const panel = settings.getByTestId('prompt-templates-panel');
+    await panel.getByRole('tab', { name: '资料提取', exact: true }).click();
+    await panel.locator('summary').filter({ hasText: '完整请求结构 · 示例模型与参数' }).click();
+    await expect(panel.getByLabel('完整提示词请求', { exact: true })).toContainText(mode === 'tool' ? 'tool_choice' : 'response_format');
+    await expect(panel.getByLabel('完整提示词请求', { exact: true })).toContainText('submit_extraction');
+    if (mode === 'tool') {
+      await panel.locator('summary').filter({ hasText: '发送的工具定义（1）' }).click();
+      await expect(panel.getByLabel('提示词工具定义', { exact: true })).toContainText('summary');
+      await expect(panel.getByLabel('提示词编译预览', { exact: true })).toContainText('普通文本不能替代工具调用');
+    }
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(settings.getByRole('status')).toContainText('设置已保存');
+    await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click(); await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await expect(selector).toHaveValue(mode);
+    await selector.scrollIntoViewIfNeeded(); await page.screenshot({ path: testInfo.outputPath('extraction-output-desktop.png'), animations: 'disabled', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 }); await selector.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('extraction-output-mobile.png'), animations: 'disabled' });
+    expect(await settings.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await settings.getByRole('button', { name: '返回作品', exact: true }).click();
+    await createProject(page, `提取输出 ${mode} 验收`);
+    const before = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+    await page.getByRole('button', { name: '导入小说', exact: true }).click();
+    await page.getByRole('dialog').locator('input[type=file]').setInputFiles({ name: 'extraction-mode.txt', mimeType: 'text/plain', buffer: Buffer.from('第一章 入城\n林舟走进白石城。') });
+    const confirming = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/confirm'));
+    await page.getByRole('dialog').getByRole('button', { name: '确认目录并整理', exact: true }).click();
+    const job = await (await confirming).json(); await completedJobs(page, 1);
+    const after = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json(); expect(after.modelRequests - before.modelRequests).toBe(1);
+    const outputs = await (await page.request.get(`/api/jobs/${job.id}/outputs?view=author`)).json(); expect(outputs).toHaveLength(1); expect(outputs[0].status).toBe('applied');
+    const { output } = await (await page.request.get(`/api/jobs/${job.id}/outputs/${outputs[0].id}?view=author`)).json();
+    expect(JSON.parse(output.request.body)[mode === 'tool' ? 'tool_choice' : 'response_format']).toBeTruthy();
+    expect(JSON.parse(output.text).entities[0].name).toBe('林舟'); expect(output.normalizedText).toContain('林舟走进白石城');
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
 
 test('任务控制设置保留数字草稿，校验重试范围并保存秒到毫秒的转换', async ({ page }, testInfo) => {
   await taskSettingsAuthentication(page);
@@ -1856,7 +1907,7 @@ test('任务控制设置保留数字草稿，校验重试范围并保存秒到�
     await settings.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(settings.getByRole('status')).toContainText('设置已保存');
     const saved = await (await page.request.get('/api/settings')).json();
-    expect(saved.taskSettings).toEqual({ extraction: { autoRetry: true, maxRetries: 3, retryDelayMs: 1250 }, planning: { enabled: true, mode: 'tool' } });
+    expect(saved.taskSettings).toEqual({ extraction: { outputMode: 'prompt', autoRetry: true, maxRetries: 3, retryDelayMs: 1250 }, planning: { enabled: true, mode: 'tool' } });
     expect(saved.planningProviderId).toBe(providerId); expect(saved.planningModel).toBe('e2e-planning');
     await page.screenshot({ path: testInfo.outputPath('task-controls-desktop.png'), animations: 'disabled', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
