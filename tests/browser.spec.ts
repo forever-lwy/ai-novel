@@ -2124,3 +2124,75 @@ test('旧提取省略档案可见性时公开资料仍按章继承，原始快�
   await expect(page.locator('.character-location').filter({ hasText: '林夏' })).toContainText('目前位于树林');
   await page.screenshot({ path: testInfo.outputPath('legacy-reading-positions.png'), fullPage: true, animations: 'disabled' });
 });
+
+test('章节维护：单章重提取、清除资料、删除资料和章节，阅读快照与回退同步', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  const providerId = 'e2e-chapter-maintenance';
+  try {
+    const settings = await page.request.put('/api/settings', { data: {
+      ...previous, providers: [...previous.providers, { id: providerId, name: '章节维护模拟接口', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: 'fake-maintenance-key' }],
+      extractionProviderId: providerId, extractionModel: 'e2e-fixture',
+      taskSettings: { ...previous.taskSettings, extraction: { outputMode: 'prompt', autoRetry: false, maxRetries: 0, retryDelayMs: 1000 } },
+    } });
+    expect(settings.ok(), await settings.text()).toBeTruthy();
+    const store = new Store(mkdtempSync(join(tmpdir(), 'novel-maintenance-browser-'))); let backup: Buffer;
+    try {
+      const { project } = readingProgressStory(store); const data = store.exportProject(project.id); data.project.title = '章节维护浏览器验收';
+      backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: data, sources: [] }));
+    } finally { store.close(); }
+    const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'maintenance.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+    expect(restored.ok(), await restored.text()).toBeTruthy(); const project = await restored.json(); const branchId = project.mainBranchId;
+    const initial = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    const [firstId, secondId, thirdId] = initial.state.chapters.map((chapter: { id: string }) => chapter.id);
+    const stats = async () => (await (await page.request.get(`http://127.0.0.1:${process.env.E2E_MODEL_PORT || '4329'}/__e2e/stats`)).json()).modelRequests;
+    await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+    await expect(page.locator('.manuscript h1')).toHaveText('第三章 灯塔');
+    await expect(page.locator('.chapter-actions')).toHaveCount(0);
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+    const select = async (title: string) => { await page.locator('.chapter-item').filter({ hasText: title }).click(); await expect(page.locator('.manuscript h1')).toHaveText(title); };
+    const action = async (name: string) => { await page.locator('.chapter-actions summary').click(); await page.getByRole('button', { name, exact: true }).click(); };
+    await select('第二章 山城'); const beforeExtract = await stats();
+    await action('重新提取本章资料'); const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('只请求本章'); await dialog.getByRole('button', { name: '开始重新提取', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).state.chapters[1].status).toBe('ready');
+    await expect(page.locator('.chapter-item').filter({ hasText: '第二章 山城' })).not.toContainText('待整理');
+    expect(await stats()).toBe(beforeExtract + 1);
+    const afterExtract = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    expect(afterExtract.state.chapters[2]).toEqual(initial.state.chapters[2]); expect(afterExtract.state.chapters[1].summary).not.toContain(initial.state.chapters[1].summary);
+    await expect(page.locator('.manuscript h1')).toHaveText('第二章 山城');
+    await select('第三章 灯塔'); const beforeClear = await stats();
+    await action('清除本章提取资料'); await dialog.getByRole('button', { name: '取消', exact: true }).click();
+    expect(await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).toEqual(afterExtract);
+    await action('清除本章提取资料'); await dialog.getByRole('button', { name: '确认清除资料', exact: true }).click();
+    await expect(dialog).toHaveCount(0); await expect(page.locator('.editor-toolbar')).toContainText('待整理');
+    expect(await stats()).toBe(beforeClear); await expect(page.locator('.manuscript .prose')).toContainText('林舟受伤抵达灯塔');
+    await action('重新提取本章资料'); await dialog.getByRole('button', { name: '开始重新提取', exact: true }).click();
+    await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).state.chapters[2].status).toBe('ready');
+    await expect(page.locator('.chapter-item').filter({ hasText: '第三章 灯塔' })).not.toContainText('待整理');
+    await tab(page, '世界资料'); const traveler = page.locator('.entity-card').filter({ has: page.getByRole('button', { name: '林舟', exact: true }) });
+    await traveler.getByRole('button', { name: '删除 林舟', exact: true }).click(); await expect(dialog).toContainText('章节正文保留');
+    await dialog.getByRole('button', { name: '确认删除资料', exact: true }).click(); await expect(traveler).toHaveCount(0);
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await select('第一章 河岸'); await tab(page, '世界资料');
+    await expect(page.getByRole('button', { name: '林舟', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await select('第二章 山城');
+    await action('删除本章'); await expect(dialog).toContainText('只删除这一章');
+    await dialog.getByRole('button', { name: '确认删除章节', exact: true }).click(); await expect(page.locator('.chapter-item')).toHaveCount(2);
+    await expect(page.locator('.manuscript h1')).toHaveText('第三章 灯塔');
+    const afterDelete = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json(); expect(afterDelete.state.chapters.map((chapter: { id: string }) => chapter.id)).toEqual([firstId, thirdId]);
+    expect((await page.request.get(`/api/branches/${branchId}/chapters/${secondId}`)).status()).toBe(404);
+    await page.setViewportSize({ width: 390, height: 844 }); await page.locator('.chapter-actions summary').click();
+    const menu = page.locator('.chapter-actions-menu'); await expect(menu).toBeVisible();
+    expect(await menu.evaluate(element => { const rect = element.getBoundingClientRect(); return rect.left >= 0 && rect.right <= window.innerWidth; })).toBeTruthy();
+    await page.screenshot({ path: testInfo.outputPath('chapter-maintenance-mobile.png'), animations: 'disabled' });
+    await page.locator('.chapter-actions summary').click(); await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.getByRole('button', { name: '版本历史', exact: true }).click();
+    const latestOriginal = dialog.locator('.revision-item').filter({ hasText: '保存验收插画' }).first();
+    page.once('dialog', prompt => prompt.accept()); await latestOriginal.getByRole('button', { name: '回退', exact: true }).click();
+    await expect(dialog).toHaveCount(0); await expect(page.locator('.chapter-item')).toHaveCount(3);
+    const reverted = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json(); expect(reverted.state).toEqual(initial.state);
+    await tab(page, '世界资料'); await expect(traveler).toHaveCount(1);
+    await expect(traveler.locator('.entity-image-preview img')).toHaveCount(1);
+    await page.screenshot({ path: testInfo.outputPath('chapter-maintenance-restored-desktop.png'), animations: 'disabled' });
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});

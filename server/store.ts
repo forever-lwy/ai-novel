@@ -8,6 +8,7 @@ import { modelOutputSchema, OutputStore } from './output-store.js';
 import { findEntitiesByName, reconcileExtractionEntities } from './entity-resolution.js';
 import { rebuildCharacterProfileDescription, normalizeProfileAttribute } from './extraction.js';
 import { repairLegacyExtractionVisibility } from './legacy-extraction-visibility.js';
+import { clearChapterMaterials, removeEntities } from './chapter-maintenance.js';
 import { ImageStore, imageBackupSchema, imageEntity, imageReferences, validateImageContent } from './image-store.js';
 import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState, type WritingActivity, type ModelActivityEvent, type RpgSetup, type StoryReference, type OriginalReferenceData } from '../shared/types.js';
 
@@ -285,9 +286,12 @@ export class Store {
     }
     return { branch, state, revisions: author ? this.history(branchId) : [], ...(!author && readingChapterId ? { readingChapterId } : {}) };
   }
-  commit(branchId: string, baseRevisionId: string, state: StoryState, label: string, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
+  commit(branchId: string, baseRevisionId: string, state: StoryState, label: string, checkpoint?: (revisionId: string, branchId: string) => void, boundaries: StoryState[] = []): BranchView {
     this.db.exec('BEGIN IMMEDIATE');
-    try { const branch = this.assertVersion(branchId, baseRevisionId); const revision = this.insertRevision(branch, state, label, branch.revisionId); branch.revisionId = revision.id;
+    try { const branch = this.assertVersion(branchId, baseRevisionId);
+      // New boundary snapshots shadow old materials along this version path without rewriting history.
+      for (const boundary of boundaries) branch.revisionId = this.insertRevision(branch, boundary, `${label} · 章末快照：${boundary.chapters.at(-1)?.title ?? '故事起点'}`, branch.revisionId).id;
+      const revision = this.insertRevision(branch, state, label, branch.revisionId); branch.revisionId = revision.id;
       this.db.prepare('UPDATE branches SET data=? WHERE id=?').run(JSON.stringify(branch), branch.id);
       const project = this.getProject(branch.projectId); project.updatedAt = now(); this.db.prepare('UPDATE projects SET data=? WHERE id=?').run(JSON.stringify(project), project.id); checkpoint?.(revision.id, branch.id); this.db.exec('COMMIT');
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
@@ -314,6 +318,60 @@ export class Store {
       if (state.chapters.length === count && state.chapters.every((chapter, index) => chapter.id === current.chapters[index]?.id)) return state;
     }
     throw new HttpError(`未找到该章节的历史状态，不能安全${purpose}`, 409);
+  }
+  /** Collect the newest snapshot of each unchanged prose prefix in one history scan. */
+  private chapterTimeline(branchId: string, fromCount: number): StoryState[] {
+    const current = this.state(branchId); const byCount = new Map<number, StoryState>([[current.chapters.length, current]]);
+    for (const revision of this.history(branchId)) {
+      if (revision.chapterCount < fromCount || byCount.has(revision.chapterCount)) continue;
+      const state = this.revisionState(revision.id);
+      if (state.chapters.every((chapter, index) => chapter.id === current.chapters[index]?.id)) byCount.set(state.chapters.length, state);
+      if (byCount.size === current.chapters.length - fromCount + 1) break;
+    }
+    const states: StoryState[] = [];
+    for (let count = fromCount; count <= current.chapters.length; count++) {
+      const state = byCount.get(count); if (!state) throw new HttpError('缺少章节历史快照，不能安全更新资料', 409);
+      states.push(state);
+    }
+    return states;
+  }
+  clearChapterExtraction(branchId: string, base: string, chapterId: string, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
+    return this.changeChapterMaterials(branchId, base, chapterId, false, checkpoint);
+  }
+  deleteChapter(branchId: string, base: string, chapterId: string): BranchView {
+    return this.changeChapterMaterials(branchId, base, chapterId, true);
+  }
+  private changeChapterMaterials(branchId: string, base: string, chapterId: string, deleting: boolean, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
+    this.assertVersion(branchId, base); const current = this.state(branchId); const index = current.chapters.findIndex(chapter => chapter.id === chapterId);
+    if (index < 0) throw new HttpError('本故事线不包含这个章节', 404);
+    const before = this.atBoundary(branchId, index, '更新章节资料'); const states = this.chapterTimeline(branchId, index + 1); const after = clone(states[0]);
+    for (const state of states) {
+      clearChapterMaterials(state, chapterId, before, after, deleting, id => this.images.get(id)?.entityId);
+      for (const entity of state.entities) { reconcileCurrentAttributes(entity, state.chapters); entity.description = rebuildCharacterProfileDescription(entity); }
+      if (deleting) {
+        state.chapters = state.chapters.filter(chapter => chapter.id !== chapterId);
+        state.imageIds = state.imageIds?.filter(id => this.images.get(id)?.chapterId !== chapterId);
+        state.activeImageIds = state.activeImageIds?.filter(id => state.imageIds?.includes(id));
+        state.outline.fine = state.outline.fine.map(plan => ({ ...plan, chapter: plan.chapter > index + 1 ? plan.chapter - 1 : plan.chapter })).filter(plan => plan.chapter > state.chapters.length);
+        for (const clue of state.foreshadows) if (clue.dueChapter && clue.dueChapter > index + 1) clue.dueChapter--;
+        if (state.rpg?.nextChoice?.chapterId === chapterId) delete state.rpg.nextChoice;
+        if (state.rpg?.entryChapterId === chapterId) delete state.rpg.entryChapterId;
+      }
+    }
+    return this.commit(branchId, base, states.at(-1)!, `${deleting ? '删除章节' : '清除本章提取资料'}：${current.chapters[index].title}`, checkpoint, states.slice(0, -1));
+  }
+  deleteEntity(branchId: string, base: string, entityId: string): BranchView {
+    this.assertVersion(branchId, base); const current = this.state(branchId); const entity = current.entities.find(item => item.id === entityId);
+    if (!entity) throw new HttpError('资料条目不属于当前故事线', 404);
+    const removedIds = new Set([entityId]);
+    // A merged alias must also stay deleted at chapters before the merge happened.
+    for (;;) {
+      const aliases = current.entities.filter(item => item.mergedInto && removedIds.has(item.mergedInto) && !removedIds.has(item.id));
+      if (!aliases.length) break; for (const alias of aliases) removedIds.add(alias.id);
+    }
+    const states = this.chapterTimeline(branchId, 0);
+    for (const state of states) removeEntities(state, new Set(removedIds), id => this.images.get(id)?.entityId);
+    return this.commit(branchId, base, states.at(-1)!, `删除资料：${entity.name}`, undefined, states.slice(0, -1));
   }
   writingState(branchId: string, chapterId?: string): StoryState {
     if (!chapterId) return this.state(branchId);
@@ -529,8 +587,23 @@ export class Store {
   }
   exportText(branchId: string): string { return this.state(branchId).chapters.map(c => `${c.title}\n\n${this.chapter(branchId, c.id).text}`).join('\n\n'); }
   applyExtraction(branchId: string, base: string, chapterId: string, result: ExtractionResult, complete: boolean, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
-    this.assertVersion(branchId, base); const state = this.state(branchId); const ref = state.chapters.find(c => c.id === chapterId); if (!ref) throw new HttpError('整理章节不属于当前故事线');
+    this.assertVersion(branchId, base); const current = this.state(branchId); const index = current.chapters.findIndex(chapter => chapter.id === chapterId);
+    if (index < 0) throw new HttpError('整理章节不属于当前故事线');
+    const states = index < current.chapters.length - 1 ? this.chapterTimeline(branchId, index + 1) : [current];
+    const identities = new Map<string, string>();
+    const allocate = (key: string) => { if (!identities.has(key)) identities.set(key, id()); return identities.get(key)!; };
+    // The same discoveries retain their IDs across every chapter-end snapshot.
+    for (const extracted of result.entities) {
+      const matches = findEntitiesByName(current, extracted.name, extracted.kind);
+      if (matches.length === 1) identities.set(`entity:${extracted.kind}:${normalize(extracted.name)}`, matches[0].id);
+    }
+    for (const clue of current.foreshadows) identities.set(`clue:${normalize(clue.title)}`, clue.id);
     const lines = paragraphs(this.chapter(branchId, chapterId).text);
+    for (const state of states) this.extractIntoState(state, chapterId, result, complete, lines, allocate);
+    return this.commit(branchId, base, states.at(-1)!, `${complete ? '完成资料整理' : '整理章节片段'}：${current.chapters[index].title}`, checkpoint, states.slice(0, -1));
+  }
+  private extractIntoState(state: StoryState, chapterId: string, result: ExtractionResult, complete: boolean, lines: string[], allocate: (key: string) => string) {
+    const ref = state.chapters.find(chapter => chapter.id === chapterId)!;
     const citation = (paragraph: number, quote: string) => ({ chapterId, paragraph, quote });
     const issues: OutputIssue[] = [];
     const validateCitation = (paragraph: number, quote: string, path: string) => { if (!Number.isInteger(paragraph) || paragraph < 1 || !quote.trim() || !lines[paragraph - 1]?.includes(quote)) issues.push({ path, message: '引用必须是该编号原文段落中的逐字片段（含原始标点）', paragraph, quote, sourceText: lines[paragraph - 1] ?? '' }); };
@@ -552,9 +625,10 @@ export class Store {
       const matches = resolve(extracted.name, extracted.kind);
       let entity = matches.length === 1 ? matches[0] : undefined;
       const ambiguous = matches.length > 1;
-      if (!entity) { entity = { id: id(), kind: extracted.kind, name: extracted.name, aliases: extracted.aliases, description: '', visibility: extracted.visibility, locked: false, facts: [], nameStatus: extracted.nameStatus, isMain: extracted.isMain, isMainSource: extracted.isMain !== undefined ? 'extraction' : undefined }; state.entities.push(entity); }
+      if (!entity) { entity = { id: allocate(`entity:${extracted.kind}:${normalize(extracted.name)}`), kind: extracted.kind, name: extracted.name, aliases: extracted.aliases, description: '', visibility: extracted.visibility, locked: false, facts: [], nameStatus: extracted.nameStatus, isMain: extracted.isMain, isMainSource: extracted.isMain !== undefined ? 'extraction' : undefined }; state.entities.push(entity); }
       // Locked records retain human prose and aliases; evidence may be appended, never overwritten.
-      if (!entity.locked) { entity.aliases = [...new Set([...entity.aliases, ...extracted.aliases])].filter(alias => alias !== entity.name); if (extracted.description.trim() && extracted.facts.some(f => f.temporal === 'current')) entity.description = extracted.description; if (extracted.visibility === 'secret') entity.visibility = 'secret'; if (extracted.nameStatus === 'confirmed' || !entity.nameStatus) entity.nameStatus = extracted.nameStatus; if (entity.isMainSource !== 'author' && extracted.isMain !== undefined) { entity.isMain = extracted.isMain; entity.isMainSource = 'extraction'; } }
+      const laterEvidence = entity.facts.some(fact => state.chapters.findIndex(chapter => chapter.id === fact.citation?.chapterId) > state.chapters.findIndex(chapter => chapter.id === chapterId));
+      if (!entity.locked) { entity.aliases = [...new Set([...entity.aliases, ...extracted.aliases])].filter(alias => alias !== entity.name); if (!laterEvidence && extracted.description.trim() && extracted.facts.some(f => f.temporal === 'current')) entity.description = extracted.description; if (extracted.visibility === 'secret') entity.visibility = 'secret'; if (!laterEvidence && (extracted.nameStatus === 'confirmed' || !entity.nameStatus)) entity.nameStatus = extracted.nameStatus; if (!laterEvidence && entity.isMainSource !== 'author' && extracted.isMain !== undefined) { entity.isMain = extracted.isMain; entity.isMainSource = 'extraction'; } }
       for (const fact of [...extracted.facts].sort((a, b) => a.paragraph - b.paragraph)) {
         if (entity.facts.some(f => f.text === fact.text && f.attribute === fact.attribute && f.citation?.chapterId === chapterId && f.citation.paragraph === fact.paragraph && f.citation.quote === fact.quote)) continue;
         let conflict = ambiguous || (entity.locked && fact.temporal === 'current');
@@ -563,7 +637,7 @@ export class Store {
           if (oldCurrent.some(f => f.locked)) conflict = true;
           // Keep candidates until their citations can be compared across the whole extraction.
         }
-        entity.facts.push({ id: id(), text: fact.text, attribute: fact.attribute, temporal: fact.temporal, certainty: conflict ? 'conflict' : fact.certainty, visibility: extracted.visibility === 'secret' ? 'secret' : fact.visibility, citation: citation(fact.paragraph, fact.quote) });
+        entity.facts.push({ id: allocate(`fact:${entity.id}:${JSON.stringify(fact)}`), text: fact.text, attribute: fact.attribute, temporal: fact.temporal, certainty: conflict ? 'conflict' : fact.certainty, visibility: extracted.visibility === 'secret' ? 'secret' : fact.visibility, citation: citation(fact.paragraph, fact.quote) });
       }
     }
     for (const entity of state.entities.filter(entity => !entity.mergedInto)) { reconcileCurrentAttributes(entity, state.chapters); entity.description = rebuildCharacterProfileDescription(entity); }
@@ -572,20 +646,19 @@ export class Store {
       const from = resolve(extracted.from); const to = resolve(extracted.to);
       for (const [field, matches] of [['from', from], ['to', to]] as const) if (matches.length !== 1) issues.push({ path: `relations[${index}].${field}`, message: '关系端点必须匹配唯一的已有或本次提取实体，请核对名称与别名', paragraph: extracted.paragraph, quote: extracted.quote, sourceText: lines[extracted.paragraph - 1] });
       if (from.length !== 1 || to.length !== 1) continue;
-      if (!state.relations.some(r => r.fromId === from[0].id && r.toId === to[0].id && r.label === extracted.label && r.citation?.chapterId === chapterId)) state.relations.push({ id: id(), fromId: from[0].id, toId: to[0].id, label: extracted.label, visibility: secretIds.has(from[0].id) || secretIds.has(to[0].id) ? 'secret' : extracted.visibility, citation: citation(extracted.paragraph, extracted.quote) });
+      if (!state.relations.some(r => r.fromId === from[0].id && r.toId === to[0].id && r.label === extracted.label && r.citation?.chapterId === chapterId)) state.relations.push({ id: allocate(`relation:${from[0].id}:${to[0].id}:${JSON.stringify(extracted)}`), fromId: from[0].id, toId: to[0].id, label: extracted.label, visibility: secretIds.has(from[0].id) || secretIds.has(to[0].id) ? 'secret' : extracted.visibility, citation: citation(extracted.paragraph, extracted.quote) });
     }
     for (const [index, item] of result.foreshadows.entries()) {
       const old = state.foreshadows.find(f => normalize(f.title) === normalize(item.title));
       const relatedEntityIds = item.relatedNames.flatMap((n, nameIndex) => { const matches = resolve(n); if (matches.length !== 1) { issues.push({ path: `foreshadows[${index}].relatedNames[${nameIndex}]`, message: '伏笔关联名称必须匹配唯一实体，请核对名称与别名' }); return []; } return matches[0].id; });
       // Repeated mentions cannot reopen a completed clue. Earlier versions retain their own planted state.
       if (old && (old.status === 'resolved' || old.status === 'abandoned')) continue;
-      const updated: Foreshadow = { id: old?.id ?? id(), title: old?.title ?? item.title, detail: item.detail || old?.detail || '', status: item.status, dueChapter: item.dueChapter ?? old?.dueChapter, revealCondition: item.revealCondition || old?.revealCondition || '', relatedEntityIds: relatedEntityIds.length ? relatedEntityIds : old?.relatedEntityIds ?? [], plantedChapterId: old?.plantedChapterId ?? (item.status === 'planted' ? chapterId : undefined), resolvedChapterId: item.status === 'resolved' ? chapterId : old?.resolvedChapterId };
+      const updated: Foreshadow = { id: old?.id ?? allocate(`clue:${normalize(item.title)}`), title: old?.title ?? item.title, detail: item.detail || old?.detail || '', status: item.status, dueChapter: item.dueChapter ?? old?.dueChapter, revealCondition: item.revealCondition || old?.revealCondition || '', relatedEntityIds: relatedEntityIds.length ? relatedEntityIds : old?.relatedEntityIds ?? [], plantedChapterId: old?.plantedChapterId ?? (item.status === 'planted' ? chapterId : undefined), resolvedChapterId: item.status === 'resolved' ? chapterId : old?.resolvedChapterId };
       if (old) Object.assign(old, updated); else state.foreshadows.push(updated);
     }
     if (issues.length) throw new OutputValidationError(issues, '资料关联校验失败，请在作者输出记录中查看全部问题并修正');
     ref.summary = [ref.summary, result.summary].filter(Boolean).join('\n'); ref.status = complete ? 'ready' : 'pending';
     if (complete) state.outline.fine = state.outline.fine.filter(plan => plan.chapter > state.chapters.length);
-    return this.commit(branchId, base, state, complete ? `完成资料整理：${ref.title}` : `整理章节片段：${ref.title}`, checkpoint);
   }
   exportProject(projectId: string) {
     const project = this.getProject(projectId); const branches = this.listBranches(projectId);
@@ -702,7 +775,11 @@ export class Store {
         job.payload.rpgLookupAliases = { ...Object.fromEntries(Object.entries(previous).map(([oldId, target]) => [oldId, map.get(target) ?? (Object.hasOwn(sourceIdMap, target) ? sourceIdMap[target] : target)])), ...Object.fromEntries(map), ...sourceIdMap };
       }
       for (const field of ['blockIndex', 'importIndex']) if (job.payload[field] !== undefined && (!Number.isInteger(job.payload[field]) || Number(job.payload[field]) < 0)) throw new HttpError('备份任务进度无效');
-      for (const field of ['generatedChapterId', 'extractChapterId', 'importCurrentChapterId', 'chapterId']) if (job.payload[field] && !chapterIds.has(String(job.payload[field]))) throw new HttpError('备份任务章节不存在');
+      for (const field of ['generatedChapterId', 'extractChapterId', 'importCurrentChapterId', 'chapterId', 'targetChapterId']) if (job.payload[field] && !chapterIds.has(String(job.payload[field]))) throw new HttpError('备份任务章节不存在');
+      if (job.payload.targetChapterId !== undefined) {
+        const snapshot = restoredState(restored.revisions.findIndex(entry => entry.revision.id === job.baseRevisionId));
+        if (job.kind !== 'extract' || job.total !== 1 || typeof job.payload.targetChapterId !== 'string' || job.payload.extractChapterId !== job.payload.targetChapterId || !snapshot.chapters.some(chapter => chapter.id === job.payload.targetChapterId)) throw new HttpError('备份单章提取目标无效');
+      }
       if (job.kind === 'import' && restored.importChapters.filter(c => c.jobId === job.id).length !== job.total) throw new HttpError('备份缺少尚待整理的导入章节');
       if (job.status === 'running' || job.status === 'queued') { job.status = 'paused'; job.message = '作品已恢复，请手动继续任务'; }
     }

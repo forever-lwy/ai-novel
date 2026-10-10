@@ -73,6 +73,11 @@
 - GET /branches/:id?view=author|reader&chapterId= -> BranchView，默认 reader。阅读视图可指定当前故事线中的 `chapterId`，服务端读取截至该章结尾的最新历史快照，恢复当时的人物、物品、名称／别名、归并关系与当前位置；后续出场和资料更新不进入该响应。省略时读取故事线结尾，作者视图忽略进度并返回完整当前状态。读者视图移除 outline/foreshadows/secret 和 future 事实（outline 空对象结构保留），简介与卡片预览优先显示当时的当前状态，过去事实仍保留历史标记。`BranchView.readingChapterId` 标记实际阅读资料进度，`state.chapters` 保留当前故事线的完整目录供切章，摘要清空；`branch.revisionId` 仍为故事线当前版本。进度不属于本线返回 404，缺少匹配当前正文路径的历史快照返回 409，不以最新资料替代，不触发模型调用或修改版本。
 - GET /branches/:id/chapters/:chapterId -> Chapter（只可取该线实际包含的章）。
 - POST /branches/:id/chapters {baseRevisionId,title,text,chapterId?} -> BranchView（保存后 pending，自动整理，没配置模型可保留正文后配置并重试）；改旧章自动另开修订线，返回的 branch 可能不同。
+- `DELETE /branches/:id/chapters/:chapterId?view=author {baseRevisionId} -> BranchView`：只移除当前故事线的所选章，保留其他正文、原文件、历史和其他线。清理该章摘要、非锁定事实、引用关系和章节图片引用；锁定事实保留并解除被删正文的引用。后续编号、未来规划及伏笔预计章节顺延，被处理章覆盖的压缩摘要移除；删除 RPG 章末选择所属章时移除该选择，作者角色设定保留。
+- `DELETE /branches/:id/chapters/:chapterId/extraction?view=author {baseRevisionId} -> BranchView`：保留正文并清除该章旧提取资料与摘要，保留锁定条目与锁定事实，章节改为 pending，不调用模型。其他章节原有结果保留，相关章末快照同步修正。
+- `POST /branches/:id/chapters/:chapterId/extract?view=author {baseRevisionId} -> {view:BranchView,job:Job}`：在同一事务中清除旧结果、创建 total=1 的单章提取任务。未配置模型时先拒绝，不清除资料。内部 targetChapterId 固定所选章，extractChapterId/blockIndex 保存断点；运行、恢复和本地应用输出都只处理目标章。沿用提取输出模式、证据校验、用量、输出留存、配置的显式自动重试策略及手工修正流程。
+- `DELETE /branches/:id/entities/:entityId?view=author {baseRevisionId} -> BranchView`：删除本线档案、事实、合并别名记录、关联关系与资料图片引用，清理伏笔 relatedEntityIds，保留正文。删除正在扮演的已有角色档案时，玩家设定以原创角色继续保存；重新提取仍可能重新发现该档案。
+- 上述四个接口要求登录、同源、显式作者视图与当前版本。排队、运行、暂停或请求仍在结束时返回 409，需先完成或取消；过期版本或缺少匹配正文路径的历史快照返回 409，非本线条目返回 404，缺少作者视图返回 403。维护与历史章提取新增受影响的章末快照，旧快照和输出不改写；回退恢复旧状态，迟到输出不能写入新版本。单章提取名称索引固定到该章进度，后续别名、伏笔和事实不进入提取上下文；较晚章节的新状态优先于早章重新发现的旧状态。
 - POST /branches/:id/fork {baseRevisionId,chapterId?,name} -> BranchView（不指定chapterId代表当前结尾）。
 - POST /branches/:id/rollback {baseRevisionId,revisionId} -> BranchView。
 - 作者视图的 `state.chapters[].summary` 为导入或整理正文时同时提取的已发生剧情摘要，片段摘要按处理顺序累积；与 `state.outline.fine` 的预期规划分开；不再生成或使用 coarse。回退和旧章节分支读取该边界的整份快照，摘要、伏笔状态与人物位置事实一起恢复。读者视图及章节正文接口继续隐藏摘要。

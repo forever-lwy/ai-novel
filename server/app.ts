@@ -201,6 +201,17 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.put('/api/branches/:id/images/:imageId/active', async request => { if (!author(request)) fail('请在作者视图中选择启用图片。', 403); const input = z.object({ baseRevisionId: revision, active: z.boolean() }).strict().parse(request.body); return images.setActive(param(request), param(request, 'imageId'), input.baseRevisionId, input.active); });
   app.delete('/api/branches/:id/images/:imageId', async request => { if (!author(request)) fail('请在作者视图中删除图片。', 403); return images.delete(param(request), param(request, 'imageId'), base(request.body)); });
   app.get('/api/branches/:id/chapters/:chapterId', async request => store.chapter(param(request), param(request, 'chapterId')));
+  app.delete('/api/branches/:id/chapters/:chapterId', async request => {
+    requireAuthor(request); const branchId = param(request); engine.assertIdle(branchId);
+    return store.deleteChapter(branchId, base(request.body), param(request, 'chapterId'));
+  });
+  app.delete('/api/branches/:id/chapters/:chapterId/extraction', async request => {
+    requireAuthor(request); const branchId = param(request); engine.assertIdle(branchId);
+    return store.clearChapterExtraction(branchId, base(request.body), param(request, 'chapterId'));
+  });
+  app.post('/api/branches/:id/chapters/:chapterId/extract', async request => {
+    requireAuthor(request); return engine.reextractChapter(param(request), base(request.body), param(request, 'chapterId'));
+  });
   app.post('/api/branches/:id/chapters', async request => {
     const input = z.object({ baseRevisionId: revision, title: z.string().trim().min(1).max(500), text: z.string().max(2000000), chapterId: z.string().optional() }).parse(request.body);
     const view = store.saveChapter(param(request), input);
@@ -212,6 +223,10 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.post('/api/branches/:id/rollback', async request => store.rollback(param(request), z.object({ baseRevisionId: revision, revisionId: revision }).parse(request.body)));
   app.put('/api/branches/:id/outline', async request => { const body = z.object({ baseRevisionId: revision, outline: outlineSchema }).parse(request.body); return store.updateOutline(param(request), body.baseRevisionId, body.outline); });
   app.put('/api/branches/:id/entities/:entityId', async request => { const body = z.object({ baseRevisionId: revision, entity: entitySchema }).parse(request.body); if (body.entity.id !== param(request, 'entityId')) fail('资料标识不匹配。'); return store.updateEntity(param(request), body.baseRevisionId, body.entity as Entity); });
+  app.delete('/api/branches/:id/entities/:entityId', async request => {
+    requireAuthor(request); const branchId = param(request); engine.assertIdle(branchId);
+    return store.deleteEntity(branchId, base(request.body), param(request, 'entityId'));
+  });
   app.post('/api/branches/:id/entities/merge', async request => { const b = z.object({ baseRevisionId: revision, fromId: z.string(), toId: z.string() }).parse(request.body); return store.mergeEntities(param(request), b.baseRevisionId, b.fromId, b.toId); });
   app.put('/api/branches/:id/foreshadows', async request => { const b = z.object({ baseRevisionId: revision, foreshadows: z.array(foreshadowSchema).max(10000) }).parse(request.body); return store.updateForeshadows(param(request), b.baseRevisionId, b.foreshadows as Foreshadow[]); });
   app.get('/api/branches/:id/search', async request => { const { q } = z.object({ q: z.string().max(300).default('') }).parse(request.query); return store.search(param(request), q, author(request), readingProgress(request.query)); });

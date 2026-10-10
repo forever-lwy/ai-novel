@@ -482,3 +482,10 @@
 .generation-controls>.hint{margin:0;line-height:1.8}
 .generation-controls>.row:empty{display:none}
 @media(max-width:760px){.writing-activities.writing-activities-inline{margin:12px 0;padding:10px 11px}.generation-controls{padding:12px;margin-top:18px}.generation-controls .button{font-size:11px;padding:8px 10px}.streaming-prose .prose p,.streaming-prose.prose>p{scroll-margin-top:80px}}
+.chapter-actions { position: relative; }
+.chapter-actions summary { list-style: none; cursor: pointer; }
+.chapter-actions summary::-webkit-details-marker { display: none; }
+.chapter-actions-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 210px; padding: 6px; background: var(--surface, #fff); border: 1px solid var(--border, #e2e7df); border-radius: 10px; box-shadow: 0 8px 24px #203c241c; }
+.chapter-actions-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; border-radius: 6px; background: transparent; text-align: left; }
+.chapter-actions-menu button:hover { background: #eef3ed; }
+@media(max-width:600px) { .chapter-actions-menu { left: 0; right: auto; max-width: calc(100vw - 32px); } }

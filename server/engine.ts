@@ -105,6 +105,23 @@ export class StoryEngine {
     const rows = this.store.db.prepare(`SELECT data FROM jobs${where ? ` WHERE ${where}` : ''} ORDER BY rowid DESC`).all(...(projectId ? [projectId] : []));
     return rows.map(r => JSON.parse(String(r.data)) as Job);
   }
+  assertIdle(branchId: string) {
+    const branch = this.store.getBranch(branchId);
+    if (this.closed) throw new HttpError('任务服务正在关闭', 503);
+    if (this.deletingProjects.has(branch.projectId)) throw new HttpError('作品正在删除', 409);
+    if (this.jobsInternal(branch.projectId).some(job => job.branchId === branchId && (['queued', 'running', 'paused'].includes(job.status) || this.controllers.has(job.id)))) throw new HttpError('请先完成或取消当前故事线的任务，再操作章节或资料', 409);
+  }
+  reextractChapter(branchId: string, base: string, chapterId: string) {
+    this.assertIdle(branchId); this.store.assertVersion(branchId, base); this.store.chapter(branchId, chapterId);
+    // Missing model configuration must not clear already extracted materials.
+    this.provider('extraction');
+    let job!: Job;
+    const view = this.store.clearChapterExtraction(branchId, base, chapterId, revisionId => {
+      job = { id: randomUUID(), projectId: this.store.getBranch(branchId).projectId, branchId, baseRevisionId: revisionId, kind: 'extract', status: 'queued', progress: 0, total: 1, message: '等待重新提取所选章节', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { targetChapterId: chapterId, extractChapterId: chapterId, blockIndex: 0 } };
+      this.save(job);
+    });
+    queueMicrotask(() => this.pump()); return { view, job: this.publicJob(job) };
+  }
   listJobs(projectId?: string): Job[] { return this.jobsInternal(projectId).map(j => this.publicJob(j)); }
   listWritingActivities(jobId: string): WritingActivity[] {
     const job = this.get(jobId); if (job.kind !== 'generate') throw new HttpError('此任务不是正文生成任务', 400);
@@ -752,7 +769,7 @@ export class StoryEngine {
     if (local && complete) {
       if (job.kind === 'import') { const next = Number(job.payload.importIndex ?? 0) + 1; progress = next; payload = { ...payload, importIndex: next, importCurrentChapterId: undefined, extractChapterId: undefined, blockIndex: 0 }; finished = next >= job.total; }
       else if (job.kind === 'generate') { progress = job.total; finished = true; }
-      else { progress++; finished = this.store.state(job.branchId).chapters.every(c => c.id === output.chapterId || c.status === 'ready'); }
+      else { progress++; finished = job.payload.targetChapterId === output.chapterId || this.store.state(job.branchId).chapters.every(c => c.id === output.chapterId || c.status === 'ready'); }
     }
     this.store.applyExtraction(job.branchId, job.baseRevisionId, output.chapterId, value, complete, this.outputCheckpoint(job, output, payload, progress, complete ? '本章资料已保存' : `已保存片段 ${output.blockIndex + 1}/${blocks.length}`, local, finished));
     if (complete) this.illustrateChapter(job, output.chapterId);
@@ -774,7 +791,7 @@ export class StoryEngine {
       let lastFailure: unknown;
       for (;;) {
         job = this.live(jobId); const provider = this.provider('extraction'); const state = this.store.state(job.branchId);
-        const context = extractionContext(state, blocks[blockIndex]);
+        const context = extractionContext(this.store.readingState(job.branchId, chapterId), blocks[blockIndex]);
         const retry = job.payload.extractionRetry as { chapterId?: string; blockIndex?: number; failedAttempts?: number } | undefined;
         const failedAttempts = retry?.chapterId === chapterId && retry.blockIndex === blockIndex ? Number(retry.failedAttempts ?? 0) : 0;
         const retryConfig = normalizeTaskSettings(this.getSettings().taskSettings).extraction;
@@ -896,7 +913,7 @@ export class StoryEngine {
       if (job.kind === 'extract') {
         job = this.live(jobId);
         if (typeof job.payload.pendingIllustrationChapterId === 'string') this.illustrateChapter(job, job.payload.pendingIllustrationChapterId);
-        job = this.live(jobId); const pending = this.store.state(job.branchId).chapters.filter(c => c.status !== 'ready');
+        job = this.live(jobId); const pending = this.store.state(job.branchId).chapters.filter(c => c.status !== 'ready' && (!job.payload.targetChapterId || c.id === job.payload.targetChapterId));
         for (const chapter of pending) { await this.extractChapter(jobId, chapter.id, controller.signal); job = this.live(jobId); job.progress++; this.save(job); }
       }
       if (job.kind === 'import') {
