@@ -23,7 +23,7 @@ export interface OriginalReferenceData { reference: StoryReference; state: Story
 export interface Project { id: string; title: string; premise: string; mode: Mode; createdAt: string; updatedAt: string; mainBranchId: string }
 export interface Branch { id: string; projectId: string; name: string; revisionId: string; parentBranchId?: string; forkChapterId?: string; createdAt: string }
 export interface Revision { id: string; branchId: string; parentId?: string; label: string; createdAt: string; chapterCount: number }
-export interface BranchView { branch: Branch; state: StoryState; revisions: Revision[] }
+export interface BranchView { branch: Branch; state: StoryState; revisions: Revision[]; /** Reader materials are scoped to this chapter; the chapter directory remains complete. */ readingChapterId?: string }
 export interface Source { id: string; projectId: string; filename: string; format: 'txt' | 'epub'; chapterCount: number; createdAt: string; confirmed: boolean }
 export interface SourcePreview { source: Source; chapters: { title: string; text: string }[] }
 export type ProviderProtocol = 'openai-chat' | 'openai-responses' | 'gemini' | 'claude';

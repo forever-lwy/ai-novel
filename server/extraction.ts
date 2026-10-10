@@ -54,6 +54,10 @@ export function splitExtractionBlocks(text: string, maxChars = 5500): Extraction
 }
 
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+/** An omitted entity flag must not turn explicitly public, already narrated facts into secrets. */
+export function inferredEntityVisibility(facts: unknown): Entity['visibility'] {
+  return Array.isArray(facts) && facts.some(fact => record(fact) && fact.visibility === 'public' && fact.temporal !== 'future') ? 'public' : 'secret';
+}
 const pathString = (path: readonly PropertyKey[]) => path.reduce<string>((text, part) => text + (typeof part === 'number' ? `[${part}]` : `${text ? '.' : ''}${String(part)}`), '') || '$';
 // Do not fold words, punctuation, width, case or apostrophes inside words. Only spacing and quotation typography are equivalent.
 function comparable(text: string) {
@@ -121,7 +125,7 @@ export function normalizeExtraction(input: unknown, block: ExtractionBlock): { v
     if (Array.isArray(candidate.entities)) candidate.entities.forEach((entity, index) => {
       if (!record(entity)) return; const path = `entities[${index}]`;
       omitUnknown(entity, ['nameStatus', 'isMain'], path);
-      addDefault(entity, 'aliases', [], path); addDefault(entity, 'description', '', path); addDefault(entity, 'visibility', 'secret', path); addDefault(entity, 'facts', [], path);
+      addDefault(entity, 'aliases', [], path); addDefault(entity, 'description', '', path); addDefault(entity, 'visibility', inferredEntityVisibility(entity.facts), path); addDefault(entity, 'facts', [], path);
       if (Array.isArray(entity.facts)) entity.facts.forEach((fact, factIndex) => { if (!record(fact)) return; const factPath = `${path}.facts[${factIndex}]`; addDefault(fact, 'temporal', 'unknown', factPath); addDefault(fact, 'certainty', 'inference', factPath); addDefault(fact, 'visibility', 'secret', factPath);
         omitUnknown(fact, ['attribute'], factPath);
         if (typeof fact.attribute === 'string') { const normalized = normalizeProfileAttribute(fact.attribute); if (normalized !== fact.attribute) { fact.attribute = normalized; adjustments.push({ path: `${factPath}.attribute`, message: `明确的资料属性名称已统一为 ${normalized}` }); } }

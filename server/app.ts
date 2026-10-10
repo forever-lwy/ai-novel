@@ -25,6 +25,7 @@ import { parseTaskSettings } from '../shared/task-settings.js';
 import type { PromptPreviewInput } from '../shared/prompt-runtime.js';
 
 const revision = z.string().min(1).max(100);
+const readingProgress = (query: unknown) => z.object({ chapterId: z.string().min(1).max(100).optional() }).parse(query).chapterId;
 const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']);
 const outlineSchema = z.object({ worldview: z.string().max(100000).optional(), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000) });
 const modelNameSchema = z.string().trim().max(300).refine(value => !/[\u0000-\u001f\u007f]/.test(value), '模型名称不能包含控制字符');
@@ -190,11 +191,11 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     }
     return { ok: true };
   });
-  app.get('/api/branches/:id', async request => store.view(param(request), author(request)));
+  app.get('/api/branches/:id', async request => store.view(param(request), author(request), readingProgress(request.query)));
   const imageInputSchema = z.object({ baseRevisionId: revision, kind: z.enum(['portrait', 'entity', 'map', 'cg']), entityId: z.string().min(1).max(100).optional(), chapterId: z.string().min(1).max(100).optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), instruction: z.string().max(20000).optional(), referenceImageId: z.string().min(1).max(100).optional() }).strict();
-  app.get('/api/branches/:id/images', async request => images.list(param(request), author(request)));
+  app.get('/api/branches/:id/images', async request => images.list(param(request), author(request), readingProgress(request.query)));
   app.post('/api/branches/:id/images', async request => { if (!author(request)) fail('请在作者视图中生成图片。', 403); return images.generate(param(request), imageInputSchema.parse(request.body)); });
-  app.get('/api/branches/:id/images/:imageId/content', async (request, reply) => { const content = images.content(param(request), param(request, 'imageId'), author(request)); return reply.type(content.mimeType).header('Content-Disposition', 'inline').send(Buffer.from(content.bytes)); });
+  app.get('/api/branches/:id/images/:imageId/content', async (request, reply) => { const content = images.content(param(request), param(request, 'imageId'), author(request), readingProgress(request.query)); return reply.type(content.mimeType).header('Content-Disposition', 'inline').send(Buffer.from(content.bytes)); });
   app.post('/api/branches/:id/images/:imageId/retry', async request => { if (!author(request)) fail('请在作者视图中重试生图。', 403); return images.retry(param(request), param(request, 'imageId'), base(request.body)); });
   app.post('/api/branches/:id/images/:imageId/cancel', async request => { if (!author(request)) fail('请在作者视图中取消生图。', 403); return images.cancel(param(request), param(request, 'imageId')); });
   app.put('/api/branches/:id/images/:imageId/active', async request => { if (!author(request)) fail('请在作者视图中选择启用图片。', 403); const input = z.object({ baseRevisionId: revision, active: z.boolean() }).strict().parse(request.body); return images.setActive(param(request), param(request, 'imageId'), input.baseRevisionId, input.active); });
@@ -213,7 +214,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.put('/api/branches/:id/entities/:entityId', async request => { const body = z.object({ baseRevisionId: revision, entity: entitySchema }).parse(request.body); if (body.entity.id !== param(request, 'entityId')) fail('资料标识不匹配。'); return store.updateEntity(param(request), body.baseRevisionId, body.entity as Entity); });
   app.post('/api/branches/:id/entities/merge', async request => { const b = z.object({ baseRevisionId: revision, fromId: z.string(), toId: z.string() }).parse(request.body); return store.mergeEntities(param(request), b.baseRevisionId, b.fromId, b.toId); });
   app.put('/api/branches/:id/foreshadows', async request => { const b = z.object({ baseRevisionId: revision, foreshadows: z.array(foreshadowSchema).max(10000) }).parse(request.body); return store.updateForeshadows(param(request), b.baseRevisionId, b.foreshadows as Foreshadow[]); });
-  app.get('/api/branches/:id/search', async request => { const { q } = z.object({ q: z.string().max(300).default('') }).parse(request.query); return store.search(param(request), q, author(request)); });
+  app.get('/api/branches/:id/search', async request => { const { q } = z.object({ q: z.string().max(300).default('') }).parse(request.query); return store.search(param(request), q, author(request), readingProgress(request.query)); });
   app.post('/api/projects/:id/import', async request => {
     const projectId = param(request); store.getProject(projectId);
     const file = await request.file(); if (!file) fail('请选择 TXT 或 EPUB 文件。');

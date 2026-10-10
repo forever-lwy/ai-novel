@@ -1,6 +1,12 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { defaultPromptTemplates } from '../shared/prompt-templates';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
+import { Store } from '../server/store';
+import { readingProgressStory, legacyReadingProgressStory } from './fixtures/reading-progress';
 
 // These tests exercise the real UI/server against a local HTTP model fixture.
 // Passing them is not evidence of real-provider acceptance.
@@ -2004,4 +2010,117 @@ test('规划开关和工具模式即时约束独立规划入口，已有规划�
     await plan.click(); await expect(page.getByRole('dialog')).toContainText('规划下一段故事');
     await expect(page.getByRole('button', { name: '开始规划', exact: true })).toBeEnabled();
   } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('阅读资料随章节累积，人物位置与物品状态同步，迟到响应不覆盖当前进度', async ({ page }, testInfo) => {
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-reading-browser-')));
+  let backup: Buffer;
+  try {
+    const { project } = readingProgressStory(store);
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: store.exportProject(project.id), sources: [] }));
+  } finally { store.close(); }
+  const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'reading.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(restored.ok(), await restored.text()).toBeTruthy();
+  const project = await restored.json(); const branchId = project.mainBranchId;
+  const branch = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+  const [firstId, secondId, thirdId] = branch.state.chapters.map((chapter: { id: string }) => chapter.id);
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+  await expect(page.locator('.manuscript h1')).toHaveText('第三章 灯塔');
+  const card = (name: string) => page.locator('.entity-card').filter({ has: page.getByRole('button', { name, exact: true }) });
+  const location = (name: string) => page.locator('.character-location').filter({ has: page.locator('span').filter({ hasText: new RegExp(`^${name}$`) }) });
+  async function selectChapter(title: string) {
+    await page.locator('.chapter-item').filter({ hasText: title }).click();
+    await expect(page.locator('.manuscript h1')).toHaveText(title);
+    await expect(page.locator('.context-note')).toHaveText(`截至《${title}》的资料`);
+  }
+  await selectChapter('第一章 河岸');
+  await expect(page.locator('.context-sidebar')).toContainText('林舟');
+  await expect(page.locator('.context-sidebar')).not.toContainText('阿岚');
+  await tab(page, '世界资料'); await expect(page.locator('.entity-card')).toHaveCount(3);
+  await expect(card('林舟').locator('.entity-description')).toContainText('目前位于河岸');
+  await expect(card('铜钥').locator('.entity-description')).toHaveText('铜钥完好');
+  await expect(card('阿岚')).toHaveCount(0); await expect(card('银灯')).toHaveCount(0);
+  await card('林舟').getByRole('button', { name: '林舟', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('目前位于河岸');
+  await expect(page.getByRole('dialog')).not.toContainText('灯塔客');
+  await page.getByRole('button', { name: '关闭对话框', exact: true }).click();
+  await tab(page, '地点关系'); await expect(location('林舟')).toContainText('目前位于河岸');
+  await expect(location('阿岚')).toHaveCount(0);
+  await tab(page, '故事图册'); await expect(page.locator('.story-image-card')).toHaveCount(1);
+  await expect(page.locator('.story-image-card')).toContainText('河岸立绘');
+  await selectChapter('第二章 山城'); await tab(page, '世界资料');
+  await expect(page.locator('.entity-card')).toHaveCount(6);
+  await expect(card('林舟').locator('.entity-description')).toContainText('目前位于山城');
+  await expect(card('林舟').locator('.entity-description')).not.toContainText('目前位于河岸');
+  await expect(card('铜钥').locator('.entity-description')).toHaveText('铜钥完好');
+  await expect(card('银灯').locator('.entity-description')).toHaveText('银灯点亮');
+  await tab(page, '地点关系'); await expect(location('林舟')).toContainText('目前位于山城');
+  await expect(location('阿岚')).toContainText('目前位于山城');
+  await page.screenshot({ path: testInfo.outputPath('chapter-reading-desktop.png'), fullPage: true, animations: 'disabled' });
+  await selectChapter('第三章 灯塔'); await tab(page, '世界资料');
+  await expect(card('林舟').locator('.entity-description')).toContainText('目前位于灯塔');
+  await expect(card('林舟').locator('.entity-description')).toContainText('当前受伤');
+  await expect(card('铜钥').locator('.entity-description')).toHaveText('铜钥断裂');
+  await expect(card('银灯').locator('.entity-description')).toHaveText('银灯熄灭');
+  await tab(page, '地点关系'); await expect(location('阿岚')).toContainText('目前位于山城');
+  await tab(page, '故事图册'); await expect(page.locator('.story-image-card')).toHaveCount(2);
+
+  // Hold an earlier response until a later chapter has already rendered.
+  let release!: () => void; let started!: () => void; let delivered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const held = new Promise<void>(resolve => { started = resolve; });
+  const done = new Promise<void>(resolve => { delivered = resolve; }); let delayed = false;
+  await page.route(url => url.pathname === `/api/branches/${branchId}` && url.searchParams.get('chapterId') === firstId, async route => {
+    if (delayed) { await route.continue(); return; }
+    delayed = true; const response = await route.fetch(); started(); await gate; await route.fulfill({ response }); delivered();
+  });
+  try {
+    await page.locator('.chapter-item').filter({ hasText: '第一章 河岸' }).click(); await held;
+    await selectChapter('第二章 山城'); await tab(page, '地点关系');
+    await expect(location('林舟')).toContainText('目前位于山城'); release(); await done;
+    await expect(location('林舟')).toContainText('目前位于山城');
+    await expect(location('阿岚')).toContainText('目前位于山城');
+  } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
+  await selectChapter('第一章 河岸');
+  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await tab(page, '世界资料'); await expect(card('阿岚')).toHaveCount(1);
+  await expect(card('林舟').locator('.entity-description')).toContainText('目前位于灯塔');
+  await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
+  await expect(page.locator('.entity-card')).toHaveCount(3);
+  await expect(card('林舟').locator('.entity-description')).toContainText('目前位于河岸');
+  await tab(page, '地点关系');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(location('林舟')).toContainText('目前位于河岸');
+  await location('林舟').scrollIntoViewIfNeeded(); await expect(location('林舟')).toBeInViewport();
+  await page.screenshot({ path: testInfo.outputPath('chapter-reading-mobile.png'), fullPage: true, animations: 'disabled' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect((await (await page.request.get(`/api/branches/${branchId}?chapterId=${secondId}`)).json()).readingChapterId).toBe(secondId);
+  expect((await (await page.request.get(`/api/branches/${branchId}?chapterId=${thirdId}`)).json()).readingChapterId).toBe(thirdId);
+});
+
+test('旧提取省略档案可见性时公开资料仍按章继承，原始快照与秘密不被改写', async ({ page }, testInfo) => {
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-legacy-browser-'))); let backup: Buffer;
+  try {
+    const { project } = legacyReadingProgressStory(store);
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: store.exportProject(project.id), sources: [] }));
+  } finally { store.close(); }
+  const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'legacy.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(restored.ok(), await restored.text()).toBeTruthy(); const project = await restored.json(); const branchId = project.mainBranchId;
+  const branch = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+  await expect(page.locator('.manuscript h1')).toHaveText('第五章');
+  const card = (name: string) => page.locator('.entity-card').filter({ has: page.getByRole('button', { name, exact: true }) });
+  for (const [index, count] of [3, 4, 6, 8, 9].entries()) {
+    const title = `第${['一', '二', '三', '四', '五'][index]}章`;
+    await page.locator('.chapter-item').filter({ hasText: title }).click(); await expect(page.locator('.manuscript h1')).toHaveText(title);
+    await tab(page, '世界资料'); await expect(page.locator('.entity-card')).toHaveCount(count);
+    await expect(card('铜钥')).toHaveCount(1); await expect(card('幕后客')).toHaveCount(0);
+    const response = await page.request.get(`/api/branches/${branchId}?chapterId=${branch.state.chapters[index].id}`);
+    expect(response.ok()).toBeTruthy(); expect(await response.text()).not.toMatch(/隐藏身份答案|未来登塔计划|真正的幕后身份/);
+  }
+  await tab(page, '地点关系');
+  await expect(page.locator('.character-location').filter({ hasText: '林舟' })).toContainText('目前位于山城');
+  await expect(page.locator('.character-location').filter({ hasText: '阿岚' })).toContainText('目前位于山城');
+  await expect(page.locator('.character-location').filter({ hasText: '林夏' })).toContainText('目前位于树林');
+  await page.screenshot({ path: testInfo.outputPath('legacy-reading-positions.png'), fullPage: true, animations: 'disabled' });
 });

@@ -23,6 +23,22 @@ describe('deterministic extraction normalization', () => {
     const result = normalize('林舟抵达灯塔。', input); expect(result.value?.entities[0].visibility).toBe('public'); expect(result.value?.entities[0].facts[0]).toMatchObject({ temporal: 'current', certainty: 'fact', visibility: 'public', attribute: 'location' });
   });
 
+  it('infers an omitted entity flag from explicit public narrated facts without revealing secret facts', () => {
+    const input = minimal({ text: '当前位于灯塔', paragraph: 1, temporal: 'current', certainty: 'fact', visibility: 'public', attribute: 'location' });
+    input.entities[0].facts.push({ text: '未公开的身份', paragraph: 1, temporal: 'current', certainty: 'fact', visibility: 'secret' });
+    const result = normalize('林舟抵达灯塔。', input);
+    expect(result.value?.entities[0]).toMatchObject({ visibility: 'public', facts: [{ visibility: 'public' }, { visibility: 'secret' }] });
+    expect(result.adjustments).toContainEqual({ path: 'entities[0].visibility', message: '省略字段已补为 "public"' });
+    expect(input.entities[0]).not.toHaveProperty('visibility');
+  });
+
+  it.each(['secret', 'future'] as const)('does not infer a public entity from %s-only material or override an explicit secret entity', boundary => {
+    const input = minimal({ text: '隐藏资料', paragraph: 1, temporal: boundary === 'future' ? 'future' : 'current', certainty: 'fact', visibility: boundary === 'future' ? 'public' : 'secret' });
+    expect(normalize('林舟抵达灯塔。', input).value?.entities[0].visibility).toBe('secret');
+    input.entities[0].visibility = 'secret'; input.entities[0].facts[0].visibility = 'public'; input.entities[0].facts[0].temporal = 'current';
+    expect(normalize('林舟抵达灯塔。', input).value?.entities[0].visibility).toBe('secret');
+  });
+
   it.each([{}, { error: 'remote failure' }, { summary: '没有实体字段' }, { entities: [] }, { summary: 123, entities: [] }, { summary: '', entities: 'none' }])('rejects missing or invalid substantive top-level structure: %j', input => {
     const result = normalize('林舟抵达灯塔。', input); expect(result.value).toBeUndefined(); expect(result.issues.length).toBeGreaterThan(0);
   });

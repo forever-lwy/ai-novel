@@ -40,25 +40,26 @@ export class ImageService {
     if (checkJobs && this.store.db.prepare("SELECT 1 FROM jobs WHERE branch_id=? AND status IN ('queued','running','paused') LIMIT 1").get(branchId)) throw new HttpError('请先完成或取消本故事线的文字任务，再操作图片', 409);
     return branch;
   }
-  private find(branchId: string, imageId: string, author: boolean): StoryImage {
+  private find(branchId: string, imageId: string, author: boolean, chapterId?: string): StoryImage {
     const branch = this.store.getBranch(branchId); const image = this.store.images.get(imageId);
-    const state = this.store.state(branchId);
+    const state = author ? this.store.state(branchId) : this.store.readingState(branchId, chapterId);
     if (!image || image.projectId !== branch.projectId || !this.store.images.visible(image, state, author)) throw new HttpError('此故事线不包含可查看的图片', 404);
     return image;
   }
-  private publicImage(image: StoryImage, branchId: string, author: boolean): StoryImage {
-    const url = image.status === 'completed' ? `/api/branches/${encodeURIComponent(branchId)}/images/${encodeURIComponent(image.id)}/content?view=${author ? 'author' : 'reader'}` : undefined;
-    const entityId = image.entityId ? imageEntity(this.store.state(branchId), image.entityId)?.id : undefined;
-    const referenceCharacters = image.referenceCharacters?.map(character => { const current = imageEntity(this.store.state(branchId), character.entityId); return { ...character, entityId: current?.id ?? character.entityId, name: current?.name ?? character.name }; });
-    const active = this.store.images.active(image, this.store.state(branchId));
+  private publicImage(image: StoryImage, branchId: string, author: boolean, state = this.store.state(branchId), chapterId?: string): StoryImage {
+    const progress = !author && chapterId ? `&chapterId=${encodeURIComponent(chapterId)}` : '';
+    const url = image.status === 'completed' ? `/api/branches/${encodeURIComponent(branchId)}/images/${encodeURIComponent(image.id)}/content?view=${author ? 'author' : 'reader'}${progress}` : undefined;
+    const entityId = image.entityId ? imageEntity(state, image.entityId)?.id : undefined;
+    const referenceCharacters = image.referenceCharacters?.map(character => { const current = imageEntity(state, character.entityId); return { ...character, entityId: current?.id ?? character.entityId, name: current?.name ?? character.name }; });
+    const active = this.store.images.active(image, state);
     return author ? { ...image, entityId, referenceCharacters, active, url } : { ...image, entityId, active, prompt: '', sourceText: undefined, selection: undefined, referenceImageId: undefined, error: undefined, material: undefined, instruction: undefined, materialEntityIds: undefined, referenceImageIds: undefined, referenceEntityIds: undefined, referenceCharacters: undefined, generationParameters: undefined, promptStatus: undefined, optimizedAt: undefined, url };
   }
-  list(branchId: string, author = false): StoryImage[] {
-    const branch = this.store.getBranch(branchId); const state = this.store.state(branchId);
-    return (state.imageIds ?? []).flatMap(imageId => { const image = this.store.images.get(imageId); return image && image.projectId === branch.projectId && this.store.images.visible(image, state, author) ? [this.publicImage(image, branchId, author)] : []; });
+  list(branchId: string, author = false, chapterId?: string): StoryImage[] {
+    const branch = this.store.getBranch(branchId); const state = author ? this.store.state(branchId) : this.store.readingState(branchId, chapterId);
+    return (state.imageIds ?? []).flatMap(imageId => { const image = this.store.images.get(imageId); return image && image.projectId === branch.projectId && this.store.images.visible(image, state, author) ? [this.publicImage(image, branchId, author, state, chapterId)] : []; });
   }
-  content(branchId: string, imageId: string, author = false): ImageContent {
-    const image = this.find(branchId, imageId, author); if (image.status !== 'completed') throw new HttpError('图片尚未生成完成', 409);
+  content(branchId: string, imageId: string, author = false, chapterId?: string): ImageContent {
+    const image = this.find(branchId, imageId, author, chapterId); if (image.status !== 'completed') throw new HttpError('图片尚未生成完成', 409);
     const content = this.store.images.content(imageId); if (!content) throw new HttpError('图片内容不存在', 404); return content;
   }
   setActive(branchId: string, imageId: string, baseRevisionId: string, active: boolean): { view: BranchView; images: StoryImage[] } {

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { modelOutputSchema, OutputStore } from './output-store.js';
 import { findEntitiesByName, reconcileExtractionEntities } from './entity-resolution.js';
 import { rebuildCharacterProfileDescription, normalizeProfileAttribute } from './extraction.js';
+import { repairLegacyExtractionVisibility } from './legacy-extraction-visibility.js';
 import { ImageStore, imageBackupSchema, imageEntity, imageReferences, validateImageContent } from './image-store.js';
 import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState, type WritingActivity, type ModelActivityEvent, type RpgSetup, type StoryReference, type OriginalReferenceData } from '../shared/types.js';
 
@@ -107,6 +108,8 @@ export function readBackupStates(entries: readonly { state?: unknown; snapshot?:
 }
 
 export class Store {
+  private legacyVisibilityCache = new Map<string, StoryState>();
+  private legacyVisibilityVersion = '';
   readonly db: DatabaseSync;
   readonly outputs: OutputStore;
   readonly images: ImageStore;
@@ -204,7 +207,30 @@ export class Store {
   listBranches(projectId: string): Branch[] { this.getProject(projectId); return this.db.prepare('SELECT data FROM branches WHERE project_id=? ORDER BY rowid').all(projectId).map(r => parse<Branch>(r.data)); }
   getBranch(branchId: string): Branch { const row = this.db.prepare('SELECT data FROM branches WHERE id=?').get(branchId); if (!row) throw new HttpError('故事线不存在', 404); return parse(row.data); }
   revision(revisionId: string): Revision { const row = this.db.prepare('SELECT data FROM revisions WHERE id=?').get(revisionId); if (!row) throw new HttpError('版本不存在', 404); return parse(row.data); }
-  revisionState(revisionId: string): StoryState { const row = this.db.prepare('SELECT state FROM revisions WHERE id=?').get(revisionId); if (!row) throw new HttpError('版本不存在', 404); return unpack(row.state); }
+  private rawRevisionState(revisionId: string): StoryState { const row = this.db.prepare('SELECT state FROM revisions WHERE id=?').get(revisionId); if (!row) throw new HttpError('版本不存在', 404); return unpack(row.state); }
+  revisionState(revisionId: string): StoryState {
+    const version = `${this.db.prepare('SELECT total_changes() AS changes').get()!.changes}:${this.db.prepare('PRAGMA data_version').get()!.data_version}`;
+    if (version !== this.legacyVisibilityVersion) { this.legacyVisibilityVersion = version; this.legacyVisibilityCache.clear(); }
+    const cached = this.legacyVisibilityCache.get(revisionId); if (cached) return clone(cached);
+    const state = this.rawRevisionState(revisionId);
+    const projectId = this.getBranch(this.revision(revisionId).branchId).projectId;
+    const outputs = this.db.prepare("SELECT data FROM model_outputs WHERE project_id=? AND stage='extraction' AND status='applied'").all(projectId).map(row => parse<import('../shared/types.js').ModelOutputRecord>(row.data));
+    if (!outputs.some(output => output.adjustments?.some(change => /^entities\[\d+\]\.visibility$/.test(change.path) && change.message === '省略字段已补为 "secret"'))) return state;
+    const lineage: Revision[] = []; const positions = new Map<string, number>(); let current: string | undefined = revisionId;
+    while (current && !positions.has(current)) { positions.set(current, lineage.length); const revision = this.revision(current); lineage.push(revision); current = revision.parentId; }
+    const included = outputs.filter(output => positions.has(output.baseRevisionId)).sort((a, b) => positions.get(b.baseRevisionId)! - positions.get(a.baseRevisionId)! || (a.blockIndex ?? 0) - (b.blockIndex ?? 0));
+    const authorSecrets = new Set<string>();
+    for (const revision of [...lineage].reverse()) if (revision.label === '人工修改资料与锁定状态') {
+      const after = this.rawRevisionState(revision.id); const before = revision.parentId ? this.rawRevisionState(revision.parentId) : emptyState();
+      for (const entity of after.entities) if (JSON.stringify(entity) !== JSON.stringify(before.entities.find(previous => previous.id === entity.id))) {
+        if (entity.visibility === 'secret') authorSecrets.add(entity.id); else authorSecrets.delete(entity.id);
+      }
+    }
+    repairLegacyExtractionVisibility(state, included, authorSecrets);
+    if (this.legacyVisibilityCache.size >= 8) this.legacyVisibilityCache.delete(this.legacyVisibilityCache.keys().next().value!);
+    this.legacyVisibilityCache.set(revisionId, clone(state));
+    return state;
+  }
   state(branchId: string): StoryState { return this.revisionState(this.getBranch(branchId).revisionId); }
   assertVersion(branchId: string, base: string): Branch { const branch = this.getBranch(branchId); if (!base || branch.revisionId !== base) throw new HttpError('故事线已有新版本，请刷新后重试；当前草稿不会被覆盖', 409); return branch; }
   private insertRevision(branch: Branch, state: StoryState, label: string, parentId?: string): Revision {
@@ -226,19 +252,38 @@ export class Store {
     while (current && !visited.has(current)) { visited.add(current); const revision = this.revision(current); output.push(revision); current = revision.parentId; }
     return output;
   }
-  view(branchId: string, author = false): BranchView {
-    const branch = this.getBranch(branchId); const state = this.state(branchId);
+  /** Keep the historical state, including old names, merges and current attributes, intact. */
+  readingState(branchId: string, chapterId?: string): StoryState {
+    const current = this.state(branchId);
+    if (!chapterId) return current;
+    const index = current.chapters.findIndex(chapter => chapter.id === chapterId);
+    if (index < 0) throw new HttpError('阅读进度章节不属于当前故事线', 404);
+    if (index === current.chapters.length - 1) return current;
+    return this.atBoundary(branchId, index + 1, '显示阅读资料');
+  }
+  view(branchId: string, author = false, chapterId?: string): BranchView {
+    const branch = this.getBranch(branchId); const state = author ? this.state(branchId) : this.readingState(branchId, chapterId);
+    const readingChapterId = author ? undefined : state.chapters.at(-1)?.id;
     if (!author) {
       delete state.rpg;
       delete state.sourceReference;
       const visibleImageIds = (state.imageIds ?? []).filter(imageId => { const image = this.images.get(imageId); return image && this.images.visible(image, state, false); });
-      state.outline = emptyState().outline; state.foreshadows = []; state.chapters = state.chapters.map(c => ({ ...c, summary: '' }));
-      state.entities = state.entities.filter(e => e.visibility === 'public' && !e.mergedInto && (e.locked || e.facts.some(f => f.visibility === 'public' && f.temporal !== 'future'))).map(e => { const facts = e.facts.filter(f => f.visibility === 'public' && f.temporal !== 'future'); return { ...e, description: e.facts.length ? facts.map(f => f.text).join('；') : e.locked ? e.description : '', facts }; });
-      const visible = new Set(state.entities.map(e => e.id)); state.relations = state.relations.filter(r => r.visibility === 'public' && visible.has(r.fromId) && visible.has(r.toId));
+      const included = new Set(state.chapters.map(chapter => chapter.id));
+      const publicFact = (fact: Entity['facts'][number]) => fact.visibility === 'public' && fact.temporal !== 'future' && (!fact.citation || included.has(fact.citation.chapterId));
+      state.outline = emptyState().outline; state.foreshadows = [];
+      state.entities = state.entities.filter(e => e.visibility === 'public' && !e.mergedInto && (e.locked || e.facts.some(publicFact))).map(e => {
+        const facts = e.facts.filter(publicFact).sort((a, b) => Number(b.temporal === 'current') - Number(a.temporal === 'current'));
+        const profile = facts.filter(fact => fact.temporal !== 'past' || fact.attribute && normalizeProfileAttribute(fact.attribute) === 'major_event');
+        const description = e.facts.length ? rebuildCharacterProfileDescription({ ...e, locked: false, facts, description: (profile.length ? profile : facts).map(fact => fact.text).join('；') }) : e.locked ? e.description : '';
+        return { ...e, description, facts };
+      });
+      const visible = new Set(state.entities.map(e => e.id)); state.relations = state.relations.filter(r => r.visibility === 'public' && visible.has(r.fromId) && visible.has(r.toId) && (!r.citation || included.has(r.citation.chapterId)));
+      // Navigation still includes later prose, but its materials never enter this reader snapshot.
+      state.chapters = this.state(branchId).chapters.map(c => ({ ...c, summary: '' }));
       state.imageIds = visibleImageIds;
       state.activeImageIds = visibleImageIds;
     }
-    return { branch, state, revisions: author ? this.history(branchId) : [] };
+    return { branch, state, revisions: author ? this.history(branchId) : [], ...(!author && readingChapterId ? { readingChapterId } : {}) };
   }
   commit(branchId: string, baseRevisionId: string, state: StoryState, label: string, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
     this.db.exec('BEGIN IMMEDIATE');
@@ -261,14 +306,14 @@ export class Store {
     return { ...ref, summary: '', text: String(row.text) };
   }
   /** Revisions are chapter-boundary snapshots; never reconstruct earlier canon from the latest world. */
-  private atBoundary(branchId: string, count: number): StoryState {
-    const current = this.state(branchId); const target = current.chapters[count - 1]?.id;
+  private atBoundary(branchId: string, count: number, purpose = '创建分支'): StoryState {
+    const current = this.state(branchId);
     for (const revision of this.history(branchId)) {
       if (revision.chapterCount !== count) continue;
       const state = this.revisionState(revision.id);
-      if (!count || state.chapters[count - 1]?.id === target) return state;
+      if (state.chapters.length === count && state.chapters.every((chapter, index) => chapter.id === current.chapters[index]?.id)) return state;
     }
-    throw new HttpError('未找到该章节的历史状态，不能安全创建分支', 409);
+    throw new HttpError(`未找到该章节的历史状态，不能安全${purpose}`, 409);
   }
   writingState(branchId: string, chapterId?: string): StoryState {
     if (!chapterId) return this.state(branchId);
@@ -469,8 +514,8 @@ export class Store {
     if (foreshadows.some(f => (f.plantedChapterId && !included.has(f.plantedChapterId)) || (f.resolvedChapterId && !included.has(f.resolvedChapterId)))) throw new HttpError('伏笔埋设和揭晓位置必须属于本故事线');
     state.foreshadows = clone(foreshadows).map(f => ({ ...f, id: f.id || id() })); return this.commit(branchId, base, state, '修改伏笔');
   }
-  search(branchId: string, query: string, author = false): { chapters: { id: string; title: string; snippet: string }[]; entities: Entity[] } {
-    const q = query.trim().slice(0, 200); if (!q) return { chapters: [], entities: [] }; const state = this.view(branchId, author).state;
+  search(branchId: string, query: string, author = false, chapterId?: string): { chapters: { id: string; title: string; snippet: string }[]; entities: Entity[] } {
+    const q = query.trim().slice(0, 200); if (!q) return { chapters: [], entities: [] }; const state = this.view(branchId, author, chapterId).state;
     if (q.includes('\0')) throw new HttpError('搜索关键词不能包含空字符');
     const allowed = JSON.stringify(state.chapters.map(c => c.id));
     // Trigram accelerates Chinese search; short words use exact substring matching.
