@@ -79,17 +79,17 @@ describe('versioned story and world state', () => {
     expect(() => store.chapter(fork.branch.id, store.state(branchId).chapters[79].id)).toThrow('不包含');
   });
 
-  it('creates a separate revision branch for historical edits and preserves immutable original text', () => {
+  it('edits historical prose on the current branch while preserving later chapters and original snapshots', () => {
     const store = makeStore(); const p = store.createProject({ title: '修订' });
     const first = append(store, p.mainBranchId, '第一章旧文'); append(store, p.mainBranchId, '第二章原文');
     const original = store.view(p.mainBranchId, true);
     const revised = store.saveChapter(p.mainBranchId, { baseRevisionId: original.branch.revisionId, chapterId: first.state.chapters[0].id, title: '第一章新文', text: '第一章新文' });
-    expect(revised.branch.id).not.toBe(p.mainBranchId); expect(revised.state.chapters).toHaveLength(1); expect(revised.state.chapters[0].status).toBe('pending');
-    expect(store.exportText(p.mainBranchId)).toContain('第一章旧文'); expect(store.exportText(p.mainBranchId)).toContain('第二章原文');
-    expect(store.getBranch(p.mainBranchId).revisionId).toBe(original.branch.revisionId);
+    expect(revised.branch.id).toBe(p.mainBranchId); expect(revised.state.chapters).toHaveLength(2); expect(revised.state.chapters[0].status).toBe('ready');
+    expect(store.exportText(p.mainBranchId)).toContain('第一章新文'); expect(store.exportText(p.mainBranchId)).toContain('第二章原文');
+    expect(store.revisionState(original.branch.revisionId)).toEqual(original.state); expect(store.listBranches(p.id)).toHaveLength(1);
   });
 
-  it('replaces the latest chapter and removes AI discoveries while retaining deliberate human constraints', () => {
+  it('edits the latest chapter while preserving extracted material and deliberate human constraints', () => {
     const store = makeStore(); const p = store.createProject({ title: '人类约束', premise: '禁用穿越' });
     const result = emptyExtraction(); result.entities.push(person('临时人物', '本章才出现', '临时人物')); let view = append(store, p.mainBranchId, '临时人物出现。', result);
     const chapterId = view.state.chapters[0].id;
@@ -98,7 +98,8 @@ describe('versioned story and world state', () => {
     view = store.updateEntity(p.mainBranchId, view.branch.revisionId, manual);
     const revised = store.saveChapter(p.mainBranchId, { baseRevisionId: view.branch.revisionId, chapterId, title: '重写第一章', text: '主角走过田野。' });
     expect(revised.branch.id).toBe(p.mainBranchId); expect(revised.state.outline.locked).toBe('必须保持单一视角');
-    expect(revised.state.entities.map(e => e.name)).toEqual(['主角']); expect(revised.state.entities[0].facts[0].text).toBe('主角不会魔法');
+    expect(revised.state.entities.map(e => e.name)).toEqual(['临时人物', '主角']); expect(revised.state.entities[1].facts[0].text).toBe('主角不会魔法');
+    expect(revised.state.entities[0].facts[0].citation).toBeUndefined(); expect(revised.state.chapters[0].status).toBe('ready');
   });
 
   it('restores chapters, world, outline and hidden foreshadowing in one revision and rejects stale writes', () => {

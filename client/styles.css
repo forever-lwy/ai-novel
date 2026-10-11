@@ -488,4 +488,48 @@
 .chapter-actions-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 210px; padding: 6px; background: var(--surface, #fff); border: 1px solid var(--border, #e2e7df); border-radius: 10px; box-shadow: 0 8px 24px #203c241c; }
 .chapter-actions-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; border-radius: 6px; background: transparent; text-align: left; }
 .chapter-actions-menu button:hover { background: #eef3ed; }
+.chapter-end-actions { display: flex; justify-content: center; margin-top: 24px; }
+.branch-selector > .row.wrap { gap: 10px 15px; }
+
+.branch-selector > .row.between { margin: 0 0 10px; gap: 8px; }
+.branch-current-name { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 12px; color: #36583f; font-size: 12px; }
+.branch-current-name svg { flex: none; margin-top: 2px; }
+.branch-current-name strong { min-width: 0; overflow-wrap: anywhere; line-height: 1.6; }
+.branch-tree { width: 100%; min-width: 0; }
+.branch-tree ul { list-style: none; padding: 0; margin: 0; }
+.branch-tree .branch-tree-children { margin: 0 0 0 22px; padding: 10px 0 0 16px; border-left: 2px solid #c5d5be; }
+.branch-tree-item { position: relative; padding-bottom: 10px; }
+.branch-tree-item:last-child { padding-bottom: 0; }
+.branch-tree-children > .branch-tree-item:before { content: ''; position: absolute; left: -17px; top: 24px; width: 16px; border-top: 2px solid #c5d5be; }
+.branch-tree-node { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 14px; border: 1px solid #d9e2d3; border-radius: 8px; background: #fbfcf7; color: #45613e; text-align: left; }
+.branch-tree-node > svg { flex: none; margin-top: 2px; }
+.branch-tree-node:hover:not(:disabled) { border-color: #88a87d; background: #f1f6eb; }
+.branch-tree-node:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.branch-tree-node.selected { border-color: #6b9062; background: #e8f0df; box-shadow: inset 3px 0 #5e8155; }
+.branch-tree-copy { flex: 1; min-width: 0; display: grid; gap: 6px; overflow-wrap: anywhere; }
+.branch-tree-copy strong { font-size: 14px; font-weight: 600; line-height: 1.5; }
+.branch-tree-copy small { font-size: 11px; color: #7c8c72; line-height: 1.6; }
+.branch-tree-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; max-width: 88px; flex: none; }
+.branch-tree-badges > span { border-radius: 4px; padding: 3px 6px; background: #e9eedf; color: #6d805d; font-size: 10px; white-space: nowrap; }
+.branch-tree-badges .branch-tree-current { background: #456a3c; color: #fff; }
+.branch-tree-node.is-deleted { opacity: .65; background: #f1f1ea; border-style: dashed; }
+.branch-tree-compact { max-height: 250px; overflow-y: auto; padding: 2px; }
+.branch-tree-compact .branch-tree-children { margin-left: 7px; padding-left: 10px; padding-top: 7px; }
+.branch-tree-compact .branch-tree-children > .branch-tree-item:before { left: -11px; width: 10px; top: 18px; }
+.branch-tree-compact .branch-tree-item { padding-bottom: 7px; }
+.branch-tree-compact .branch-tree-node { padding: 8px 7px; gap: 6px; border-radius: 6px; flex-wrap: wrap; }
+.branch-tree-compact .branch-tree-copy { flex-basis: calc(100% - 20px); gap: 3px; }
+.branch-tree-compact .branch-tree-copy strong { font-size: 11px; }
+.branch-tree-compact .branch-tree-copy small { font-size: 9px; }
+.branch-tree-compact .branch-tree-badges { max-width: none; margin-left: 19px; }
+.branch-tree-compact .branch-tree-badges > span { font-size: 8px; padding: 2px 4px; }
+@media(max-width:760px) {
+  .workspace-header .header-actions > .text-button.branch-tree-toggle { display: inline-flex; width: 26px; justify-content: center; }
+  .branch-tree .branch-tree-children { margin-left: 8px; padding-left: 12px; }
+  .branch-tree-children > .branch-tree-item:before { left: -13px; width: 12px; }
+  .branch-tree-node { padding: 11px; gap: 7px; flex-wrap: wrap; }
+  .branch-tree-copy { flex-basis: calc(100% - 24px); }
+  .branch-tree-badges { max-width: none; margin-left: 23px; }
+  .branch-tree-copy strong { font-size: 13px; }
+}
 @media(max-width:600px) { .chapter-actions-menu { left: 0; right: auto; max-width: calc(100vw - 32px); } }

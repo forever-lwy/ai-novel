@@ -162,7 +162,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   const sourceList = (projectId: string) => (store.db.prepare('SELECT * FROM sources WHERE project_id=? ORDER BY created_at').all(projectId) as SourceRow[]).map(sourcePublic);
   app.get('/api/projects', async request => store.listProjects().map(project => author(request) ? project : { ...project, premise: '' }));
   app.post('/api/projects', async request => store.createProject(z.object({ title: z.string().trim().min(1).max(200), premise: z.string().max(100000).default(''), mode: mode.default('original') }).parse(request.body)));
-  app.get('/api/projects/:id', async request => { const project = store.getProject(param(request)); return { project: author(request) ? project : { ...project, premise: '' }, branches: store.listBranches(param(request)), sources: sourceList(param(request)) }; });
+  app.get('/api/projects/:id', async request => { const project = store.getProject(param(request)); return { project: author(request) ? project : { ...project, premise: '' }, branches: store.listBranches(param(request)), branchTree: store.listBranchTree(param(request)), sources: sourceList(param(request)) }; });
   app.delete('/api/projects/:id', async request => {
     const projectId = param(request); let stagedDirectory: string | undefined;
     try {
@@ -192,6 +192,14 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     return { ok: true };
   });
   app.get('/api/branches/:id', async request => store.view(param(request), author(request), readingProgress(request.query)));
+  app.put('/api/branches/:id/name', async request => {
+    requireAuthor(request); const input = z.object({ baseRevisionId: revision, name: z.string().trim().min(1).max(200) }).strict().parse(request.body);
+    return store.renameBranch(param(request), input.baseRevisionId, input.name);
+  });
+  app.delete('/api/branches/:id', async request => {
+    requireAuthor(request); const branchId = param(request); engine.assertIdle(branchId);
+    return store.deleteBranch(branchId, base(request.body));
+  });
   const imageInputSchema = z.object({ baseRevisionId: revision, kind: z.enum(['portrait', 'entity', 'map', 'cg']), entityId: z.string().min(1).max(100).optional(), chapterId: z.string().min(1).max(100).optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), instruction: z.string().max(20000).optional(), referenceImageId: z.string().min(1).max(100).optional() }).strict();
   app.get('/api/branches/:id/images', async request => images.list(param(request), author(request), readingProgress(request.query)));
   app.post('/api/branches/:id/images', async request => { if (!author(request)) fail('请在作者视图中生成图片。', 403); return images.generate(param(request), imageInputSchema.parse(request.body)); });
@@ -214,9 +222,10 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   });
   app.post('/api/branches/:id/chapters', async request => {
     const input = z.object({ baseRevisionId: revision, title: z.string().trim().min(1).max(500), text: z.string().max(2000000), chapterId: z.string().optional() }).parse(request.body);
+    if (input.chapterId) { requireAuthor(request); engine.assertIdle(param(request)); }
     const view = store.saveChapter(param(request), input);
     // Saving prose must succeed even when a provider has not been configured.
-    try { engine.enqueue(view.branch.id, 'extract', { baseRevisionId: view.branch.revisionId }); } catch { /* Explicit retry is available in the workbench. */ }
+    if (!input.chapterId) try { engine.enqueue(view.branch.id, 'extract', { baseRevisionId: view.branch.revisionId }); } catch { /* Explicit retry is available in the workbench. */ }
     return view;
   });
   app.post('/api/branches/:id/fork', async request => store.fork(param(request), z.object({ baseRevisionId: revision, chapterId: z.string().optional(), name: z.string().trim().min(1).max(200) }).parse(request.body)));
@@ -258,7 +267,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     });
     return job;
   });
-  app.post('/api/branches/:id/generate', async request => { const b = z.object({ baseRevisionId: revision, mode, instruction: z.string().max(30000), title: z.string().max(500).optional(), chapterId: z.string().optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), maxWords: z.number().int().min(100).max(20000).optional(), regenerate: z.boolean().optional(), discardBackground: z.boolean().optional(), rpg: rpgSetupSchema.optional() }).parse(request.body); if (b.mode === 'rpg' || b.rpg) requireAuthor(request); return engine.enqueue(param(request), 'generate', b); });
+  app.post('/api/branches/:id/generate', async request => { const b = z.object({ baseRevisionId: revision, mode, instruction: z.string().max(30000), title: z.string().max(500).optional(), branchName: z.string().trim().min(1).max(200).optional(), chapterId: z.string().optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), maxWords: z.number().int().min(100).max(20000).optional(), regenerate: z.boolean().optional(), discardBackground: z.boolean().optional(), rpg: rpgSetupSchema.optional() }).parse(request.body); if (b.mode === 'rpg' || b.rpg) requireAuthor(request); return engine.enqueue(param(request), 'generate', b); });
   app.post('/api/branches/:id/extract', async request => engine.enqueue(param(request), 'extract', { baseRevisionId: base(request.body) }));
   const jobView = (job: Job, asAuthor: boolean): Job => ({ ...job, chapterStartChoiceId: asAuthor ? job.chapterStartChoiceId : undefined, pendingChoice: asAuthor ? job.pendingChoice : undefined, title: asAuthor ? job.title : undefined, generationInput: asAuthor ? job.generationInput : undefined, payload: {}, message: asAuthor ? job.message : ({ queued: '任务等待中', running: '任务进行中', paused: '任务已暂停', failed: '任务未完成', completed: '任务已完成', cancelled: '任务已取消', stale: '起始版本已变化' })[job.status], error: asAuthor ? job.error : job.error ? '请进入作者视图查看具体原因。' : undefined });
   app.get('/api/jobs', async request => { const { projectId } = z.object({ projectId: z.string().optional() }).parse(request.query); return engine.listJobs(projectId).map(job => jobView(job, author(request))); });

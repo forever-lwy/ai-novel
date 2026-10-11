@@ -1,3 +1,4 @@
+import { chooseBranch, currentBranchId } from './branch-browser-helpers';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { defaultPromptTemplates } from '../shared/prompt-templates';
@@ -7,6 +8,7 @@ import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { Store } from '../server/store';
 import { readingProgressStory, legacyReadingProgressStory } from './fixtures/reading-progress';
+import type { Entity } from '../shared/types';
 
 // These tests exercise the real UI/server against a local HTTP model fixture.
 // Passing them is not evidence of real-provider acceptance.
@@ -209,7 +211,7 @@ test('从工作台打开独立设置并返回，保留作者视图、当前章�
   await page.getByRole('button', { name: '保存正文', exact: true }).click();
   await completedJobs(page, 1);
   await tab(page, '正文');
-  const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+  const branchId = await currentBranchId(page);
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   const draft = '林舟来到白石城。\n\nSETTINGS_RETURN_DRAFT：返回设置后仍保留的正文。';
   await page.getByLabel('章节标题', { exact: true }).fill('第一章 尚未保存的标题');
@@ -224,7 +226,7 @@ test('从工作台打开独立设置并返回，保留作者视图、当前章�
   await expect(settings).toHaveCount(0);
   await expect(page.locator('.workspace-project-title')).toContainText('E2E 设置返回保留工作台');
   await expect(page.getByRole('button', { name: '返回阅读视图', exact: true })).toBeVisible();
-  await expect(page.getByLabel('当前故事线', { exact: true })).toHaveValue(branchId);
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', branchId);
   await expect(page.locator('.chapter-list .chapter-item.selected')).toContainText('第一章 设置前的章节');
   await expect(page.getByLabel('章节标题', { exact: true })).toHaveValue('第一章 尚未保存的标题');
   await expect(page.getByLabel('章节正文', { exact: true })).toHaveValue(draft);
@@ -268,7 +270,7 @@ test('原创生成保存正文和资料，伏笔编辑保留，阅读接口不�
   await page.getByRole('button', { name: '查看已揭晓与已放弃', exact: true }).click();
   await expect(page.getByRole('textbox', { name: '隐藏的真相', exact: true })).toHaveValue(/SECRET_E2E_FORESHADOW/);
   await expect(page.getByLabel('伏笔状态', { exact: true })).toHaveValue('resolved');
-  const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+  const branchId = await currentBranchId(page);
   await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
   await expect(page.locator('.workspace-tabs').getByRole('button', { name: '剧情与伏笔' })).toHaveCount(0);
   const reader = await page.request.get(`/api/branches/${branchId}`);
@@ -288,7 +290,7 @@ test('新章实时显示正文，阅读视图隐藏流，重新生成可放弃�
   } })).ok()).toBeTruthy();
   try {
     await createProject(page, 'E2E 流式重新生成');
-    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const branchId = await currentBranchId(page);
     await page.getByRole('button', { name: '开始创作', exact: true }).click();
     const modal = page.getByRole('dialog');
     await modal.getByLabel('章节标题（可选）', { exact: true }).fill('第一章 流式正文');
@@ -313,26 +315,28 @@ test('新章实时显示正文，阅读视图隐藏流，重新生成可放弃�
     await expect(modal).toContainText('资料还在后台整理');
     await modal.getByRole('button', { name: '等待后台整理', exact: true }).click();
     await expect(modal).toHaveCount(0);
-    expect(await page.getByLabel('当前故事线', { exact: true }).inputValue()).toBe(branchId);
+    expect(await currentBranchId(page)).toBe(branchId);
     await page.getByRole('button', { name: '重新生成', exact: true }).click();
     await modal.getByRole('button', { name: '放弃后台任务并重新生成', exact: true }).click();
     await expect(modal).toContainText('自动建立分支');
     await expect(modal.getByLabel('这一次，你想写什么？', { exact: true })).toHaveValue('林舟发现古城的钥匙。');
     await modal.getByLabel('这一次，你想写什么？', { exact: true }).fill('REGEN_BRANCH_ONLY：换一个线索展开这一章。');
+    await modal.getByLabel('新故事线名称', { exact: true }).fill('作者命名的重新生成路线');
     const submitted = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === `/api/branches/${branchId}/generate`);
     await modal.getByRole('button', { name: '开始生成', exact: true }).click();
-    expect((await submitted).postDataJSON()).toMatchObject({ regenerate: true, discardBackground: true, chapterId: before.state.chapters[0].id, instruction: 'REGEN_BRANCH_ONLY：换一个线索展开这一章。' });
-    await expect(page.getByLabel('当前故事线', { exact: true })).not.toHaveValue(branchId);
+    expect((await submitted).postDataJSON()).toMatchObject({ regenerate: true, discardBackground: true, chapterId: before.state.chapters[0].id, branchName: '作者命名的重新生成路线', instruction: 'REGEN_BRANCH_ONLY：换一个线索展开这一章。' });
+    await expect(page.locator('.workspace')).not.toHaveAttribute('data-branch-id', branchId);
     await expect(page.locator('.streaming-prose')).toContainText('林舟来到白石城');
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBeTruthy();
     await page.screenshot({ path: testInfo.outputPath('streaming-regeneration-mobile.png'), fullPage: true, animations: 'disabled' });
-    const newBranchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const newBranchId = await currentBranchId(page);
+    expect((await (await page.request.get(`/api/branches/${newBranchId}?view=author`)).json()).branch.name).toBe('作者命名的重新生成路线');
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.getByLabel('当前故事线', { exact: true }).selectOption(branchId);
+    await chooseBranch(page, branchId);
     await expect(page.locator('.streaming-manuscript')).toHaveCount(0);
     await expect(page.locator('.prose')).not.toContainText('REGEN_BRANCH_ONLY');
-    await page.getByLabel('当前故事线', { exact: true }).selectOption(newBranchId);
+    await chooseBranch(page, newBranchId);
     await expect(page.locator('.prose')).toContainText('REGEN_BRANCH_ONLY');
     await expect(page.locator('.streaming-manuscript')).toHaveCount(0);
     await expect.poll(async () => (await (await page.request.get(`/api/branches/${newBranchId}?view=author`)).json()).state.chapters[0]?.status).toBe('ready');
@@ -355,7 +359,7 @@ test('作者实时查看公开思考与工具过程，默认折叠且正文独�
   } })).ok()).toBeTruthy();
   try {
     await createProject(page, 'E2E 作者生成过程');
-    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const branchId = await currentBranchId(page);
     const base = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
     const forked = await page.request.post(`/api/branches/${branchId}/fork`, { data: { baseRevisionId: base.branch.revisionId, name: '没有生成过程的分支' } }); expect(forked.ok()).toBeTruthy(); const emptyBranch = await forked.json();
     await page.getByRole('button', { name: '开始创作', exact: true }).click();
@@ -414,10 +418,10 @@ test('作者实时查看公开思考与工具过程，默认折叠且正文独�
     await page.route(route, async intercepted => { const response = await intercepted.fetch(); reached(); await gate; await intercepted.fulfill({ response }); });
     try {
       await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await entered;
-      await page.getByLabel('当前故事线', { exact: true }).selectOption(emptyBranch.branch.id); await expect(process).toHaveCount(0);
+      await chooseBranch(page, emptyBranch.branch.id); await expect(process).toHaveCount(0);
       release(); await expect(page.locator('main')).not.toContainText('AUTHOR_PUBLIC_THINK'); await expect(process).toHaveCount(0);
     } finally { release(); await page.unroute(route); }
-    await page.getByLabel('当前故事线', { exact: true }).selectOption(branchId); await expect(process.locator('.writing-activity')).toHaveCount(persisted.length);
+    await chooseBranch(page, branchId); await expect(process.locator('.writing-activity')).toHaveCount(persisted.length);
     await page.getByRole('button', { name: '新建章节', exact: true }).click(); await expect(process).toHaveCount(0);
     await page.locator('.chapter-list').getByRole('button', { name: /第一章 过程独立/ }).click(); await expect(process.locator('.writing-activity')).toHaveCount(persisted.length);
     await tab(page, '任务'); await page.locator('.job-card').filter({ has: page.getByRole('button', { name: '打开生成章节', exact: true }) }).getByRole('button', { name: '打开生成章节', exact: true }).click();
@@ -456,7 +460,7 @@ test('正文生成界面直接重试、只重连断流、暂停继续及停止�
       taskSettings: { extraction: { autoRetry: false, maxRetries: 2, retryDelayMs: 5000 }, planning: { enabled: false, mode: 'separate' } },
     } })).ok()).toBeTruthy();
     await createProject(page, 'E2E 正文内生成控制');
-    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const branchId = await currentBranchId(page);
     const submitted = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/branches/${branchId}/generate`);
     await page.getByRole('button', { name: '开始创作', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: '开始生成', exact: true }).click();
@@ -522,7 +526,7 @@ test('摘要压缩保留各章原摘要，候选取消不生效，作者确认�
   } })).ok()).toBeTruthy();
   try {
     await createProject(page, 'E2E 摘要确认'); await importNovel(page);
-    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const branchId = await currentBranchId(page);
     const initial = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
     await tab(page, '剧情与伏笔');
     await page.getByRole('button', { name: '生成压缩摘要候选', exact: true }).click();
@@ -574,7 +578,7 @@ test('摘要压缩保留各章原摘要，候选取消不生效，作者确认�
   } finally { await page.request.put('/api/settings', { data: originalSettings }); }
 });
 
-test('手动编辑正文后自动整理资料，并保留用户对人物的修正', async ({ page }, testInfo) => {
+test('手动编辑正文在当前线保存，不自动提取资料，并保留用户对人物的修正', async ({ page }, testInfo) => {
   await createProject(page, 'E2E 手动创作');
   await page.getByRole('button', { name: '手动写第一章', exact: true }).click();
   await page.getByLabel('章节标题', { exact: true }).fill('第一章 手写');
@@ -582,10 +586,18 @@ test('手动编辑正文后自动整理资料，并保留用户对人物的修�
   await page.getByRole('button', { name: '保存正文', exact: true }).click();
   await completedJobs(page, 1);
   await tab(page, '正文');
+  const branchId = await currentBranchId(page);
+  const before = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.getByLabel('章节正文', { exact: true }).fill('林舟来到白石城，看见城门上刻着一行字。\n\n林舟决定留在白石城调查这行字的来历。');
   await page.getByRole('button', { name: '保存正文', exact: true }).click();
-  await completedJobs(page, 2);
+  await expect(page.locator('.manuscript .prose')).toContainText('林舟决定留在白石城调查');
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', branchId);
+  await expect(page.getByRole('status')).toContainText('需要更新时请手动重新提取');
+  await completedJobs(page, 1);
+  const after = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+  expect(after.state.chapters[0].summary).toBe(before.state.chapters[0].summary);
+  expect(after.state.entities.map((entity: Entity) => entity.name)).toEqual(before.state.entities.map((entity: Entity) => entity.name));
   await tab(page, '世界资料');
   await expect(page.locator('.entity-card').filter({ has: page.getByRole('heading', { name: '林舟', exact: true }) })).toBeVisible();
   await page.getByRole('button', { name: '编辑 林舟', exact: true }).click();
@@ -637,7 +649,7 @@ test('从指定章节建立分支，历史回退同时撤回新资料且主线�
   await modal.getByLabel('新故事线名称', { exact: true }).fill('测试修订线');
   await modal.getByRole('combobox', { name: '从哪一章的结尾出发', exact: true }).selectOption({ label: '第一章 起点（确认目录）' });
   await modal.getByRole('button', { name: '建立故事线', exact: true }).click();
-  await expect(page.getByLabel('当前故事线', { exact: true })).toHaveValue(/.+/);
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', /.+/);
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(1);
   await tab(page, '剧情与伏笔');
   await expect(page.locator('.plot-summary-list .plot-summary-card')).toHaveCount(1);
@@ -655,10 +667,61 @@ test('从指定章节建立分支，历史回退同时撤回新资料且主线�
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await tab(page, '世界资料');
   await expect(page.getByRole('heading', { name: '仅存在于修订线的角色', exact: true })).toHaveCount(0);
-  await page.getByLabel('当前故事线', { exact: true }).selectOption({ label: '主线' });
+  await chooseBranch(page, { label: '主线' });
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
   await tab(page, '剧情与伏笔');
   await expect(page.locator('.plot-summary-list .plot-summary-card')).toHaveCount(2);
+});
+
+test('早章编辑保留后续章节，章末创建分支，确认删除后返回主线并保留资料', async ({ page }, testInfo) => {
+  await createProject(page, 'E2E 章节分支维护'); await importNovel(page); await tab(page, '正文');
+  const branchId = await currentBranchId(page);
+  const before = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+  await page.locator('.chapter-list .chapter-item').first().click();
+  await expect(page.getByRole('button', { name: '从此章节分支', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '删除分支', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.getByLabel('章节标题', { exact: true }).fill('第一章 编辑后的起点');
+  await page.getByLabel('章节正文', { exact: true }).fill('林舟来到白石城，看到城门下的石碑。\n\n他决定先去城中打听消息。\n\n手动补充的河岸见闻。');
+  await page.getByRole('button', { name: '保存正文', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '第一章 编辑后的起点', exact: true })).toBeVisible();
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', branchId);
+  await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
+  await expect(page.locator('.chapter-list .chapter-item.selected')).toContainText('第一章 编辑后的起点');
+  const edited = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+  expect(edited.state.chapters[1]).toEqual(before.state.chapters[1]);
+  expect(edited.state.chapters[0].summary).toBe(before.state.chapters[0].summary);
+  const projects = await (await page.request.get('/api/projects')).json(); const project = projects.find((project: { title: string }) => project.title === 'E2E 章节分支维护');
+  expect((await (await page.request.get(`/api/jobs?projectId=${project.id}&view=author`)).json()).length).toBe(1);
+  await page.getByRole('button', { name: '从此章节分支', exact: true }).click();
+  let modal = page.getByRole('dialog');
+  await expect(modal.getByRole('combobox', { name: '从哪一章的结尾出发', exact: true })).toHaveValue(edited.state.chapters[0].id);
+  await modal.getByLabel('新故事线名称', { exact: true }).fill('河岸旁支');
+  await modal.getByRole('button', { name: '建立故事线', exact: true }).click();
+  await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(1);
+  const forkId = await currentBranchId(page); expect(forkId).not.toBe(branchId);
+  await page.getByRole('button', { name: '删除分支', exact: true }).click();
+  modal = page.getByRole('dialog'); await expect(modal).toContainText('河岸旁支');
+  await modal.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', forkId);
+  await page.screenshot({ path: testInfo.outputPath('desktop-chapter-fork.png'), fullPage: true, animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole('button', { name: '从此章节分支', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '打开章节目录', exact: true }).click();
+  await page.getByRole('button', { name: '删除分支', exact: true }).click();
+  modal = page.getByRole('dialog'); await expect(modal.getByRole('button', { name: '确认删除分支', exact: true })).toBeVisible();
+  expect(await modal.evaluate(element => element.getBoundingClientRect().right <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('mobile-delete-branch.png'), fullPage: true, animations: 'disabled' });
+  await modal.getByRole('button', { name: '确认删除分支', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', branchId);
+  await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
+  await expect(page.locator('.branch-selector .branch-tree-node:not(.is-deleted)')).toHaveCount(1);
+  const after = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json(); expect(after.state).toEqual(edited.state);
+  expect((await page.request.get(`/api/branches/${forkId}?view=author`)).status()).toBe(404);
+  await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 章节分支维护', exact: true }).click();
+  await expect(page.locator('.workspace-project-title')).toContainText('E2E 章节分支维护');
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', branchId);
 });
 
 test('手机尺寸可以创作、打开章节目录和地点关系，页面没有横向溢出', async ({ page }, testInfo) => {
@@ -700,14 +763,14 @@ test('其他设备更新版本后保留编辑草稿，冲突保存不会覆盖�
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   const draft = '林舟来到白石城。\n\nDRAFT_CONFLICT：这份尚未保存的草稿必须保留。';
   await page.getByLabel('章节正文', { exact: true }).fill(draft);
-  const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+  const branchId = await currentBranchId(page);
   const view = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
   const changed = await page.request.put(`/api/branches/${branchId}/outline`, { data: { baseRevisionId: view.branch.revisionId, outline: { ...view.state.outline, worldview: '另一台设备刚刚保存的世界观。' } } });
   expect(changed.ok()).toBeTruthy();
   // Observe one actual polling round instead of relying on an arbitrary sleep.
   await page.waitForResponse(response => response.url().includes('/api/jobs?projectId='));
   await expect(page.getByLabel('章节正文', { exact: true })).toHaveValue(draft);
-  const conflict = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith(`/api/branches/${branchId}/chapters`));
+  const conflict = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/branches/${branchId}/chapters`);
   await page.getByRole('button', { name: '保存正文', exact: true }).click();
   expect((await conflict).status()).toBe(409);
   await expect(page.getByLabel('章节正文', { exact: true })).toHaveValue(draft);
@@ -720,7 +783,7 @@ test('其他设备更新版本后保留编辑草稿，冲突保存不会覆盖�
 
 test('章节请求延迟返回时，切换到空故事线不会混入原故事线正文', async ({ page }) => {
   await createProject(page, 'E2E 请求归属');
-  const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+  const branchId = await currentBranchId(page);
   const initial = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
   const fork = await page.request.post(`/api/branches/${branchId}/fork`, { data: { baseRevisionId: initial.branch.revisionId, name: '尚无正文的分支' } });
   expect(fork.ok()).toBeTruthy();
@@ -744,7 +807,7 @@ test('章节请求延迟返回时，切换到空故事线不会混入原故事�
   try {
     await page.locator('.chapter-list').getByRole('button', { name: /第一章 旧响应/ }).click();
     await entered;
-    await page.getByLabel('当前故事线', { exact: true }).selectOption({ label: '尚无正文的分支' });
+    await chooseBranch(page, { label: '尚无正文的分支' });
     await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(0);
     release(); await delivered;
     await expect(page.locator('.prose')).toHaveCount(0);
@@ -1330,6 +1393,119 @@ test('书架删除需确认，取消和失败保留小说，处理中不能关�
 });
 
 
+test('故事线创建命名、后续重命名和分支树在桌面与手机可用', async ({ page }, testInfo) => {
+  await createProject(page, 'E2E 分支命名与树'); await importNovel(page); await tab(page, '正文');
+  const rootId = await currentBranchId(page); const root = await (await page.request.get(`/api/branches/${rootId}?view=author`)).json();
+  await page.getByRole('button', { name: '重命名故事线', exact: true }).click();
+  let modal = page.getByRole('dialog', { name: '重命名故事线', exact: true });
+  await modal.getByLabel('故事线名称', { exact: true }).fill('   ');
+  await expect(modal.getByRole('button', { name: '保存名称', exact: true })).toBeDisabled();
+  await modal.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByRole('button', { name: '重命名故事线', exact: true }).click();
+  await modal.getByLabel('故事线名称', { exact: true }).fill('原作路线'); await modal.getByRole('button', { name: '保存名称', exact: true }).click();
+  await expect(page.getByLabel('当前故事线', { exact: true })).toContainText('原作路线');
+  expect((await (await page.request.get(`/api/branches/${rootId}?view=author`)).json()).branch.revisionId).toBe(root.branch.revisionId);
+  await expect(page.getByRole('button', { name: '删除分支', exact: true })).toHaveCount(0);
+  await page.locator('.chapter-list .chapter-item').first().click();
+  await page.getByRole('button', { name: '从此章节分支', exact: true }).click();
+  modal = page.getByRole('dialog'); await modal.getByLabel('新故事线名称', { exact: true }).fill('取消的分支'); await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+  expect((await (await page.request.get(`/api/projects/${root.branch.projectId}`)).json()).branches).toHaveLength(1);
+  for (const name of ['河岸路线', '河岸下的绕行路线']) {
+    await page.getByRole('button', { name: '从此章节分支', exact: true }).click();
+    modal = page.getByRole('dialog'); await modal.getByLabel('新故事线名称', { exact: true }).fill(name);
+    await modal.getByRole('button', { name: '建立故事线', exact: true }).click();
+    await expect(modal).toHaveCount(0); await expect(page.getByLabel('当前故事线', { exact: true })).toContainText(name);
+    await expect(page.getByRole('button', { name: '从此章节分支', exact: true })).toBeVisible();
+  }
+  const leafId = await currentBranchId(page);
+  await page.getByRole('button', { name: '重命名故事线', exact: true }).click();
+  modal = page.getByRole('dialog', { name: '重命名故事线', exact: true });
+  await modal.getByLabel('故事线名称', { exact: true }).fill('绕行路线·后续改名'); await modal.getByRole('button', { name: '保存名称', exact: true }).click();
+  await chooseBranch(page, rootId);
+  await page.getByRole('button', { name: '选择故事线', exact: true }).click();
+  modal = page.getByRole('dialog', { name: '选择故事线 · 分支树', exact: true });
+  const parent = modal.getByRole('button', { name: '切换到故事线 河岸路线', exact: true });
+  await expect(parent.locator('..').locator('.branch-tree-children').getByRole('button', { name: '切换到故事线 绕行路线·后续改名', exact: true })).toBeVisible();
+  await expect(parent).toContainText(root.state.chapters[0].title); await expect(parent).toContainText('来源：原作路线');
+  await expect(modal.locator(`button[data-branch-id="${rootId}"]`)).toHaveAttribute('aria-pressed', 'true');
+  await page.screenshot({ path: testInfo.outputPath('branch-tree-desktop.png'), fullPage: true, animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: testInfo.outputPath('branch-tree-mobile.png'), fullPage: true, animations: 'disabled' });
+  expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+  await modal.locator(`button[data-branch-id="${leafId}"]`).click();
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', leafId);
+  const leaf = await (await page.request.get(`/api/branches/${leafId}?view=author`)).json();
+  expect(leaf.state.chapters).toHaveLength(1);
+  const parentId = leaf.branch.parentBranchId;
+  const source = await (await page.request.get(`/api/branches/${parentId}?view=author`)).json();
+  expect((await page.request.delete(`/api/branches/${parentId}?view=author`, { data: { baseRevisionId: source.branch.revisionId } })).ok()).toBeTruthy();
+  await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 分支命名与树', exact: true }).click();
+  await page.getByRole('button', { name: '选择故事线', exact: true }).click();
+  modal = page.getByRole('dialog', { name: '选择故事线 · 分支树', exact: true });
+  await expect(modal.getByRole('button', { name: '切换到故事线 河岸路线', exact: true })).toBeDisabled();
+  await expect(modal.getByRole('button', { name: '切换到故事线 绕行路线·后续改名', exact: true })).toBeEnabled();
+  await modal.locator(`button[data-branch-id="${rootId}"]`).click();
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', rootId);
+});
+
+test('预设和提示词块创建复制前可命名、可取消、后续改名及保存恢复', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  try {
+    await page.request.put('/api/settings', { data: { ...previous, promptTemplates: defaultPromptTemplates() } });
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settings = page.getByTestId('settings-page'); await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    const panel = settings.getByTestId('prompt-templates-panel');
+    async function confirmName(title: string, label: string, name: string) {
+      const dialog = page.getByRole('dialog', { name: title, exact: true });
+      await dialog.getByLabel(label, { exact: true }).fill(name); await dialog.getByRole('button', { name: '确认名称', exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+    }
+    await panel.getByRole('button', { name: '新建预设', exact: true }).click();
+    let dialog = page.getByRole('dialog', { name: '新建预设', exact: true });
+    await dialog.getByLabel('预设名称', { exact: true }).fill('   '); await expect(dialog.getByRole('button', { name: '确认名称', exact: true })).toBeDisabled();
+    await dialog.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(1);
+    await panel.getByRole('button', { name: '新建预设', exact: true }).click(); await confirmName('新建预设', '预设名称', '自定写作预设');
+    await panel.getByRole('button', { name: '重命名预设', exact: true }).click(); await confirmName('重命名预设', '预设名称', '已改名写作预设');
+    const before = await panel.getByTestId('prompt-block').count();
+    await panel.getByRole('button', { name: '添加提示词块', exact: true }).click();
+    dialog = page.getByRole('dialog', { name: '新建提示词块', exact: true }); await dialog.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(panel.getByTestId('prompt-block')).toHaveCount(before);
+    await panel.getByRole('button', { name: '添加提示词块', exact: true }).click(); await confirmName('新建提示词块', '提示词名称', '环境描写要求');
+    await panel.getByLabel(`提示词块 ${before + 1} 内容`, { exact: true }).fill('用环境细节表现人物情绪。');
+    const blockId = await panel.getByTestId('prompt-block').last().getAttribute('data-block-id');
+    await panel.getByRole('button', { name: `重命名提示词块 ${before + 1}`, exact: true }).click(); await confirmName('重命名提示词块', '提示词名称', '场景与情绪');
+    expect(await panel.getByTestId('prompt-block').last().getAttribute('data-block-id')).toBe(blockId);
+    await panel.getByRole('button', { name: `复制提示词块 ${before + 1}`, exact: true }).click(); await confirmName('复制提示词块', '提示词名称', '场景规则副本');
+    await expect(panel.getByLabel(`提示词块 ${before + 2} 内容`, { exact: true })).toHaveValue('用环境细节表现人物情绪。');
+    await panel.getByRole('button', { name: '复制预设', exact: true }).click(); await confirmName('复制预设', '预设名称', '自选副本名称');
+    for (const task of ['通用框架', '资料提取', '摘要压缩']) {
+      const tabName = task === '通用框架' ? '通用预设' : task;
+      await panel.getByRole('tab', { name: tabName, exact: true }).click();
+      await panel.getByRole('button', { name: '新建预设', exact: true }).click(); await confirmName('新建预设', '预设名称', `${task}自定名称`);
+      await panel.getByRole('button', { name: '重命名预设', exact: true }).click(); await confirmName('重命名预设', '预设名称', `${task}后续改名`);
+    }
+    await panel.getByRole('tab', { name: '正文写作', exact: true }).click();
+    expect((await (await page.request.get('/api/settings')).json()).promptTemplates).toEqual(defaultPromptTemplates());
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(settings.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
+    const saved = (await (await page.request.get('/api/settings')).json()).promptTemplates;
+    expect(saved.presets.writing.map((preset: { name: string }) => preset.name)).toEqual(['默认正文写作', '已改名写作预设', '自选副本名称']);
+    expect(saved.presets.writing[1].blocks.at(-2)).toMatchObject({ id: blockId, name: '场景与情绪', content: '用环境细节表现人物情绪。' });
+    expect(saved.presets.writing[1].blocks.at(-1).id).not.toBe(blockId);
+    expect(saved.presets.writing[2].blocks.at(-1).name).toBe('场景规则副本');
+    expect(saved.general.presets.at(-1).name).toBe('通用框架后续改名');
+    await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click();
+    await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('自选副本名称');
+    await panel.getByRole('button', { name: '重命名预设', exact: true }).click(); await page.setViewportSize({ width: 390, height: 844 });
+    dialog = page.getByRole('dialog', { name: '重命名预设', exact: true });
+    expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+    await page.screenshot({ path: testInfo.outputPath('prompt-name-mobile.png'), animations: 'disabled' });
+    await dialog.getByRole('button', { name: '取消', exact: true }).click();
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
 test('任务提示词支持编辑编排、变量预览、独立导入导出和保存恢复', async ({ page }, testInfo) => {
   const previous = await (await page.request.get('/api/settings')).json();
   try {
@@ -1338,6 +1514,7 @@ test('任务提示词支持编辑编排、变量预览、独立导入导出和�
     const modal = page.getByTestId('settings-page'); const panel = modal.getByTestId('prompt-templates-panel');
     await modal.getByRole('button', { name: '提示词编排', exact: true }).click();
     await panel.getByRole('button', { name: '复制预设', exact: true }).click();
+    await page.getByRole('dialog', { name: '复制预设', exact: true }).getByRole('button', { name: '确认名称', exact: true }).click();
     await panel.getByLabel('提示词预设名称', { exact: true }).fill('我的写作风格');
     await panel.getByLabel('提示词块 1 内容', { exact: true }).fill('使用风格：{{style}}，作品：{{projectTitle}}。');
     await expect(panel).toContainText('此任务没有变量 {{style}}');
@@ -1372,6 +1549,13 @@ test('任务提示词支持编辑编排、变量预览、独立导入导出和�
     expect(exportedText).not.toContain('providers'); expect(exportedText).not.toContain('apiKey');
     await panel.getByLabel('导入提示词预设 JSON', { exact: true }).fill(exportedText);
     await panel.getByRole('button', { name: '从 JSON 新增预设', exact: true }).click();
+    const importedName = page.getByRole('dialog', { name: '导入预设', exact: true });
+    await importedName.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(2);
+    await panel.getByRole('button', { name: '从 JSON 新增预设', exact: true }).click();
+    await importedName.getByLabel('预设名称', { exact: true }).fill('导入写作风格');
+    await importedName.getByLabel('搭配的通用预设名称', { exact: true }).fill('导入的通用框架');
+    await importedName.getByRole('button', { name: '确认名称', exact: true }).click();
     await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(3);
     for (const label of ['资料提取', '摘要压缩']) {
       await panel.getByRole('tab', { name: label, exact: true }).click();
@@ -1387,7 +1571,7 @@ test('任务提示词支持编辑编排、变量预览、独立导入导出和�
     await page.screenshot({ path: testInfo.outputPath('prompt-editor-desktop.png'), animations: 'disabled' });
     await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click();
     await modal.getByRole('button', { name: '提示词编排', exact: true }).click();
-    await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('我的写作风格');
+    await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('导入写作风格');
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: testInfo.outputPath('prompt-editor-mobile.png'), animations: 'disabled' });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
@@ -1476,7 +1660,7 @@ test('通用框架可跨任务编辑、独立选择和预览，工具通道真�
     await createProject(page, 'E2E 分层工具正文');
     await page.getByRole('button', { name: '开始创作', exact: true }).click(); await page.getByRole('dialog').getByLabel('这一次，你想写什么？', { exact: true }).fill('在城门前继续。'); await page.getByRole('dialog').getByRole('button', { name: '开始生成', exact: true }).click();
     await expect.poll(() => visibleProse(page)).toContain('林舟走进白石城');
-    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const branchId = await currentBranchId(page);
     await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).state.chapters[0]?.status).toBe('ready');
     const text = await visibleProse(page); expect(text).toContain('林舟来到城门前。'); expect(text).not.toContain('argumentsJson'); expect(text).not.toContain('toolResults'); expect(text).not.toContain('辅助场景核对'); expect(text).not.toContain('<thinking>');
     const jobs = await (await page.request.get('/api/jobs?view=author')).json(); const written = jobs.find((value: any) => value.kind === 'generate' && value.branchId === branchId);
@@ -1526,7 +1710,7 @@ test('仅保留三类任务和防截断通用层，规划入口移除，世界�
     await page.screenshot({path:testInfo.outputPath('protection-only-general-desktop.png'),animations:'disabled'});await settings.getByRole('button',{name:'返回作品',exact:true}).click();
     await createProject(page,'无规划入口验证');await tab(page,'剧情与伏笔');await expect(page.getByRole('button',{name:'让 AI 规划',exact:true})).toHaveCount(0);await expect(page.getByLabel('规划章节标题',{exact:true})).toHaveCount(0);await expect(page.getByRole('button',{name:'添加章节规划',exact:true})).toHaveCount(0);
     await page.getByRole('textbox',{name:'世界观',exact:true}).fill('港城，没有魔法。');await page.getByRole('button',{name:'保存世界观与锁定设定',exact:true}).click();await expect(page.getByRole('button',{name:'保存世界观与锁定设定',exact:true})).toBeDisabled();
-    const branchId=await page.getByLabel('当前故事线',{exact:true}).inputValue();const view=await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();expect(view.state.outline.worldview).toBe('港城，没有魔法。');expect((await page.request.post(`/api/branches/${branchId}/plan`,{data:{baseRevisionId:view.branch.revisionId}})).status()).toBe(404);
+    const branchId=await currentBranchId(page);const view=await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();expect(view.state.outline.worldview).toBe('港城，没有魔法。');expect((await page.request.post(`/api/branches/${branchId}/plan`,{data:{baseRevisionId:view.branch.revisionId}})).status()).toBe(404);
     await page.setViewportSize({width:390,height:844});await page.screenshot({path:testInfo.outputPath('story-notes-mobile.png'),animations:'disabled'});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   } finally {await page.request.put('/api/settings',{data:previous});}
 });
@@ -1576,7 +1760,7 @@ test('生图设置、自动人物与场景工具、全文选段 CG、重绘参�
     await modal.getByRole('button', { name: '开始生成', exact: true }).click();
     await expect(page.locator('.chapter-images .story-image-card')).toHaveCount(2);
     await expect(page.locator('.chapter-images .status-pill.completed')).toHaveCount(2);
-    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const branchId = await currentBranchId(page);
     const listImages = async () => (await page.request.get(`/api/branches/${branchId}/images?view=author`)).json();
     const automatic = await listImages(); expect(automatic.every((image: any) => image.automatic)).toBeTruthy();
     expect(automatic.find((image: any) => image.kind === 'portrait').entityId).toBeTruthy();
@@ -1629,7 +1813,7 @@ test('生图设置、自动人物与场景工具、全文选段 CG、重绘参�
 test('生图取消的迟到响应不会跨阅读视图或故事线显示作者图片', async ({ page }) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
   if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
-  await createProject(page, 'E2E 插画请求范围'); const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+  await createProject(page, 'E2E 插画请求范围'); const branchId = await currentBranchId(page);
   const view = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
   const fork = await (await page.request.post(`/api/branches/${branchId}/fork`, { data: { baseRevisionId: view.branch.revisionId, name: '插画请求其他线' } })).json();
   const secretImage = { id: 'ui-secret-image', projectId: view.branch.projectId, branchId, baseRevisionId: view.branch.revisionId, kind: 'map', status: 'running', title: 'SECRET_IMAGE_LATE_RESULT', prompt: 'SECRET_PROMPT_MUST_NOT_RENDER', automatic: false, visibility: 'secret', createdAt: '2026-10-04T00:00:00Z', updatedAt: '2026-10-04T00:00:00Z' };
@@ -1650,7 +1834,7 @@ test('生图取消的迟到响应不会跨阅读视图或故事线显示作者�
   gate = new Promise<void>(resolve => { release = resolve; }); const nextResponse = page.waitForResponse(value => value.url().includes('/ui-secret-image/cancel'));
   await page.getByRole('button', { name: '取消绘制', exact: true }).click();
   // The branch created through the API appears after metadata refresh when toggling author mode.
-  await page.getByLabel('当前故事线', { exact: true }).selectOption(fork.branch.id);
+  await chooseBranch(page, fork.branch.id);
   await expect(page.locator('.image-gallery')).toContainText('故事图册尚未展开'); release(); await nextResponse;
   await expect(page.locator('.story-image-card')).toHaveCount(0); await expect(page.locator('.workspace')).not.toContainText('SECRET_IMAGE');
 });
@@ -1671,7 +1855,7 @@ test('专用生图提示词、AI 尺寸、两人物 CG 参考、Nano Banana 2 �
     await settings.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(settings.getByRole('status')).toContainText('设置已保存'); await settings.getByRole('button', { name: '返回作品', exact: true }).click();
     await page.getByRole('button', { name: '手动写第一章', exact: true }).click();
     await page.getByLabel('章节标题', { exact: true }).fill('第一章 两位旅人'); await page.getByLabel('章节正文', { exact: true }).fill('林舟与苏晴站在白石城的城门下，眺望远处亮起的灯火。'); await page.getByRole('button', { name: '保存正文', exact: true }).click(); await completedJobs(page, 1);
-    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const branchId = await currentBranchId(page);
     const imageList = async () => (await page.request.get(`/api/branches/${branchId}/images?view=author`)).json();
     const stats = async () => (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
     await tab(page, '世界资料'); await page.getByRole('button', { name: '新增资料', exact: true }).click(); let modal = page.getByRole('dialog');
@@ -1726,7 +1910,7 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
   try {
     await createProject(page, 'E2E 图片选择与查看'); await page.getByRole('button', { name: '手动写第一章', exact: true }).click();
     await page.getByLabel('章节标题', { exact: true }).fill('第一章 城门'); await page.getByLabel('章节正文', { exact: true }).fill('林舟站在白石城的城门下。'); await page.getByRole('button', { name: '保存正文', exact: true }).click(); await completedJobs(page, 1);
-    const branchId = await page.getByLabel('当前故事线', { exact: true }).inputValue();
+    const branchId = await currentBranchId(page);
     const imageList = async () => (await page.request.get(`/api/branches/${branchId}/images?view=author`)).json();
     const stats = async () => (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
     await tab(page, '世界资料'); const person = page.locator('.entity-card').filter({ has: page.getByRole('heading', { name: '林舟', exact: true }) });

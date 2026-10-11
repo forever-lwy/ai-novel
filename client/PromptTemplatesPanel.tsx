@@ -1,18 +1,21 @@
-import { useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Copy, Download, GripVertical, Plus, RotateCcw, Trash2, Upload } from 'lucide-react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { createPortal } from 'react-dom';
+import { ArrowDown, ArrowUp, Copy, Download, GripVertical, Pencil, Plus, RotateCcw, Trash2, Upload } from 'lucide-react';
 import type { Mode, PromptBlock, PromptFeature, PromptPreset, PromptScope, PromptTask, PromptTemplateSettings, ProviderProtocol, Settings } from '../shared/types';
 import type { PromptPreviewInput, PromptPreviewResult } from '../shared/prompt-runtime';
 import { normalizeTaskSettings } from '../shared/task-settings';
 import { normalizeImageSettings } from '../shared/image-settings';
 import { api } from './api';
 import { activePromptPreset, compilePrompt, defaultPromptTemplates, promptPresetList, promptPresetVariables, promptScopeLabels, promptScopes, promptTaskLabels, promptTasks, promptVariables, validatePromptTemplates } from '../shared/prompt-templates';
-import { Notice } from './ui';
+import { Modal, Notice } from './ui';
 
 const roleLabels = { system: '系统', user: '用户', assistant: '助手' };
 const modeLabels: Record<Mode, string> = { original: '原创', continuation: '续写', fanfiction: '同人', rewrite: '改写', rpg: '穿越小说 · RPG' };
 const modes = Object.keys(modeLabels) as Mode[];
 const featureLabels: Record<PromptFeature, string> = { snow: '雪融雪降 · 长文本填充', 'cot-three': '三段输出结构', 'cot-single': '单段输出结构', 'defense-normal': '普通防空回尾段', 'defense-laoda': '牢大防空回尾段' };
 const protocolLabels: Record<ProviderProtocol, string> = { 'openai-chat': 'OpenAI Chat', 'openai-responses': 'OpenAI Responses', gemini: 'Gemini', claude: 'Claude' };
+type Naming = { kind: 'preset' | 'block' | 'import'; operation: 'create' | 'copy' | 'rename' | 'import'; name: string; blockId?: string;
+  imported?: { task: PromptScope; templates: PromptTemplateSettings; presetId: string; generalPresetId?: string; generalName?: string } };
 
 function sampleValue(key: string) {
   const samples: Record<string, string> = {
@@ -52,6 +55,7 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
   const [generalPreviewTask, setGeneralPreviewTask] = useState<PromptTask>('writing');
   const [actionError, setActionError] = useState('');
   const [feedback, setFeedback] = useState('');
+  const [naming, setNaming] = useState<Naming | null>(null);
   const [importText, setImportText] = useState('');
   const [expandedBlock, setExpandedBlock] = useState('');
   const [insertBlock, setInsertBlock] = useState('');
@@ -116,9 +120,35 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
   }
   function selectTask(value: PromptScope) { setTask(value); setActionError(''); setFeedback(''); setInsertBlock(''); setExpandedBlock(''); }
   function addPreset(copy = false) {
-    const next = clonePreset(copy ? preset : activePromptPreset(defaultPromptTemplates(), task), copy ? `${preset.name}（副本）` : `新预设 ${presets.length + 1}`);
-    replaceScope([...presets, next], next.id);
-    setExpandedBlock(next.blocks[0]?.id || ''); setInsertBlock('');
+    setNaming({ kind: 'preset', operation: copy ? 'copy' : 'create', name: copy ? `${preset.name}（副本）`.slice(0, 100) : `新预设 ${presets.length + 1}` });
+  }
+  function submitName(event: FormEvent) {
+    event.preventDefault(); event.stopPropagation(); if (!naming || disabledRef.current || !naming.name.trim() || naming.name.trim().length > 100) return;
+    const name = naming.name.trim();
+    if (naming.kind === 'import' && naming.imported) {
+      const incoming = naming.imported; const next = structuredClone(incoming.templates);
+      const list = promptPresetList(next, incoming.task); list.find(value => value.id === incoming.presetId)!.name = name;
+      if (incoming.generalPresetId) {
+        const generalName = incoming.generalName?.trim(); if (!generalName || generalName.length > 100) return;
+        next.general!.presets.find(value => value.id === incoming.generalPresetId)!.name = generalName;
+      }
+      change(next); selectTask(incoming.task); setImportText(''); setFeedback(`已新增“${name}”。点击“保存设置”后生效。`);
+    } else if (naming.kind === 'preset') {
+      if (naming.operation === 'rename') updatePreset({ name });
+      else {
+        const next = clonePreset(naming.operation === 'copy' ? preset : activePromptPreset(defaultPromptTemplates(), task), name);
+        replaceScope([...presets, next], next.id); setExpandedBlock(next.blocks[0]?.id || ''); setInsertBlock('');
+      }
+    } else if (naming.kind === 'block') {
+      if (naming.operation === 'rename') updateBlock(naming.blockId!, { name });
+      else {
+        const source = preset.blocks.find(block => block.id === naming.blockId);
+        const block: PromptBlock = source ? { ...source, id: crypto.randomUUID(), name, enabled: source.feature?.startsWith('cot-') || source.feature?.startsWith('defense-') ? false : source.enabled } : { id: crypto.randomUUID(), name, role: 'user', enabled: true, content: '' };
+        const blocks = [...preset.blocks]; blocks.splice(source ? blocks.indexOf(source) + 1 : blocks.length, 0, block);
+        updatePreset({ blocks }); setExpandedBlock(block.id); setInsertBlock(block.id);
+      }
+    }
+    setNaming(null);
   }
   function moveBlock(id: string, target: number) {
     const index = preset.blocks.findIndex(block => block.id === id);
@@ -178,7 +208,9 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
         }
         next.presets[importedTask].push(imported); next.selected[importedTask] = imported.id;
       }
-      validatePromptTemplates(next); change(next); selectTask(importedTask); setImportText(''); setFeedback(`已新增“${imported.name}”。点击“保存设置”后生效。`);
+      validatePromptTemplates(next);
+      setNaming({ kind: 'import', operation: 'import', name: imported.name, imported: { task: importedTask, templates: next, presetId: imported.id,
+        ...(importedTask !== 'general' && payload.generalPreset ? { generalPresetId: imported.generalPresetId, generalName: next.general!.presets.find(value => value.id === imported.generalPresetId)!.name } : {}) } });
     } catch (error) { setActionError(`导入失败：${(error as Error).message}`); }
   }
   async function readFile(file?: File) {
@@ -191,8 +223,8 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
       <p className="hint">通用预设提供共用框架，任务提示词在插槽处展开，程序再附加本次任务规则。通用层仅保留雪融雪降、CLEAR、输出结构与防空回尾段，角色和任务约束由各任务提示词提供。原有自定义预设保持独立，可自行接入。修改后点击“保存设置”生效。</p>
       <div className="prompt-task-tabs" role="tablist" aria-label="提示词任务">{promptScopes.map(value => <button type="button" key={value} role="tab" aria-selected={task === value} className={task === value ? 'active' : ''} disabled={disabled} onClick={() => selectTask(value)}>{promptScopeLabels[value]}</button>)}</div>
       <section className="prompt-preset-editor form-stack" aria-label={`${promptScopeLabels[task]}提示词预设`}>
-        <div className="prompt-preset-heading"><label>当前预设<select aria-label="当前提示词预设" disabled={disabled} value={preset.id} onChange={event => { replaceScope(presets, event.target.value); setInsertBlock(''); setExpandedBlock(''); }}>{presets.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label><div className="row wrap"><button type="button" className="button secondary small" disabled={disabled} onClick={() => addPreset()}><Plus size={14} />新建预设</button><button type="button" className="button secondary small" disabled={disabled} onClick={() => addPreset(true)}><Copy size={14} />复制预设</button><button type="button" className="icon-button danger-text" aria-label="删除当前提示词预设" title="删除当前预设（保留至少一个；被任务引用的通用预设须先解除引用）" disabled={disabled || presets.length <= 1 || task === 'general' && promptTasks.some(value => templates.presets[value].some(entry => entry.generalPresetId === preset.id))} onClick={() => { const remaining = presets.filter(value => value.id !== preset.id); replaceScope(remaining, remaining[0].id); }}><Trash2 size={15} /></button></div></div>
-        <label>预设名称<input aria-label="提示词预设名称" value={preset.name} disabled={disabled} onChange={event => updatePreset({ name: event.target.value })} /></label>
+        <div className="prompt-preset-heading"><label>当前预设<select aria-label="当前提示词预设" disabled={disabled} value={preset.id} onChange={event => { replaceScope(presets, event.target.value); setInsertBlock(''); setExpandedBlock(''); }}>{presets.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label><div className="row wrap"><button type="button" className="button secondary small" disabled={disabled} onClick={() => addPreset()}><Plus size={14} />新建预设</button><button type="button" className="button secondary small" disabled={disabled} onClick={() => addPreset(true)}><Copy size={14} />复制预设</button><button type="button" className="button secondary small" disabled={disabled} onClick={() => setNaming({ kind: 'preset', operation: 'rename', name: preset.name })}><Pencil size={14} />重命名预设</button><button type="button" className="icon-button danger-text" aria-label="删除当前提示词预设" title="删除当前预设（保留至少一个；被任务引用的通用预设须先解除引用）" disabled={disabled || presets.length <= 1 || task === 'general' && promptTasks.some(value => templates.presets[value].some(entry => entry.generalPresetId === preset.id))} onClick={() => { const remaining = presets.filter(value => value.id !== preset.id); replaceScope(remaining, remaining[0].id); }}><Trash2 size={15} /></button></div></div>
+        <label>预设名称<input aria-label="提示词预设名称" maxLength={100} value={preset.name} disabled={disabled} onChange={event => updatePreset({ name: event.target.value })} /></label>
         {task === 'general' && <label>辅助标签处理<select aria-label="辅助标签处理" disabled={disabled} value={preset.textFilter ?? 'off'} onChange={event => updatePreset({ textFilter: event.target.value === 'dramatron' ? 'dramatron' : undefined })}><option value="dramatron">清理 Dramatron 思考、包装与尾段标签</option><option value="off">保留全部输出文本</option></select><span className="hint">清理后的内容进入正文或 JSON 解析；完整返回仍保留在作者侧响应诊断中。</span></label>}
         {task !== 'general' && <label>搭配通用预设<select aria-label="搭配通用预设" disabled={disabled} value={preset.useGeneral === false ? 'off' : preset.generalPresetId ?? 'follow'} onChange={event => updatePreset({ useGeneral: event.target.value !== 'off', generalPresetId: ['off', 'follow'].includes(event.target.value) ? undefined : event.target.value })}><option value="follow">跟随当前通用预设</option><option value="off">独立使用任务提示词</option>{promptPresetList(templates, 'general').map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>}
         {task === 'writing' && <label>正文输出通道<select aria-label="正文输出通道" disabled={disabled} value={preset.writingOutputMode ?? 'text'} onChange={event => updatePreset({ writingOutputMode: event.target.value as 'text' | 'tool' })}><option value="text">普通文本（默认）</option><option value="tool">工具通道 · 正文与工具调用分层提交</option></select><span className="hint">查询、插画与 RPG 询问通过内层工具执行，真实结果从外层返回。此模式跳过普通／牢大尾段；同一响应保留更完整的文本，不重发请求。空回或无效工具参数会保留响应并报错。</span></label>}
@@ -200,8 +232,8 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
         <div className="prompt-block-list">{preset.blocks.map((block, index) => <details key={`${preset.id}-${block.id}`} className={`prompt-block ${block.enabled ? '' : 'is-disabled'}`} data-testid="prompt-block" data-block-id={block.id} open={index === 0 || expandedBlock === block.id} onDragOver={event => { if (draggedBlock) event.preventDefault(); }} onDrop={event => { event.preventDefault(); if (draggedBlock && !disabled) moveBlock(draggedBlock, index); setDraggedBlock(''); }}>
           <summary><span className="prompt-block-handle" draggable={!disabled} title="拖动调整顺序" onDragStart={event => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', block.id); setDraggedBlock(block.id); }} onDragEnd={() => setDraggedBlock('')}><GripVertical size={15} /></span><span className="prompt-block-number">{String(index + 1).padStart(2, '0')}</span><strong>{block.name || '未命名块'}</strong><span className="prompt-block-badge">{roleLabels[block.role]}</span>{!block.enabled && <span className="hint">已停用</span>}{task === 'writing' && !!block.modes?.length && <small>{block.modes.map(mode => modeLabels[mode]).join('、')}</small>}</summary>
           <div className="prompt-block-body form-stack">
-            <div className="row wrap between"><label className="checkbox"><input type="checkbox" aria-label={`启用提示词块 ${index + 1}`} checked={block.enabled} disabled={disabled || !!block.slot} onChange={event => updateBlock(block.id, { enabled: event.target.checked })} />启用此块</label><div className="row"><button type="button" className="icon-button" aria-label={`上移提示词块 ${index + 1}`} title="上移" disabled={disabled || index === 0} onClick={() => moveBlock(block.id, index - 1)}><ArrowUp size={15} /></button><button type="button" className="icon-button" aria-label={`下移提示词块 ${index + 1}`} title="下移" disabled={disabled || index === preset.blocks.length - 1} onClick={() => moveBlock(block.id, index + 1)}><ArrowDown size={15} /></button><button type="button" className="icon-button" aria-label={`复制提示词块 ${index + 1}`} title="复制此块" disabled={disabled || !!block.slot} onClick={() => { const copy = { ...block, enabled: block.feature?.startsWith('cot-') || block.feature?.startsWith('defense-') ? false : block.enabled, id: crypto.randomUUID(), name: `${block.name}（副本）` }; const blocks = [...preset.blocks]; blocks.splice(index + 1, 0, copy); updatePreset({ blocks }); setExpandedBlock(copy.id); }}><Copy size={15} /></button><button type="button" className="icon-button danger-text" aria-label={`删除提示词块 ${index + 1}`} title="删除此块" disabled={disabled || !!block.slot || preset.blocks.length <= 1} onClick={() => updatePreset({ blocks: preset.blocks.filter(value => value.id !== block.id) })}><Trash2 size={15} /></button></div></div>
-            <div className="form-grid"><label>块名称<input aria-label={`提示词块 ${index + 1} 名称`} value={block.name} disabled={disabled} onChange={event => updateBlock(block.id, { name: event.target.value })} /></label><label>消息角色<select aria-label={`提示词块 ${index + 1} 角色`} value={block.role} disabled={disabled} onChange={event => updateBlock(block.id, { role: event.target.value as PromptBlock['role'] })}>{Object.entries(roleLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>
+            <div className="row wrap between"><label className="checkbox"><input type="checkbox" aria-label={`启用提示词块 ${index + 1}`} checked={block.enabled} disabled={disabled || !!block.slot} onChange={event => updateBlock(block.id, { enabled: event.target.checked })} />启用此块</label><div className="row"><button type="button" className="icon-button" aria-label={`上移提示词块 ${index + 1}`} title="上移" disabled={disabled || index === 0} onClick={() => moveBlock(block.id, index - 1)}><ArrowUp size={15} /></button><button type="button" className="icon-button" aria-label={`下移提示词块 ${index + 1}`} title="下移" disabled={disabled || index === preset.blocks.length - 1} onClick={() => moveBlock(block.id, index + 1)}><ArrowDown size={15} /></button><button type="button" className="icon-button" aria-label={`复制提示词块 ${index + 1}`} title="复制此块" disabled={disabled || !!block.slot} onClick={() => setNaming({ kind: 'block', operation: 'copy', blockId: block.id, name: `${block.name}（副本）`.slice(0, 100) })}><Copy size={15} /></button><button type="button" className="icon-button" aria-label={`重命名提示词块 ${index + 1}`} title="重命名此块" disabled={disabled} onClick={() => setNaming({ kind: 'block', operation: 'rename', blockId: block.id, name: block.name })}><Pencil size={15} /></button><button type="button" className="icon-button danger-text" aria-label={`删除提示词块 ${index + 1}`} title="删除此块" disabled={disabled || !!block.slot || preset.blocks.length <= 1} onClick={() => updatePreset({ blocks: preset.blocks.filter(value => value.id !== block.id) })}><Trash2 size={15} /></button></div></div>
+            <div className="form-grid"><label>块名称<input aria-label={`提示词块 ${index + 1} 名称`} maxLength={100} value={block.name} disabled={disabled} onChange={event => updateBlock(block.id, { name: event.target.value })} /></label><label>消息角色<select aria-label={`提示词块 ${index + 1} 角色`} value={block.role} disabled={disabled} onChange={event => updateBlock(block.id, { role: event.target.value as PromptBlock['role'] })}>{Object.entries(roleLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>
             {task === 'writing' && <fieldset className="prompt-block-modes"><legend>适用写作模式</legend><label className="checkbox"><input type="checkbox" aria-label={`提示词块 ${index + 1} 所有写作模式`} checked={!block.modes?.length} disabled={disabled} onChange={event => updateBlock(block.id, { modes: event.target.checked ? undefined : ['original'] })} />所有写作模式</label>{modes.map(mode => <label className="checkbox" key={mode}><input type="checkbox" aria-label={`提示词块 ${index + 1} 适用于 ${modeLabels[mode]}`} checked={!block.modes?.length || block.modes.includes(mode)} disabled={disabled || !block.modes?.length} onChange={event => setBlockMode(block, mode, event.target.checked)} />{modeLabels[mode]}</label>)}</fieldset>}
             {!block.slot && <label>块用途<select aria-label={`提示词块 ${index + 1} 用途`} disabled={disabled} value={block.feature ?? 'normal'} onChange={event => updateBlock(block.id, { feature: event.target.value === 'normal' ? undefined : event.target.value as PromptFeature })}><option value="normal">普通提示词块</option>{Object.entries(featureLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}
             {task === 'general' && !block.slot && <label>适用任务<select aria-label={`提示词块 ${index + 1} 适用任务`} disabled={disabled} value={block.tasks?.length === 1 ? block.tasks[0] : 'all'} onChange={event => updateBlock(block.id, { tasks: event.target.value === 'all' ? undefined : [event.target.value as PromptTask] })}><option value="all">全部任务</option>{promptTasks.map(value => <option key={value} value={value}>{promptTaskLabels[value]}</option>)}</select></label>}
@@ -211,7 +243,7 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
             {block.slot ? <p className="hint">此处插入所选任务的全部消息块，保留各自角色与顺序。可移动插槽调整通用框架的前后位置。</p> : <label>提示词内容<textarea ref={element => { if (element) textareas.current.set(block.id, element); else textareas.current.delete(block.id); }} aria-label={`提示词块 ${index + 1} 内容`} rows={Math.min(14, Math.max(4, block.content.split('\n').length))} className="prompt-content-input" value={block.content} disabled={disabled} onFocus={() => setInsertBlock(block.id)} onChange={event => updateBlock(block.id, { content: event.target.value })} placeholder="输入任务要求，使用下方变量按钮插入本次任务的素材。" spellCheck={false} /></label>}
           </div>
         </details>)}</div>
-        <button type="button" className="button secondary small align-start" disabled={disabled} onClick={() => { const block: PromptBlock = { id: crypto.randomUUID(), name: `提示词块 ${preset.blocks.length + 1}`, role: 'user', enabled: true, content: '' }; updatePreset({ blocks: [...preset.blocks, block] }); setExpandedBlock(block.id); setInsertBlock(block.id); }}><Plus size={14} />添加提示词块</button>
+        <button type="button" className="button secondary small align-start" disabled={disabled} onClick={() => setNaming({ kind: 'block', operation: 'create', name: `提示词块 ${preset.blocks.length + 1}` })}><Plus size={14} />添加提示词块</button>
         <details className="prompt-inner-fold"><summary>可用变量与自定义变量</summary><div className="form-stack">
           <p className="hint">变量只替换一次，素材中出现的 {'{{文字}}'} 会保留原样。先选择插入位置，再点击变量；使用过的变量名称需要在重命名后同步修改。</p>
           <label>变量插入位置<select aria-label="变量插入位置" disabled={disabled} value={targetBlock?.id || ''} onChange={event => setInsertBlock(event.target.value)}>{preset.blocks.map((block, index) => <option key={block.id} value={block.id}>{index + 1}. {block.name || '未命名块'}</option>)}</select></label>
@@ -241,5 +273,12 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
       </section>
       {validationError && <Notice error={`提示词暂不能保存：${validationError}`} />}{actionError && <Notice error={actionError} />}{feedback && <p className="hint" role="status">{feedback}</p>}
     </div>;
-  return embedded ? <section className="prompt-templates prompt-templates-embedded" data-testid="prompt-templates-panel">{body}</section> : <details className="prompt-templates" data-testid="prompt-templates-panel"><summary>任务提示词与编排 <span>三类任务 · 分块编辑 · 预设</span></summary>{body}</details>;
+  return <>{embedded ? <section className="prompt-templates prompt-templates-embedded" data-testid="prompt-templates-panel">{body}</section> : <details className="prompt-templates" data-testid="prompt-templates-panel"><summary>任务提示词与编排 <span>三类任务 · 分块编辑 · 预设</span></summary>{body}</details>}
+    {naming && createPortal(<Modal title={`${({ create: '新建', copy: '复制', rename: '重命名', import: '导入' } as const)[naming.operation]}${naming.kind === 'block' ? '提示词块' : '预设'}`} onClose={() => setNaming(null)}><form className="form-stack" onSubmit={submitName}>
+      <label>{naming.kind === 'block' ? '提示词名称' : '预设名称'}<input aria-label={naming.kind === 'block' ? '提示词名称' : '预设名称'} autoFocus required maxLength={100} value={naming.name} onChange={event => setNaming(value => value && ({ ...value, name: event.target.value }))} /></label>
+      {naming.imported?.generalPresetId && <label>搭配的通用预设名称<input aria-label="搭配的通用预设名称" required maxLength={100} value={naming.imported.generalName || ''} onChange={event => setNaming(value => value?.imported ? { ...value, imported: { ...value.imported, generalName: event.target.value } } : value)} /></label>}
+      <p className="hint">名称之后可以继续修改。确认后加入当前编辑，点击“保存设置”生效。</p>
+      <div className="row end wrap"><button type="button" className="button secondary" onClick={() => setNaming(null)}>取消</button><button type="submit" className="button primary" disabled={disabled || !naming.name.trim() || !!naming.imported?.generalPresetId && !naming.imported.generalName?.trim()}>确认名称</button></div>
+    </form></Modal>, document.body)}
+  </>;
 }

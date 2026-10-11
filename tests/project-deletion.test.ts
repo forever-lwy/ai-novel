@@ -114,8 +114,8 @@ describe('novel deletion', () => {
     append(ctx.store, fork.branch.id, '分支独有正文。');
     const second = append(ctx.store, project.mainBranchId, '阿青离开江城。', imported.source.id);
     const revised = ctx.store.saveChapter(project.mainBranchId, { baseRevisionId: second.branch.revisionId, chapterId: first.state.chapters[0].id, title: '历史改写', text: '阿青去了山城。' });
-    expect(revised.branch.id).not.toBe(project.mainBranchId);
-    ctx.store.rollback(project.mainBranchId, { baseRevisionId: second.branch.revisionId, revisionId: first.branch.revisionId });
+    expect(revised.branch.id).toBe(project.mainBranchId);
+    ctx.store.rollback(project.mainBranchId, { baseRevisionId: revised.branch.revisionId, revisionId: first.branch.revisionId });
 
     // A legacy snapshot can exist outside the current parent chain. Deletion must inspect all rows owned by each branch.
     const oldBranch = ctx.store.getBranch(fork.branch.id);

@@ -124,7 +124,10 @@ export class StoryEngine {
     });
     queueMicrotask(() => this.pump()); return { view, job: this.publicJob(job) };
   }
-  listJobs(projectId?: string): Job[] { return this.jobsInternal(projectId).map(j => this.publicJob(j)); }
+  listJobs(projectId?: string): Job[] {
+    const visible = new Set(this.store.db.prepare("SELECT id FROM branches WHERE json_extract(data,'$.deletedAt') IS NULL").all().map(row => String(row.id)));
+    return this.jobsInternal(projectId).filter(job => visible.has(job.branchId)).map(j => this.publicJob(j));
+  }
   listWritingActivities(jobId: string): WritingActivity[] {
     const job = this.get(jobId); if (job.kind !== 'generate') throw new HttpError('此任务不是正文生成任务', 400);
     return this.store.listWritingActivities(jobId);
@@ -281,6 +284,7 @@ export class StoryEngine {
     if ((kind === 'generate' || kind === 'import') && unfinished && !rewriting && !startingRpg) throw new HttpError('请先完成上一章资料整理', 409);
     if (kind === 'import' && (!Array.isArray(payload.chapters) || !payload.chapters.length)) throw new HttpError('导入目录为空');
     if (kind === 'generate') {
+      if (payload.branchName !== undefined && (typeof payload.branchName !== 'string' || !payload.branchName.trim() || payload.branchName.trim().length > 200)) throw new HttpError('故事线名称须为 1 至 200 个字符');
       if (!['original', 'continuation', 'fanfiction', 'rewrite', 'rpg'].includes(String(payload.mode))) throw new HttpError('写作模式不正确');
       if (payload.rpg !== undefined && payload.mode !== 'rpg') throw new HttpError('穿越角色设置仅用于 RPG 模式');
       if (state.rpg && payload.mode !== 'rpg') throw new HttpError('RPG 体验线请使用 RPG 模式继续剧情');
@@ -302,13 +306,13 @@ export class StoryEngine {
     this.store.db.exec('BEGIN IMMEDIATE');
     try {
       if (startingRpg) {
-        const fork = this.store.startRpgFork(branchId, branch.revisionId, payload.rpg as GenerateInput['rpg'] & {});
+        const fork = this.store.startRpgFork(branchId, branch.revisionId, payload.rpg as GenerateInput['rpg'] & {}, payload.branchName as string | undefined);
         branch = fork.branch; state = fork.state; smallPayload.rpg = state.rpg;
         smallPayload.sourceBranchId = branchId;
       }
       if (rewriting) {
         const original = this.store.chapter(branchId, String(payload.chapterId));
-        const fork = this.store.forkForGeneration(branchId, branch.revisionId, original.id); branch = fork.branch;
+        const fork = this.store.forkForGeneration(branchId, branch.revisionId, original.id, payload.branchName as string | undefined); branch = fork.branch;
         smallPayload.sourceBranchId = branchId; smallPayload.sourceChapterId = original.id;
         smallPayload.chapterId = undefined; smallPayload.title = payload.title || original.title;
         if (payload.discardBackground) for (const background of backgroundJobs) { background.status = 'cancelled'; background.message = '作者放弃后台整理，已创建重新生成分支'; this.save(background); }
@@ -332,6 +336,7 @@ export class StoryEngine {
   }
   action(jobId: string, action: 'pause' | 'resume' | 'retry' | 'cancel'): Job {
     const job = this.get(jobId);
+    this.store.getBranch(job.branchId);
     if (this.deletingProjects.has(job.projectId)) throw new HttpError('作品正在删除，不能操作任务', 409);
     if (action === 'pause' || action === 'cancel') {
       if (job.status === 'completed' || job.status === 'cancelled' || job.status === 'stale') throw new HttpError('任务已经结束');

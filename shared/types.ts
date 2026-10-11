@@ -21,7 +21,7 @@ export interface StoryState { chapters: ChapterRef[]; entities: Entity[]; relati
 /** Author reference material remains separate from events in the active story. */
 export interface OriginalReferenceData { reference: StoryReference; state: StoryState; chapters: Chapter[]; sources: { sourceId: string; filename: string; chapters: { title: string; text: string }[] }[] }
 export interface Project { id: string; title: string; premise: string; mode: Mode; createdAt: string; updatedAt: string; mainBranchId: string }
-export interface Branch { id: string; projectId: string; name: string; revisionId: string; parentBranchId?: string; forkChapterId?: string; createdAt: string }
+export interface Branch { id: string; projectId: string; name: string; revisionId: string; parentBranchId?: string; forkChapterId?: string; forkChapterTitle?: string; createdAt: string; deletedAt?: string }
 export interface Revision { id: string; branchId: string; parentId?: string; label: string; createdAt: string; chapterCount: number }
 export interface BranchView { branch: Branch; state: StoryState; revisions: Revision[]; /** Reader materials are scoped to this chapter; the chapter directory remains complete. */ readingChapterId?: string }
 export interface Source { id: string; projectId: string; filename: string; format: 'txt' | 'epub'; chapterCount: number; createdAt: string; confirmed: boolean }
@@ -87,7 +87,7 @@ export interface Job { id: string; projectId: string; branchId: string; kind: Jo
 export type ModelActivityEvent = { type: 'thinking'; id: string; text: string } | { type: 'thinking_done'; id: string } | { type: 'tool_call'; id: string; name: string; arguments: Record<string, unknown> } | { type: 'tool_result'; id: string; name: string; result?: unknown; error?: string };
 export interface WritingActivity { id: string; kind: 'thinking' | 'tool'; text?: string; name?: string; arguments?: Record<string, unknown>; result?: unknown; status: 'running' | 'completed' | 'failed'; error?: string; /** UTF-16 offset in author-visible prose when this activity first appeared. */ proseOffset?: number }
 export type WritingEvent = { type: 'snapshot'; text: string; title: string; job: Job; chapterId?: string; activities?: WritingActivity[] } | { type: 'delta'; text: string } | { type: 'activity'; activity: WritingActivity } | { type: 'status'; job: Job; chapterId?: string };
-export interface GenerateInput { baseRevisionId: string; mode: Mode; instruction: string; title?: string; chapterId?: string; selection?: { start: number; end: number }; maxWords?: number; regenerate?: boolean; discardBackground?: boolean; rpg?: RpgSetup }
+export interface GenerateInput { baseRevisionId: string; mode: Mode; instruction: string; title?: string; branchName?: string; chapterId?: string; selection?: { start: number; end: number }; maxWords?: number; regenerate?: boolean; discardBackground?: boolean; rpg?: RpgSetup }
 export interface ExtractionResult {
   summary: string;
   entities: { kind: KnowledgeKind; name: string; aliases: string[]; description: string; visibility: Visibility; isMain?: boolean; nameStatus?: 'placeholder' | 'confirmed'; facts: { text: string; attribute?: string; temporal: Fact['temporal']; certainty: Fact['certainty']; visibility: Visibility; paragraph: number; quote: string }[] }[];

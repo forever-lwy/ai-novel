@@ -68,17 +68,21 @@
 ## 文字与作品接口
 
 - 认证接口见上文“登录与安全边界”，初始密码由服务器环境提供；改密与会话撤销不进入作品备份。
-- GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],sources:Source[]}。GET 默认隐藏 premise（初始作者设定），显式 ?view=author 返回。
+- GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],branchTree:Branch[],sources:Source[]}。GET 默认隐藏 premise（初始作者设定），显式 ?view=author 返回。
 - DELETE /projects/:id（无请求体）-> {ok:true}：永久删除整部作品，包括原文、正文、所有故事线及历史快照、世界资料、剧情规划与伏笔、任务、导入队列、模型输出和搜索索引。先取消该作品未结束的任务、中止模型请求并等待收尾，再在事务中清理数据，迟到结果不能重新写回。删除期间创建、恢复或重试任务返回 409；重复并发删除返回 409，作品不存在或已删除返回 404。沿用 session 和同源校验，无需 baseRevisionId 或作者视图参数；不影响其他作品、登录和供应商设置。原文清理如遇文件占用，会保留在内部待清理目录并在下次服务启动重试。
 - GET /branches/:id?view=author|reader&chapterId= -> BranchView，默认 reader。阅读视图可指定当前故事线中的 `chapterId`，服务端读取截至该章结尾的最新历史快照，恢复当时的人物、物品、名称／别名、归并关系与当前位置；后续出场和资料更新不进入该响应。省略时读取故事线结尾，作者视图忽略进度并返回完整当前状态。读者视图移除 outline/foreshadows/secret 和 future 事实（outline 空对象结构保留），简介与卡片预览优先显示当时的当前状态，过去事实仍保留历史标记。`BranchView.readingChapterId` 标记实际阅读资料进度，`state.chapters` 保留当前故事线的完整目录供切章，摘要清空；`branch.revisionId` 仍为故事线当前版本。进度不属于本线返回 404，缺少匹配当前正文路径的历史快照返回 409，不以最新资料替代，不触发模型调用或修改版本。
 - GET /branches/:id/chapters/:chapterId -> Chapter（只可取该线实际包含的章）。
-- POST /branches/:id/chapters {baseRevisionId,title,text,chapterId?} -> BranchView（保存后 pending，自动整理，没配置模型可保留正文后配置并重试）；改旧章自动另开修订线，返回的 branch 可能不同。
+- POST /branches/:id/chapters {baseRevisionId,title,text,chapterId?} -> BranchView。新建章节保存为 pending 并自动整理，未配置模型也保留正文。携带 `chapterId` 编辑已有章节时，必须显式 `?view=author` 并无未结束文字任务；在原分支新建正文版本，保留后续章节、已有摘要、资料、关系、锁定内容及原整理状态，不创建分支、不排队提取、不请求模型。旧正文不覆盖；受影响章末快照同步更新，阅读与手动分支仍使用一致边界。仅改标题保留正文 ID；正文改变时创建新正文 ID，匹配到的引文更新章节及段号，失效或无法唯一定位的引文解除但保留事实，伏笔和压缩摘要的章节关联同步映射。所编辑章的旧图片引用从当前状态移除，历史及其他线的图片像素保留；RPG 旧章末选择失效。需更新资料时显式使用单章 extract 接口。过期版本返回 409，其他线的章节返回 404，缺少作者视图返回 403。
 - `DELETE /branches/:id/chapters/:chapterId?view=author {baseRevisionId} -> BranchView`：只移除当前故事线的所选章，保留其他正文、原文件、历史和其他线。清理该章摘要、非锁定事实、引用关系和章节图片引用；锁定事实保留并解除被删正文的引用。后续编号、未来规划及伏笔预计章节顺延，被处理章覆盖的压缩摘要移除；删除 RPG 章末选择所属章时移除该选择，作者角色设定保留。
 - `DELETE /branches/:id/chapters/:chapterId/extraction?view=author {baseRevisionId} -> BranchView`：保留正文并清除该章旧提取资料与摘要，保留锁定条目与锁定事实，章节改为 pending，不调用模型。其他章节原有结果保留，相关章末快照同步修正。
 - `POST /branches/:id/chapters/:chapterId/extract?view=author {baseRevisionId} -> {view:BranchView,job:Job}`：在同一事务中清除旧结果、创建 total=1 的单章提取任务。未配置模型时先拒绝，不清除资料。内部 targetChapterId 固定所选章，extractChapterId/blockIndex 保存断点；运行、恢复和本地应用输出都只处理目标章。沿用提取输出模式、证据校验、用量、输出留存、配置的显式自动重试策略及手工修正流程。
 - `DELETE /branches/:id/entities/:entityId?view=author {baseRevisionId} -> BranchView`：删除本线档案、事实、合并别名记录、关联关系与资料图片引用，清理伏笔 relatedEntityIds，保留正文。删除正在扮演的已有角色档案时，玩家设定以原创角色继续保存；重新提取仍可能重新发现该档案。
 - 上述四个接口要求登录、同源、显式作者视图与当前版本。排队、运行、暂停或请求仍在结束时返回 409，需先完成或取消；过期版本或缺少匹配正文路径的历史快照返回 409，非本线条目返回 404，缺少作者视图返回 403。维护与历史章提取新增受影响的章末快照，旧快照和输出不改写；回退恢复旧状态，迟到输出不能写入新版本。单章提取名称索引固定到该章进度，后续别名、伏笔和事实不进入提取上下文；较晚章节的新状态优先于早章重新发现的旧状态。
-- POST /branches/:id/fork {baseRevisionId,chapterId?,name} -> BranchView（不指定chapterId代表当前结尾）。
+- `POST /branches/:id/fork {baseRevisionId,chapterId?,name} -> BranchView`：不指定 `chapterId` 代表当前结尾。名称去首尾空白后为 1–200 个字符。新分支保存实际起点 `forkChapterId` 与可选 `forkChapterTitle`，显示分叉位置；旧记录可只读补充现存章标题，未知起点不推测。
+- `GET /projects/:id` 的 `branches` 仍只包含可用故事线，`branchTree` 增加仍被可用子线依赖的已删祖先，不包含无子线依赖的已删分支。通过 `parentBranchId` 展示树，已删祖先只作不可选择的连接节点；不返回其正文、资料或内部任务。
+- `PUT /branches/:id/name?view=author {baseRevisionId,name} -> Branch`：重命名主线或可用分支。要求登录、同源、显式作者视图和当前版本；过期版本返回 409，已删分支返回 404，空白或超过 200 个字符返回 400。只更新故事线名称与作品更新时间，不新增正文版本、不改变父子关系或中断任务；名称不随正文回退，完整作品备份保留名称。
+- `GenerateInput.branchName?:string`：AI 整章／选段改写、重新生成及首次 RPG 入场自动开分支时使用指定名称，同样须为 1–200 个字符；旧客户端省略时沿用自动名称。UI 开始生成前可编辑这个名称。普通续写及 RPG 后续选择沿当前线继续。
+- `DELETE /branches/:id?view=author {baseRevisionId} -> {ok:true,mainBranchId}`：删除所选非主线分支，客户端切回主线并刷新列表。要求登录、同源、作者视图及当前版本；主线、未结束文字／生图任务或文字请求仍在收尾时返回 409，缺少作者视图返回 403，重复删除或访问已删分支返回 404。逻辑删除以 `Branch.deletedAt` 保存，项目列表与任务列表不显示已删分支，其任务不能继续／重试；正文、版本、输出及图片保留，用于其他线的历史、原作参考和 RPG 章末选择。子分支不随父分支删除，完整备份保留删除状态与依赖，恢复后已删分支仍不可选择，仅在树中保留子线所需的祖先连接；主线被标为删除的备份拒绝恢复。分支删除不改变其他分支的版本，也不能通过正文回退撤销。
 - POST /branches/:id/rollback {baseRevisionId,revisionId} -> BranchView。
 - 作者视图的 `state.chapters[].summary` 为导入或整理正文时同时提取的已发生剧情摘要，片段摘要按处理顺序累积；与 `state.outline.fine` 的预期规划分开；不再生成或使用 coarse。回退和旧章节分支读取该边界的整份快照，摘要、伏笔状态与人物位置事实一起恢复。读者视图及章节正文接口继续隐藏摘要。
 - `state.foreshadows` 保留历史状态，界面默认只显示 `planned/planted`。`resolved/abandoned` 不进入后续待处理伏笔上下文，模型再次提及同名线索不会自动重新打开；作者仍可在历史入口手工查看与修正。
