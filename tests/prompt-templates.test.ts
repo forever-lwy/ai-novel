@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { PromptBlock, PromptTask } from '../shared/types.js';
-import { activePromptPreset, BASE_SYSTEM, COMPRESSION_SYSTEM, compilePrompt, compileTaskPrompt, defaultPromptTemplates, EXTRACT_SYSTEM, normalizePromptTemplates, PLAN_SYSTEM, WRITING_SYSTEM, promptPresetVariables, promptTasks, validatePromptTemplates } from '../shared/prompt-templates.js';
+import { activePromptPreset, BASE_SYSTEM, COMPRESSION_SYSTEM, compilePrompt, compileTaskPrompt, defaultPromptTemplates, EXTRACT_SYSTEM, normalizePromptTemplates, WRITING_SYSTEM, promptPresetVariables, promptTasks, validatePromptTemplates } from '../shared/prompt-templates.js';
 import { legacyPromptTemplates } from '../shared/legacy-prompt-templates.js';
+import { previousPromptTemplates } from '../shared/previous-prompt-templates.js';
 import { STRUCTURED_OUTPUT_INSTRUCTION } from '../shared/prompt-runtime.js';
 
 const variables = {
@@ -11,33 +12,71 @@ const variables = {
 const messageBlock = (id: string, role: PromptBlock['role'], content: string): PromptBlock => ({ id, name: id, role, content, enabled: true });
 
 describe('editable task prompt templates', () => {
-  it('provides independent Markdown defaults and uses single-turn extraction and compression', () => {
+  it('inserts task messages at the general slot with separate variable scopes, and supports opting out', () => {
+    const settings = defaultPromptTemplates();
+    settings.general!.presets[0].variables = { style: '通用 {{instruction}}' };
+    settings.general!.presets[0].blocks = [messageBlock('prefix', 'system', '前置 {{style}}'), { ...messageBlock('slot', 'system', ''), slot: 'task' }, messageBlock('suffix', 'system', '后置约束')];
+    settings.presets.writing[0].variables = { style: '本任务风格' };
+    settings.presets.writing[0].blocks = [messageBlock('input', 'user', '{{style}} {{context}}')];
+    expect(compilePrompt(settings, 'writing', { context: '原文 {{style}}' }).messages).toEqual([
+      { role: 'system', content: '前置 通用 {{instruction}}' }, { role: 'user', content: '本任务风格 原文 {{style}}' }, { role: 'system', content: '后置约束' },
+    ]);
+    settings.presets.writing[0].useGeneral = false;
+    expect(compilePrompt(settings, 'writing', { context: '上下文' }).messages).toEqual([{ role: 'user', content: '本任务风格 上下文' }]);
+  });
+
+  it('preserves edited old compiled prompts and upgrades only untouched prior defaults', () => {
+    const old = structuredClone(previousPromptTemplates);
+    old.presets.writing[0].blocks[0].content += '\n作者自己的规则';
+    const expected = old.presets.writing[0].blocks.map(block => ({ role: block.role, content: block.content.replace(/\{\{([^{}]*)\}\}/g, (_match, key: string) => String(variables[key as keyof typeof variables] ?? '')) })).filter(message => message.content.trim());
+    expect(compilePrompt(old, 'writing', variables).messages).toEqual(expected);
+    const normalized = normalizePromptTemplates(old);
+    expect(normalized.presets.writing[0].useGeneral).toBe(false);
+    expect(normalized.presets.compression[0]).toEqual(defaultPromptTemplates().presets.compression[0]);
+    expect(normalizePromptTemplates(normalized)).toEqual(normalized);
+  });
+
+  it('requires exactly one general slot, checks references and confines transport to writing', () => {
+    const settings = defaultPromptTemplates();
+    settings.general!.presets[0].blocks.push({ ...messageBlock('extra-slot', 'system', ''), slot: 'task' });
+    expect(() => validatePromptTemplates(settings)).toThrow('任务插槽'); settings.general!.presets[0].blocks.pop();
+    settings.presets.writing[0].generalPresetId = 'missing'; expect(() => validatePromptTemplates(settings)).toThrow('通用预设不存在'); delete settings.presets.writing[0].generalPresetId;
+    settings.presets.extraction[0].writingOutputMode = 'tool'; expect(() => validatePromptTemplates(settings)).toThrow('正文输出通道'); delete settings.presets.extraction[0].writingOutputMode;
+    settings.presets.writing[0].writingOutputMode = 'tool';
+    const request = compileTaskPrompt(settings, 'writing', variables);
+    expect(request.writingOutputMode).toBe('tool'); expect(request.runtimeBlocks).toContainEqual(expect.objectContaining({ name: '正文工具通道规则' }));
+    const withAction = compileTaskPrompt(settings, 'writing', { ...variables, mode: 'rpg' }, { chapterAnswer: '前往码头' });
+    expect(withAction.messages.filter(message => message.role !== 'system').map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user']);
+    expect([...withAction.messages].reverse().find(message => message.role === 'user')?.content).toContain('前往码头');
+    expect(compileTaskPrompt(settings, 'extraction', variables).system).not.toContain('正文工具通道');
+  });
+  it('provides independent Markdown defaults and keeps each extraction/compression input together', () => {
     const first = normalizePromptTemplates(); const second = normalizePromptTemplates();
     first.presets.writing[0].blocks[0].content = 'changed';
-    expect(second.presets.writing[0].blocks[0].content).toBe(BASE_SYSTEM);
+    expect(second.presets.writing[0].blocks[0].content).toBe(WRITING_SYSTEM);
     const requests = Object.fromEntries(promptTasks.map(task => [task, compilePrompt(undefined, task, variables)]));
-    expect(requests.writing.system).toBe(`${BASE_SYSTEM}\n${WRITING_SYSTEM}`);
+    expect(requests.writing.system).toContain(BASE_SYSTEM);
+    expect(requests.writing.system).toContain(WRITING_SYSTEM);
+    expect(requests.writing.system).toContain('# 小说正文写作');
     expect(requests.writing.prompt).toContain('## 作者要求\n继续灯塔剧情');
-    expect(requests.planning.system).toBe(PLAN_SYSTEM);
-    expect(requests.planning.prompt).toContain('第 3 章至第 6 章');
-    expect(requests.extraction.system).toBe(EXTRACT_SYSTEM);
+    expect(requests.extraction.system).toContain(EXTRACT_SYSTEM.replace(`${BASE_SYSTEM}\n\n`, ''));
     expect(requests.extraction.prompt).toContain('## 编号原文\n[1] 林舟走进灯塔。');
-    expect(requests.compression).toMatchObject({ system: COMPRESSION_SYSTEM, prompt: expect.stringContaining(variables.summaryText) });
+    expect(requests.compression).toMatchObject({ system: expect.stringContaining(COMPRESSION_SYSTEM.replace(`${BASE_SYSTEM}\n\n`, '')), prompt: expect.stringContaining(variables.summaryText) });
     for (const task of promptTasks) for (const mode of ['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']) {
       const dialogue = compileTaskPrompt(undefined, task, { ...variables, mode }).messages.filter(message => message.role !== 'system');
-      expect(dialogue.map(message => message.role)).toEqual(task === 'compression' || task === 'extraction' ? ['user'] : ['user', 'assistant', 'user']);
-      expect(dialogue[0].content).toMatch(/^# /);
+      expect(dialogue.map(message => message.role)).toEqual(task === 'compression' || task === 'extraction' ? ['user', 'assistant', 'user'] : ['user', 'assistant', 'user', 'assistant', 'user']);
+      expect(dialogue[0].content).toBe(second.general!.presets[0].blocks.find(value=>value.feature==='snow')!.content);
       if (task === 'extraction') {
-        expect(dialogue[0].content).toContain(variables.context);
-        expect(dialogue[0].content).toContain(`## 编号原文\n${variables.blockText}`);
-        expect(dialogue[0].content).not.toContain('已收到索引');
+        expect(dialogue[2].content).toContain(variables.context);
+        expect(dialogue[2].content).toContain(`## 编号原文\n${variables.blockText}`);
+        expect(dialogue[2].content).not.toContain('已收到索引');
       }
     }
     expect(validatePromptTemplates(second)).toEqual(second);
   });
 
   it.each([false, true])('upgrades untouched acknowledged extraction with editor IDs=%s while preserving edits and copies', editorIds => {
-    const settings = defaultPromptTemplates();
+    const settings = structuredClone(previousPromptTemplates);
     const old = structuredClone(settings.presets.extraction[0]);
     old.blocks.splice(2, 0, { id: 'context-ack', name: '证据边界确认', role: 'assistant', enabled: true, content: '已收到索引。新资料只依据接下来提供的编号片段；无法确认的身份、属性和关系不补造，每条事实与关系都核对本片段证据。' });
     if (editorIds) old.blocks.forEach((value, index) => { value.id = `editor-${index}`; });
@@ -47,50 +86,47 @@ describe('editable task prompt templates', () => {
     const before = structuredClone(settings);
     const normalized = normalizePromptTemplates(settings);
     expect(settings).toEqual(before);
-    expect(normalized.presets.extraction[0]).toEqual({ ...old, blocks: old.blocks.filter((_value, index) => index !== 2) });
-    expect(normalized.presets.extraction.slice(1)).toEqual([edited, copy]);
+    expect(normalized.presets.extraction[0]).toEqual(defaultPromptTemplates().presets.extraction[0]);
+    expect(normalized.presets.extraction.slice(1)).toEqual([edited, copy].map(value => ({ ...value, useGeneral: false })));
     expect(normalized.selected.extraction).toBe('copy');
     expect(normalizePromptTemplates(normalized)).toEqual(normalized);
     const customizedDefault = structuredClone(before);
     customizedDefault.presets.extraction[0].blocks[0].content += '\n作者的证据要求';
-    expect(normalizePromptTemplates(customizedDefault)).toEqual(customizedDefault);
+    expect(normalizePromptTemplates(customizedDefault).presets.extraction[0]).toEqual({ ...customizedDefault.presets.extraction[0], useGeneral: false });
   });
 
   it('upgrades only untouched legacy presets and leaves author changes and input data intact', () => {
     const legacy = structuredClone(legacyPromptTemplates);
     legacy.presets.writing[0].blocks[0].content += '\n保留我的文风';
-    legacy.presets.planning.push({ ...structuredClone(legacy.presets.planning[0]), id: 'copy', name: '我的副本' });
-    legacy.selected.planning = 'copy';
+    legacy.presets.compression.push({ ...structuredClone(legacy.presets.compression[0]), id: 'copy', name: '我的副本' });
+    legacy.selected.compression = 'copy';
     const before = structuredClone(legacy);
     const upgraded = normalizePromptTemplates(legacy);
     expect(legacy).toEqual(before);
-    expect(upgraded.presets.writing).toEqual(before.presets.writing);
-    expect(upgraded.presets.planning[1]).toEqual(before.presets.planning[1]);
-    expect(upgraded.selected.planning).toBe('copy');
-    for (const task of ['extraction', 'compression', 'planning'] as const) expect(upgraded.presets[task][0]).toEqual(defaultPromptTemplates().presets[task][0]);
+    expect(upgraded.presets.writing).toEqual(before.presets.writing.map(value => ({ ...value, useGeneral: false })));
+    expect(upgraded.presets.compression[1]).toEqual({ ...before.presets.compression[1], useGeneral: false });
+    expect(upgraded.selected.compression).toBe('copy');
+    for (const task of ['extraction', 'compression'] as const) expect(upgraded.presets[task][0]).toEqual(defaultPromptTemplates().presets[task][0]);
     expect(normalizePromptTemplates(upgraded)).toEqual(upgraded);
   });
 
   it('combines adjacent dialogue after mode filtering and includes conditional rules in the final assembly', () => {
-    const settings = defaultPromptTemplates();
+    const settings = defaultPromptTemplates(); settings.presets.writing[0].useGeneral = false;
     settings.presets.writing[0].blocks = [messageBlock('a', 'user', '{{context}}'), { ...messageBlock('skip', 'assistant', '未启用'), enabled: false }, messageBlock('b', 'user', '{{instruction}}')];
     const request = compileTaskPrompt(settings, 'writing', { ...variables, mode: 'rpg' }, { rpg: { character: { kind: 'original', name: '林舟', description: '信使' }, entryInstruction: '来到码头' }, chapterAnswer: '选择登船', illustrations: { portrait: true, cg: false } });
     expect(request.messages.filter(message => message.role === 'user')).toHaveLength(1);
-    expect(request.messages.at(-1)?.content).toContain('选择登船');
+    expect([...request.messages].reverse().find(message => message.role === 'user')?.content).toContain('选择登船');
     expect(request.system).toContain('必须调用 ask_user');
     expect(request.system).toContain('generate_character_portrait');
     expect(request.system).not.toContain('generate_scene_cg');
     expect(request.messages).not.toContainEqual(expect.objectContaining({ content: '未启用' }));
     expect(settings.presets.writing[0].blocks[0].content).toBe('{{context}}');
-    const toolPlan = compileTaskPrompt(undefined, 'planning', variables, { planningMode: 'tool' });
-    expect(toolPlan.system).toContain('最终文本或 JSON 都不能替代工具调用');
-    expect(toolPlan.system).not.toContain(STRUCTURED_OUTPUT_INSTRUCTION);
     expect(compileTaskPrompt(undefined, 'extraction', variables).system).toContain(STRUCTURED_OUTPUT_INSTRUCTION);
   });
 
   it('uses the selected preset and retains order, message roles and enabled blocks without recursive substitution', () => {
     const settings = defaultPromptTemplates();
-    settings.presets.writing.push({ id: 'custom', name: '自由编排', variables: { style: '简洁 {{instruction}}' }, blocks: [
+    settings.presets.writing.push({ id: 'custom', name: '自由编排', useGeneral: false, variables: { style: '简洁 {{instruction}}' }, blocks: [
       messageBlock('request', 'user', '{{ style }}：{{instruction}}'),
       messageBlock('example', 'assistant', '示例正文'),
       messageBlock('late-system', 'system', '后置系统约定'),
@@ -114,7 +150,7 @@ describe('editable task prompt templates', () => {
   });
 
   it('filters writing mode conditions and requires user messages for every supported mode', () => {
-    const settings = defaultPromptTemplates();
+    const settings = defaultPromptTemplates(); settings.presets.writing[0].useGeneral = false;
     settings.presets.writing[0].blocks = [
       { ...messageBlock('ordinary', 'user', '创作 {{mode}}'), modes: ['original', 'continuation', 'fanfiction'] },
       { ...messageBlock('rewrite', 'user', '改写 {{sourceText}}'), modes: ['rewrite'] },
@@ -125,12 +161,12 @@ describe('editable task prompt templates', () => {
     expect(() => validatePromptTemplates(settings)).toThrow('rewrite');
     settings.presets.writing[0].blocks[0].modes = [];
     expect(() => validatePromptTemplates(settings)).not.toThrow();
-    settings.presets.planning[0].blocks[0].modes = ['original'];
+    settings.presets.extraction[0].blocks[0].modes = ['original'];
     expect(() => validatePromptTemplates(settings)).toThrow('只适用于正文写作');
   });
 
   it('preserves older mode-limited presets for RPG and accepts explicit RPG blocks', () => {
-    const settings = defaultPromptTemplates();
+    const settings = defaultPromptTemplates(); settings.presets.writing[0].useGeneral = false;
     const blocks = settings.presets.writing[0].blocks = [
       { ...messageBlock('old', 'user', '保留原要求，模式 {{mode}}'), modes: ['original', 'continuation', 'fanfiction', 'rewrite'] },
     ];
@@ -144,7 +180,7 @@ describe('editable task prompt templates', () => {
     expect(() => validatePromptTemplates(settings)).toThrow('rpg');
   });
 
-  it.each<PromptTask>(['writing', 'planning', 'extraction', 'compression'])('rejects duplicate blocks, presets, missing selections and unavailable variables for %s', task => {
+  it.each<PromptTask>(['writing', 'extraction', 'compression'])('rejects duplicate blocks, presets, missing selections and unavailable variables for %s', task => {
     const settings = defaultPromptTemplates();
     settings.presets[task][0].blocks.push({ ...settings.presets[task][0].blocks[0] });
     expect(() => validatePromptTemplates(settings)).toThrow('提示词块标识不能重复');
@@ -183,7 +219,7 @@ describe('editable task prompt templates', () => {
   it('formats validation issues around task, preset and block names and limits displayed errors', () => {
     const settings = defaultPromptTemplates();
     settings.presets.writing[0].blocks[0].content = '{{missing1}} {{missing2}} {{missing3}} {{missing4}}';
-    expect(() => validatePromptTemplates(settings)).toThrow('正文写作 · 默认正文写作 · 基本创作约定');
+    expect(() => validatePromptTemplates(settings)).toThrow('正文写作 · 默认正文写作 · 文笔、逻辑与文风');
     expect(() => validatePromptTemplates(settings)).toThrow('另有 1 处需要修改');
     expect(() => validatePromptTemplates({ ...defaultPromptTemplates(), unexpected: true })).toThrow('包含不支持的字段：unexpected');
   });

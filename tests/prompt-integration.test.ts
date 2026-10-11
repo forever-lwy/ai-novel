@@ -40,7 +40,7 @@ it('migrates old settings, persists editable presets and preserves them when an 
   for (const mutate of [
     (value: Settings) => { value.promptTemplates!.selected.writing = 'missing'; },
     (value: Settings) => { value.promptTemplates!.presets.extraction[0].blocks[0].content = '{{missing_variable}}'; },
-    (value: Settings) => { value.promptTemplates!.presets.planning[0].blocks.forEach(block => { block.enabled = false; }); },
+    (value: Settings) => { value.promptTemplates!.presets.compression[0].blocks.forEach(block => { block.enabled = false; }); },
   ]) {
     const invalid = structuredClone(settings); mutate(invalid);
     expect((await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies, payload: invalid })).statusCode).toBe(400);
@@ -50,9 +50,9 @@ it('migrates old settings, persists editable presets and preserves them when an 
   expect(reopened.get().promptTemplates).toEqual(settings.promptTemplates);
 });
 
-it('uses the selected message blocks and story variables for writing, planning and background extraction', async () => {
+it('uses the selected message blocks and story variables for writing and background extraction', async () => {
   const settings = config(); const templates = settings.promptTemplates!;
-  for (const task of ['writing', 'planning', 'extraction'] as const) {
+  for (const task of ['writing', 'extraction'] as const) {
     templates.presets[task][0].blocks = [
       { id: 'rule', name: '作者规则', role: 'system', enabled: true, content: `${task} {{projectTitle}}` },
       { id: 'example', name: '示例', role: 'assistant', enabled: true, content: '预设示例' },
@@ -73,21 +73,21 @@ it('uses the selected message blocks and story variables for writing, planning a
   const saved = store.saveChapter(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, title: '已有开场', text: '旅人离开村庄。' });
   store.applyExtraction(project.mainBranchId, saved.branch.revisionId, saved.state.chapters[0].id, { summary: '旅人离开村庄。', entities: [], relations: [], foreshadows: [] }, true);
   const engine = new StoryEngine(store, () => settings, models); engines.push(engine); engine.start();
-  const plan = engine.enqueue(project.mainBranchId, 'plan', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, instruction: '安排相遇' });
-  expect((await terminal(engine, plan.id)).status).toBe('completed');
   const writing = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, instruction: '写旅人', mode: 'original' });
   expect((await terminal(engine, writing.id)).status).toBe('completed');
   const extraction = engine.listJobs().find(value => value.kind === 'extract')!;
   expect((await terminal(engine, extraction.id)).status).toBe('completed');
-  for (const [index, task] of ['planning', 'writing', 'extraction'].entries()) expect(calls[index].messages).toContainEqual({ role: 'system', content: `${task} 模板作品` });
-  expect(calls[1].messages).toContainEqual({ role: 'system', content: expect.stringContaining('当前阶段只生成正文') });
-  expect(calls[1].messages!.slice(-3)).toEqual([{ role: 'system', content: 'writing 模板作品' }, { role: 'assistant', content: '预设示例' }, { role: 'user', content: '古城长夜\n写旅人\n2' }]);
-  expect(calls[2].prompt).toContain('[1] 旅人来到桥边。');
-  expect(calls[0].messages![0].role).toBe('system');
+  for (const [index, task] of ['writing', 'extraction'].entries()) expect(calls[index].messages).toContainEqual({ role: 'system', content: `${task} 模板作品` });
+  expect(calls[0].messages).toContainEqual({ role: 'system', content: expect.stringContaining('当前阶段只生成本章正文') });
+  expect(calls[0].messages!.filter(message => ['writing 模板作品', '预设示例', '古城长夜\n写旅人\n2'].includes(message.content))).toEqual([{ role: 'system', content: 'writing 模板作品' }, { role: 'user', content: '古城长夜\n写旅人\n2' }]);
+  expect(calls[0].messages).toContainEqual({ role: 'assistant', content: expect.stringContaining('预设示例') });
+  expect(calls[1].prompt).toContain('[1] 旅人来到桥边。');
+  expect(calls[0].messages![0].role).toBe('user');
+  expect(calls[0].messages![1].content).toContain('[START A NEW CHAT]');
   const chapter = store.state(project.mainBranchId).chapters.at(-1)!;
   for (const protocol of ['openai-chat', 'openai-responses', 'gemini', 'claude'] as ProviderProtocol[]) {
-    for (const [index, task] of (['planning', 'writing', 'extraction'] as const).entries()) {
-      const preview = engine.previewPrompt({ task, templates, protocol, runtime: {}, variables: { projectTitle: '模板作品', worldview: '古城长夜', instruction: task === 'planning' ? '安排相遇' : '写旅人', chapterNumber: '2', chapterTitle: chapter.title, blockText: '[1] 旅人来到桥边。' } });
+    for (const [index, task] of (['writing', 'extraction'] as const).entries()) {
+      const preview = engine.previewPrompt({ task, templates, protocol, runtime: {}, variables: { projectTitle: '模板作品', worldview: '古城长夜', instruction: '写旅人', chapterNumber: '2', chapterTitle: chapter.title, blockText: '[1] 旅人来到桥边。' } });
       const actual = JSON.parse(buildRequestSnapshot({ id: 'preview', name: '预览', protocol, baseUrl: 'https://preview.invalid', model: 'preview-model', maxOutputTokens: 4096, contextTokens: 2000000 }, { ...calls[index], maxOutputTokens: 4096, onTextDelta: undefined, onActivity: undefined }).body);
       expect(JSON.parse(preview.body)).toEqual(actual);
     }
@@ -96,6 +96,7 @@ it('uses the selected message blocks and story variables for writing, planning a
 
 it('sizes compression segments using edited overhead and every occurrence of the summary variable', async () => {
   const settings = config(); settings.providers[0].contextTokens = 2048;
+  settings.promptTemplates!.presets.compression[0].useGeneral = false;
   settings.promptTemplates!.presets.compression[0].blocks = [
     { id: 'rule', name: '压缩规则', role: 'system', enabled: true, content: '保留已发生事件。'.repeat(35) },
     { id: 'input', name: '摘要', role: 'user', enabled: true, content: '{{summaryText}}\n对照副本：{{summaryText}}' },

@@ -229,7 +229,7 @@ describe('durable writing and extraction jobs (simulated models)', () => {
     const mock = models(undefined, async () => { started = true; return delayed.promise; }); const engine = engineFor(store, mock);
     const job = engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '开始' });
     await until(() => started, Boolean);
-    expect(() => engine.enqueue(p.mainBranchId, 'plan', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId })).toThrow('已有');
+    expect(() => engine.enqueue(p.mainBranchId, 'plan', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, purpose: 'compress-summary' })).toThrow('已有');
     const revision = store.getBranch(p.mainBranchId).revisionId; engine.action(job.id, 'cancel'); delayed.resolve('迟到正文'); await new Promise(r => setTimeout(r, 30));
     expect(jobState(engine, job.id).status).toBe('cancelled'); expect(store.state(p.mainBranchId).chapters).toHaveLength(0); expect(store.getBranch(p.mainBranchId).revisionId).toBe(revision);
   });

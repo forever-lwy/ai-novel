@@ -8,6 +8,8 @@ import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextE
 import { chapterBudgetInstruction, chapterBudgetReached } from '../shared/rpg-chapter.js';
 import { STRUCTURED_OUTPUT_INSTRUCTION } from '../shared/prompt-runtime.js';
 import { EXTRACTION_SUBMISSION_NAME, EXTRACTION_TOOL_INSTRUCTION } from '../shared/extraction-output.js';
+import { partialWritingProse, unpackWritingResponse, writingResponseTool, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
+import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
 export { validateProviderOptions } from './provider-options.js';
 
 export const MODEL_TIMEOUT_MS = DEFAULT_MODEL_TIMEOUT_MS;
@@ -198,10 +200,14 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
   const options = providerWireOptions(config);
   const stream = Boolean(request.onTextDelta) || (config.stream ?? false);
   const output = request.structuredOutput;
+  const writingTool = request.writingOutputMode === 'tool';
+  if (writingTool && output) throw new Error('正文工具通道不能与资料结构化输出同时使用。');
   if (output && (request.tools?.length || request.continuation)) throw new Error('资料输出模式不能与检索工具或多轮续接同时使用。');
   const submission = output?.mode === 'tool' ? output : undefined;
   const schema = output?.mode === 'json_schema' ? output.schema : undefined;
-  const tools = submission ? [{ name: submission.name, description: submission.description, parameters: submission.schema }] : request.tools ?? [];
+  const writingSubmission = writingTool ? writingResponseTool(request.tools ?? []) : undefined;
+  const forced = submission ?? writingSubmission;
+  const tools = submission ? [{ name: submission.name, description: submission.description, parameters: submission.schema }] : writingSubmission ? [writingSubmission] : request.tools ?? [];
   const messages = request.messages?.length ? request.messages : undefined;
   const system = messages ? messages.filter(message => message.role === 'system').map(message => message.content).join('\n\n') : request.system;
   if (stream) headers.Accept = 'text/event-stream';
@@ -213,7 +219,7 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
         ...(tools.length ? { tools: tools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })) } : {}),
         [config.openaiMaxTokensField ?? 'max_tokens']: tokens, stream, ...(stream ? { stream_options: { include_usage: true } } : {}), ...options,
         ...(schema ? { response_format: { type: 'json_schema', json_schema: { name: output!.name, strict: true, schema } } } : {}),
-        ...(submission ? { tool_choice: { type: 'function', function: { name: submission.name } }, parallel_tool_calls: false } : {}),
+        ...(forced ? { tool_choice: { type: 'function', function: { name: forced.name } }, parallel_tool_calls: false } : {}),
       } };
     case 'openai-responses':
       if (key) headers.Authorization = `Bearer ${key}`;
@@ -221,7 +227,7 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
         model: config.model, ...(messages ? { input: messages.map(message => ({ ...message })) } : { instructions: request.system, input: request.prompt }), max_output_tokens: tokens, stream, store: false, ...options,
         ...(tools.length ? { tools: tools.map(tool => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters, strict: false })) } : {}),
         ...(schema ? { text: { format: { type: 'json_schema', name: output!.name, strict: true, schema } } } : {}),
-        ...(submission ? { tool_choice: { type: 'function', name: submission.name }, parallel_tool_calls: false } : {}),
+        ...(forced ? { tool_choice: { type: 'function', name: forced.name }, parallel_tool_calls: false } : {}),
       } };
     case 'gemini':
       if (key) headers['x-goog-api-key'] = key;
@@ -231,8 +237,8 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
         ...(!messages || system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
         contents: messages ? messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'model' : 'user', parts: [{ text: message.content }] })) : [{ role: 'user', parts: [{ text: request.prompt }] }],
         generationConfig: { maxOutputTokens: tokens, ...options, ...(schema ? { responseMimeType: 'application/json', responseJsonSchema: schema } : {}) },
-        ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, [submission ? 'parametersJsonSchema' : 'parameters']: tool.parameters })) }] } : {}),
-        ...(submission ? { toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [submission.name] } } } : {}),
+        ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, [forced ? 'parametersJsonSchema' : 'parameters']: tool.parameters })) }] } : {}),
+        ...(forced ? { toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [forced.name] } } } : {}),
       } };
     case 'claude':
       if (key) headers['x-api-key'] = key;
@@ -243,7 +249,7 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
         ...(schema ? { output_config: { ...(object(options.output_config) ? options.output_config : {}), format: { type: 'json_schema', schema } } } : {}),
         // Auto preserves thinking and supports models that reject forced tool choice.
         // The submission instruction and response validation still require exactly one call.
-        ...(submission ? { tool_choice: { type: 'auto', disable_parallel_tool_use: true } } : {}),
+        ...(forced ? { tool_choice: { type: 'auto', disable_parallel_tool_use: true } } : {}),
       } };
     default: throw new Error('不支持的模型接口协议。');
   }
@@ -320,7 +326,7 @@ export function buildRequestSnapshot(config: ProviderConfig, request: ModelReque
   return requestSnapshot(config, continuationWire(config, request));
 }
 
-async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void, onContent?: () => void): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
+async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void, onContent?: () => void, writingTool = false): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
   if (!response.body) return { raw: '', bytes: 0, incomplete: false };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -328,7 +334,7 @@ async function readBody(response: Response, config: ProviderConfig, onTextDelta?
   const detector = createStreamEndDetector(config.protocol);
   const decoder = new TextDecoder();
   const redactor = createSecretStreamRedactor(config.apiKey ? [config.apiKey] : [], text => onTextDelta?.(text));
-  const emit = createStreamTextEmitter(config.protocol, text => redactor.feed(text));
+  const emit = createStreamTextEmitter(config.protocol, text => redactor.feed(text), writingTool);
   const activities = createStreamActivityEmitter(config.protocol, event => onActivity?.(event));
   let pendingFrames = '';
   const dispatchFrames = (decoded: string) => {
@@ -397,6 +403,9 @@ function inspectBody(config: ProviderConfig, response: Response | undefined, bod
 
 /** A single billable request. Failures never trigger automatic retries. */
 async function sendModelRequest(config: ProviderConfig, request: ModelRequest, wire: ReturnType<typeof requestBody>): Promise<{ data: JsonObject; result: ModelResult }> {
+  const clean = (text: string) => request.textFilter === 'dramatron' ? cleanDramatronText(text) : text;
+  const textFilter = request.textFilter === 'dramatron' ? createDramatronTextFilter() : undefined;
+  const emitText = request.onTextDelta ? (text: string) => { const visible = textFilter ? textFilter.feed(text) : text; if (visible) request.onTextDelta!(visible); } : undefined;
   const snapshot = requestSnapshot(config, wire);
   const started = Date.now();
   const controller = new AbortController();
@@ -412,6 +421,14 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
   const capture = () => {
     const inspection = inspectBody(config, response, received);
     if (inspection.data && request.structuredOutput?.mode === 'tool') inspection.text = submissionText(config.protocol, inspection.data, request.structuredOutput.name) ?? inspection.text;
+    if (inspection.data && request.writingOutputMode === 'tool') {
+      const calls = responseToolCalls(config.protocol, inspection.data);
+      if (calls.length === 1 && calls[0].name === WRITING_RESPONSE_NAME) {
+        const carrier = partialWritingProse(typeof calls[0].arguments === 'string' ? calls[0].arguments : JSON.stringify(calls[0].arguments) ?? '');
+        if (carrier.length >= inspection.text.length) inspection.text = carrier;
+      }
+    }
+    inspection.text = clean(inspection.text);
     capturedTokens = inspection.tokens;
     if (captured) return inspection;
     captured = true;
@@ -465,10 +482,10 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
       throw new Error('无法连接模型服务，请检查服务地址、网络和接口配置。');
     }
     streamingResponse ||= Boolean(response.headers.get('content-type')?.includes('text/event-stream'));
-    received = await readBody(response, { ...config, stream: snapshot.stream }, response.ok ? request.onTextDelta : undefined, response.ok ? request.onActivity : undefined, streamingResponse ? () => {
+    received = await readBody(response, { ...config, stream: snapshot.stream }, response.ok ? emitText : undefined, response.ok ? request.onActivity : undefined, streamingResponse ? () => {
       receivedContent = true;
       if (!controller.signal.aborted) timer.refresh();
-    } : undefined);
+    } : undefined, request.writingOutputMode === 'tool');
     transport = request.signal?.aborted ? 'cancelled' : timedOut ? 'timeout' : received.error === 'read' ? 'interrupted' : 'http';
     const { data, tokens, streamError } = capture();
     if (data && response.ok && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) emitResponseActivities(config.protocol, data, event => request.onActivity?.(event));
@@ -493,16 +510,21 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
         else if (config.protocol === 'gemini') check.candidates[0].content.parts.push({ text: '工具调用' });
         else { check.stop_reason = check.stop_reason === 'tool_use' ? 'end_turn' : check.stop_reason; check.content.push({ type: 'text', text: '工具调用' }); }
         parseResult(config.protocol, check);
-        const text = redactPayload(responseText(config.protocol, data), config.apiKey);
+        const plain = responseText(config.protocol, data);
+        const carrier = request.writingOutputMode === 'tool' ? unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name), Boolean(clean(plain).trim())).prose : plain;
+        const text = clean(redactPayload(request.writingOutputMode === 'tool' && plain.length > carrier.length ? plain : carrier, config.apiKey));
+        if (!text.trim() && request.writingOutputMode === 'tool' && !unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name)).calls.length) throw new Error('清理辅助标签后没有正文或工具调用，已保留原始响应。');
         // A compatible gateway may also answer a tool turn with ordinary JSON;
         // keep any visible prose available before the continuation can fail.
-        if (text && request.onTextDelta && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) request.onTextDelta(text);
+        if (text && emitText && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) emitText(text);
         return { data, result: { text, ...responseUsage(config.protocol, data) } };
       }
       const result = parseResult(config.protocol, data);
+      const text = clean(redactPayload(result.text, config.apiKey));
+      if (!text.trim()) throw new Error('清理辅助标签后没有正文或任务结果，已保留原始响应。');
       // Some compatible gateways answer a streaming request with ordinary JSON.
-      if (request.onTextDelta && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) request.onTextDelta(redactPayload(result.text, config.apiKey));
-      return { data, result: { ...result, text: redactPayload(responseText(config.protocol, data), config.apiKey) } };
+      if (emitText && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) emitText(text);
+      return { data, result: { ...result, text } };
     }
     catch (error) {
       const message = error instanceof TypeError ? '模型响应结构不完整，请检查模型和接口协议是否匹配。' : (error as Error).message;
@@ -520,6 +542,7 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     if (error instanceof TypeError) throw new Error('读取模型响应失败，请检查网络连接后手动重试。');
     throw error;
   } finally {
+    const tail = textFilter?.finish(); if (tail) request.onTextDelta?.(tail);
     clearTimeout(timer);
     request.signal?.removeEventListener('abort', abort);
   }
@@ -621,6 +644,8 @@ function activityEmitter(config: ProviderConfig, request: ModelRequest, round: n
 
 /** Explicit tool continuations are new turns; failed billable requests are never retried. */
 export async function generateText(config: ProviderConfig, request: ModelRequest): Promise<ModelResult> {
+  // A saved RPG conversation keeps its original transport even after preset edits.
+  if (request.continuation) request = { ...request, writingOutputMode: request.continuation.writingOutputMode ?? 'text', textFilter: request.continuation.textFilter };
   const wire = continuationWire(config, request);
   const body = wire.body as JsonObject;
   const tools = request.tools ?? [];
@@ -635,14 +660,14 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
   const complete = (): ModelResult => ({ text: text.trim(), ...tokens, ...(usageEstimated ? { usageEstimated: true } : {}) });
   const chapterComplete = () => Boolean(request.chapterBudget && chapterBudgetReached(text, request.chapterBudget.targetWords));
   const checkpoint = async () => {
-    if (request.onContinuation) await request.onContinuation(structuredClone({ protocol: config.protocol, model: config.model, body, text, ...tokens, round, callCount, ...(usageEstimated ? { usageEstimated: true } : {}), ...(pending ? { pending } : {}) } satisfies ModelToolContinuation));
+    if (request.onContinuation) await request.onContinuation(structuredClone({ protocol: config.protocol, model: config.model, body, text, ...tokens, round, callCount, ...(request.writingOutputMode ? { writingOutputMode: request.writingOutputMode } : {}), ...(request.textFilter ? { textFilter: request.textFilter } : {}), ...(usageEstimated ? { usageEstimated: true } : {}), ...(pending ? { pending } : {}) } satisfies ModelToolContinuation));
   };
   try {
     while (round < maxRounds || pending) {
       if (request.signal?.aborted) throw new Error('模型请求已取消。');
       if (!pending) {
         if (request.chapterBudget) updateChapterBudget(config, body, text, request.chapterBudget.targetWords);
-        if (tools.length) {
+        if (tools.length || request.writingOutputMode === 'tool') {
           // Each request reserves its complete output allowance; historical usage
           // never reduces that allowance, including after a human decision.
           const inputEstimate = estimateTokens(JSON.stringify(body));
@@ -657,7 +682,8 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         tokens.inputTokens += inputTokens; tokens.outputTokens += outputTokens;
         text += result.text;
         round++;
-        const calls = responseToolCalls(config.protocol, data);
+        const nativeCalls = responseToolCalls(config.protocol, data);
+        const calls = request.writingOutputMode === 'tool' && nativeCalls.length ? unpackWritingResponse(nativeCalls, tools.map(tool => tool.name), Boolean(result.text.trim())).calls : nativeCalls;
         if (!calls.length) return complete();
         callCount += calls.length;
         if ((round === maxRounds && !chapterComplete()) || callCount > maxRounds * 4) throw new Error('模型检索次数超过上限，请缩小本次写作范围后手动重试。');
@@ -694,20 +720,21 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         const error = object(result) && typeof result.error === 'string' && result.error.trim() ? result.error : undefined;
         emitActivity({ type: 'tool_result', id: activityId, name: call.name, result, ...(error ? { error } : {}) });
       }
+      const wireResults = request.writingOutputMode === 'tool' ? [{ call: responseToolCalls(config.protocol, data)[0], output: JSON.stringify({ toolResults: results.map(({ call, output }) => ({ id: call.id, name: call.name, result: JSON.parse(output) })) }) }] : results;
       if (config.protocol === 'openai-chat') {
         body.messages.push({ role: 'assistant', ...data.choices[0].message });
-        body.messages.push(...results.map(({ call, output }) => ({ role: 'tool', tool_call_id: call.id, content: output })));
+        body.messages.push(...wireResults.map(({ call, output }) => ({ role: 'tool', tool_call_id: call.id, content: output })));
       } else if (config.protocol === 'openai-responses') {
         if (typeof body.input === 'string') body.input = [{ role: 'user', content: body.input }];
         body.input.push(...objects(data.output).filter(item => item.type !== 'message' || objects(item.content).some(part => typeof part.text === 'string' && part.text)));
-        body.input.push(...results.map(({ call, output }) => ({ type: 'function_call_output', call_id: call.id, output })));
+        body.input.push(...wireResults.map(({ call, output }) => ({ type: 'function_call_output', call_id: call.id, output })));
       } else if (config.protocol === 'gemini') {
         const candidate = data.candidates[0];
         body.contents.push({ role: 'model', parts: candidate.historyParts ?? candidate.content.parts });
-        body.contents.push({ role: 'user', parts: results.map(({ call, output }) => ({ functionResponse: { name: call.name, ...(call.id.startsWith('call_') ? {} : { id: call.id }), response: { result: JSON.parse(output) } } })) });
+        body.contents.push({ role: 'user', parts: wireResults.map(({ call, output }) => ({ functionResponse: { name: call.name, ...(call.id.startsWith('call_') ? {} : { id: call.id }), response: { result: JSON.parse(output) } } })) });
       } else {
         body.messages.push({ role: 'assistant', content: data.content });
-        body.messages.push({ role: 'user', content: results.map(({ call, output }) => ({ type: 'tool_result', tool_use_id: call.id, content: output })) });
+        body.messages.push({ role: 'user', content: wireResults.map(({ call, output }) => ({ type: 'tool_result', tool_use_id: call.id, content: output })) });
       }
       pending = undefined;
       await checkpoint();

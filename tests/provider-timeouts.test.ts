@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from './local-server.mjs';
 import { generateText } from '../server/providers.js';
 import type { ModelActivityEvent, ProviderConfig, ProviderProtocol } from '../shared/types.js';
 
@@ -22,7 +22,7 @@ async function upstream(reply: (response: ServerResponse, index: number) => void
     for await (const _chunk of incoming) { /* Drain the local request body. */ }
     response.setHeader('Connection', 'close'); reply(response, count++);
   });
-  servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  servers.push(server); await listenLocalServer(server);
   return { url: `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`, requests: () => count };
 }
 function flowing(response: ServerResponse, frames: string[], gap = gapMs) {

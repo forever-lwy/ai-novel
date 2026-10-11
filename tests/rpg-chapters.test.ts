@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from './local-server.mjs';
 import { Store } from '../server/store.js';
 import { StoryEngine, type TextModels } from '../server/engine.js';
 import { generateText } from '../server/providers.js';
@@ -33,7 +33,7 @@ async function upstream(reply: (body: any, response: ServerResponse, index: numb
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString()); bodies.push(body); reply(body, response, bodies.length - 1);
   });
-  servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  servers.push(server); await listenLocalServer(server);
   return { bodies, url: `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1` };
 }
 const settings = (url: string): Settings => ({ providers: [{ id: 'local', name: '本地协议模拟', protocol: 'openai-chat', baseUrl: url, model: 'writer', maxOutputTokens: 1000, contextTokens: 64000 }], writingProviderId: 'local', planningProviderId: 'local', extractionProviderId: 'local', taskSettings: { extraction: { autoRetry: false, maxRetries: 0, retryDelayMs: 0 }, planning: { enabled: false, mode: 'separate' } } });
@@ -238,53 +238,12 @@ describe('RPG chapter budgets and durable chapter-boundary choices', () => {
     expect(actionMessage).toBeDefined(); expect(actionMessage.content).toContain('不能当作已确认行动');
     const action = JSON.parse(actionMessage.content.split('# 上一章的待选问题与玩家已确认的行动\n')[1].split('\n')[0]); expect(action.text).toBe('前往桥头'); expect(action.unansweredQuestions).toMatchObject([secondQuestion]);
     const dialogue = service.bodies[1].messages.filter((message: any) => message.role !== 'system');
-    expect(dialogue.map((message: any) => message.role)).toEqual(['user', 'assistant', 'user']);
+    expect(dialogue.map((message: any) => message.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user']);
     expect(action.unansweredQuestions[0].optionId).toBeUndefined(); expect(action.unansweredQuestions[0].text).toBeUndefined();
     expect(service.bodies[1].messages.some((message: any) => message.tool_calls || message.tool_call_id)).toBe(false);
     offline.engine.choose(next.id, { choiceId: paused.pendingChoice!.id, optionId: 'map' }); expect((await finished(offline.engine, next.id)).status).toBe('completed');
     await ready(store, offline.engine, copy.branchId, 2); expect(service.bodies).toHaveLength(3);
     expect(service.bodies[2].messages.some((message: any) => message.role === 'tool' && message.content.includes('查看店主的地图'))).toBe(true);
-    expect(store.state(queued.branchId).rpg?.nextChoice).toEqual(original.rpg?.nextChoice);
-  });
-
-  it('finishes tool-based post-planning after sealing prose without treating the saved chapter-end choice as a planning pause', async () => {
-    const plan = { fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `后续 ${chapter}`, goal: '遵循玩家选择' })), foreshadows: [] };
-    const service = await upstream((_body, reply, index) => {
-      if (!index) respond(reply, '章'.repeat(120), ask('后置规划仍须保存的节点'));
-      else if (index === 1) respond(reply, '', [{ id: 'plot', name: 'update_plot_plan', args: plan }]);
-      else respond(reply, '后置规划已完成，不能追加小说正文。');
-    });
-    const store = makeStore(), config = settings(service.url); config.taskSettings!.planning = { enabled: true, mode: 'tool' };
-    const ctx = engineFor(store, config); const { queued } = start(store, ctx.engine);
-    expect((await finished(ctx.engine, queued.id)).status).toBe('completed'); const state = await ready(store, ctx.engine, queued.branchId);
-    expect(service.bodies).toHaveLength(3); expect(state.outline.fine).toEqual(plan.fine); expect(state.rpg?.nextChoice?.question).toBe('后置规划仍须保存的节点');
-    expect(store.chapter(queued.branchId, state.chapters[0].id).text).toBe('章'.repeat(120));
-    expect(service.bodies[1].tools.some((tool: any) => tool.function.name === 'update_plot_plan')).toBe(true);
-    expect(service.bodies[1].tools.some((tool: any) => tool.function.name === 'ask_user')).toBe(false); expect(ctx.requests[1].budget).toBeUndefined();
-  });
-
-  it('retries failed post-planning from a paused backup without reviving its already sealed prose or losing the chapter-end choice', async () => {
-    const text = '章'.repeat(120), plan = { fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `后续 ${chapter}`, goal: '等待玩家决定' })), foreshadows: [] };
-    const service = await upstream((_body, reply, index) => {
-      if (!index) respond(reply, text, ask('规划失败仍须保留的章末节点'));
-      else if (index === 1) respond(reply, '本次没有提交规划工具。');
-      else if (index === 2) respond(reply, '', [{ id: 'retry-plot', name: 'update_plot_plan', args: plan }]);
-      else respond(reply, '仅规划完成，不能追加旧章正文。');
-    });
-    const store = makeStore(), config = settings(service.url); config.taskSettings!.planning = { enabled: true, mode: 'tool' };
-    const first = engineFor(store, config); const { project, queued } = start(store, first.engine);
-    const failed = await finished(first.engine, queued.id); expect(failed.status).toBe('failed'); expect(failed.generatedChapterId).toBeDefined(); expect(failed.pendingChoice).toBeUndefined();
-    const original = store.state(queued.branchId); expect(original.rpg?.nextChoice?.question).toBe('规划失败仍须保留的章末节点'); expect(store.chapter(queued.branchId, original.chapters[0].id).text).toBe(text);
-    expect(service.bodies).toHaveLength(2); await first.engine.close(); const offline = engineFor(store, config, false);
-    config.writingModel = 'different-planner'; expect(offline.engine.action(queued.id, 'retry').status).toBe('queued');
-    const restored = store.restoreProject(store.exportProject(project.id)); const copy = offline.engine.listJobs(restored.id).find(value => value.kind === 'generate')!;
-    expect(copy.status).toBe('paused'); expect(copy.pendingChoice).toBeUndefined(); expect(store.state(copy.branchId).rpg?.nextChoice?.jobId).toBe(copy.id);
-    offline.engine.action(queued.id, 'pause'); offline.engine.action(copy.id, 'resume'); offline.engine.start();
-    expect((await finished(offline.engine, copy.id)).status).toBe('completed'); const state = await ready(store, offline.engine, copy.branchId);
-    expect(service.bodies).toHaveLength(4); expect(service.bodies.filter(body => body.tools.some((tool: any) => tool.function.name === 'ask_user'))).toHaveLength(1);
-    expect(service.bodies.map(body => body.model)).toEqual(['writer', 'writer', 'different-planner', 'different-planner']);
-    expect(store.chapter(copy.branchId, state.chapters[0].id).text).toBe(text); expect(state.outline.fine).toEqual(plan.fine); expect(state.rpg?.nextChoice?.question).toBe('规划失败仍须保留的章末节点');
-    expect(job(offline.engine, copy.id)).toMatchObject({ inputTokens: 40, outputTokens: 20, pendingChoice: undefined });
     expect(store.state(queued.branchId).rpg?.nextChoice).toEqual(original.rpg?.nextChoice);
   });
 

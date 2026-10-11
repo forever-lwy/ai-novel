@@ -72,13 +72,6 @@ describe('author-only persisted model output recovery (neutral, simulated respon
     expect(context.store.chapter(context.project.mainBranchId, context.store.state(context.project.mainBranchId).chapters[0].id).text).toContain(source);
   });
 
-  it('persists business-invalid planning and applies a full four-chapter plan locally', async () => {
-    let calls = 0; const badPlan = planning(2); badPlan.fine = badPlan.fine.slice(0, 1); const context = make(provider(() => { calls++; return JSON.stringify(badPlan); }), '记录员完成前一章检查。');
-    const job = context.engine.enqueue(context.project.mainBranchId, 'plan', { baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId }); await waitJob(context.engine, job.id);
-    const outputId = context.engine.listOutputs(job.id)[0].id; expect(context.engine.outputDetail(job.id, outputId).output.issues[0].path).toBe('fine');
-    expect(apply(context.engine, job, outputId, JSON.stringify(planning(2))).status).toBe('completed'); expect(calls).toBe(1); expect(context.store.state(context.project.mainBranchId).outline.fine).toHaveLength(4);
-  });
-
   it('keeps truncated writing, applies corrected prose, and pauses before any extraction request', async () => {
     let calls = 0;
     const model = provider(() => { calls++; return JSON.stringify(extraction()); });

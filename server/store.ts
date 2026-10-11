@@ -781,6 +781,7 @@ export class Store {
         if (job.kind !== 'extract' || job.total !== 1 || typeof job.payload.targetChapterId !== 'string' || job.payload.extractChapterId !== job.payload.targetChapterId || !snapshot.chapters.some(chapter => chapter.id === job.payload.targetChapterId)) throw new HttpError('备份单章提取目标无效');
       }
       if (job.kind === 'import' && restored.importChapters.filter(c => c.jobId === job.id).length !== job.total) throw new HttpError('备份缺少尚待整理的导入章节');
+      if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary' && ['queued','running','paused','failed'].includes(job.status)) { job.status = 'cancelled'; job.error = undefined; job.message = '剧情规划功能已移除，历史记录保留'; }
       if (job.status === 'running' || job.status === 'queued') { job.status = 'paused'; job.message = '作品已恢复，请手动继续任务'; }
     }
     const outputIds = new Set(restored.outputs.map(o => o.id));

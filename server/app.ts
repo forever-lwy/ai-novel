@@ -27,7 +27,7 @@ import type { PromptPreviewInput } from '../shared/prompt-runtime.js';
 const revision = z.string().min(1).max(100);
 const readingProgress = (query: unknown) => z.object({ chapterId: z.string().min(1).max(100).optional() }).parse(query).chapterId;
 const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']);
-const outlineSchema = z.object({ worldview: z.string().max(100000).optional(), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000) });
+const outlineSchema = z.object({ worldview: z.string().max(100000).optional(), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000).optional() });
 const modelNameSchema = z.string().trim().max(300).refine(value => !/[\u0000-\u001f\u007f]/.test(value), '模型名称不能包含控制字符');
 const modelParametersSchema = z.object({
   maxOutputTokens: z.number().int().min(256).max(128000), contextTokens: z.number().int().min(2048).max(2000000),
@@ -55,9 +55,9 @@ const imageSettingsSchema = z.object({
 }).strict();
 const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional(), promptTemplates: z.unknown().optional(), imageSettings: imageSettingsSchema.optional(), taskSettings: z.unknown().optional() });
 const promptPreviewSchema = z.object({
-  task: z.enum(['writing', 'planning', 'extraction', 'compression']), templates: z.unknown(), protocol: providerSchema.shape.protocol,
+  task: z.enum(['writing', 'extraction', 'compression']), templates: z.unknown(), protocol: providerSchema.shape.protocol,
   variables: z.record(z.string().max(100), z.string().max(200000)).refine(value => Object.keys(value).length <= 150, '示例变量过多'),
-  runtime: z.object({ extractionOutputMode: z.enum(['prompt', 'structured', 'tool']).optional(), planningMode: z.enum(['separate', 'tool']).optional(), illustrations: z.object({ portrait: z.boolean(), cg: z.boolean() }).strict().optional(), chapterAnswer: z.string().max(20000).optional(), rpg: z.object({ character: z.object({ kind: z.enum(['original', 'existing']), name: z.string().max(300), description: z.string().max(20000) }).strict(), entryInstruction: z.string().max(20000) }).strict().optional() }).strict(),
+  runtime: z.object({ extractionOutputMode: z.enum(['prompt', 'structured', 'tool']).optional(), illustrations: z.object({ portrait: z.boolean(), cg: z.boolean() }).strict().optional(), chapterAnswer: z.string().max(20000).optional(), rpg: z.object({ character: z.object({ kind: z.enum(['original', 'existing']), name: z.string().max(300), description: z.string().max(20000) }).strict(), entryInstruction: z.string().max(20000) }).strict().optional() }).strict(),
 }).strict();
 const citationSchema = z.object({ chapterId: z.string(), paragraph: z.number().int().positive(), quote: z.string().max(10000) });
 const entitySchema = z.object({ id: z.string().min(1), kind: z.enum(['character', 'faction', 'location', 'item', 'ability', 'rule', 'event']), name: z.string().min(1).max(300), aliases: z.array(z.string().min(1).max(300)).max(200), description: z.string().max(30000), visibility: z.enum(['public', 'secret']), locked: z.boolean(), isMain: z.boolean().optional(), nameStatus: z.enum(['placeholder', 'confirmed']).optional(), mergedInto: z.string().optional(), facts: z.array(z.object({ id: z.string(), text: z.string().max(10000), attribute: z.string().min(1).max(100).optional(), temporal: z.enum(['current', 'past', 'future', 'unknown']), certainty: z.enum(['fact', 'inference', 'conflict']), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional(), locked: z.boolean().optional() })).max(5000) });
@@ -221,7 +221,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   });
   app.post('/api/branches/:id/fork', async request => store.fork(param(request), z.object({ baseRevisionId: revision, chapterId: z.string().optional(), name: z.string().trim().min(1).max(200) }).parse(request.body)));
   app.post('/api/branches/:id/rollback', async request => store.rollback(param(request), z.object({ baseRevisionId: revision, revisionId: revision }).parse(request.body)));
-  app.put('/api/branches/:id/outline', async request => { const body = z.object({ baseRevisionId: revision, outline: outlineSchema }).parse(request.body); return store.updateOutline(param(request), body.baseRevisionId, body.outline); });
+  app.put('/api/branches/:id/outline', async request => { const body = z.object({ baseRevisionId: revision, outline: outlineSchema }).parse(request.body); const existing = store.state(param(request)).outline; if (body.outline.fine && JSON.stringify(body.outline.fine) !== JSON.stringify(existing.fine)) fail('剧情规划功能已移除，历史规划不能修改。', 410); return store.updateOutline(param(request), body.baseRevisionId, { ...body.outline, fine: existing.fine }); });
   app.put('/api/branches/:id/entities/:entityId', async request => { const body = z.object({ baseRevisionId: revision, entity: entitySchema }).parse(request.body); if (body.entity.id !== param(request, 'entityId')) fail('资料标识不匹配。'); return store.updateEntity(param(request), body.baseRevisionId, body.entity as Entity); });
   app.delete('/api/branches/:id/entities/:entityId', async request => {
     requireAuthor(request); const branchId = param(request); engine.assertIdle(branchId);
@@ -259,7 +259,6 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     return job;
   });
   app.post('/api/branches/:id/generate', async request => { const b = z.object({ baseRevisionId: revision, mode, instruction: z.string().max(30000), title: z.string().max(500).optional(), chapterId: z.string().optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), maxWords: z.number().int().min(100).max(20000).optional(), regenerate: z.boolean().optional(), discardBackground: z.boolean().optional(), rpg: rpgSetupSchema.optional() }).parse(request.body); if (b.mode === 'rpg' || b.rpg) requireAuthor(request); return engine.enqueue(param(request), 'generate', b); });
-  app.post('/api/branches/:id/plan', async request => { const b = z.object({ baseRevisionId: revision, instruction: z.string().max(30000).optional() }).parse(request.body); return engine.enqueue(param(request), 'plan', b); });
   app.post('/api/branches/:id/extract', async request => engine.enqueue(param(request), 'extract', { baseRevisionId: base(request.body) }));
   const jobView = (job: Job, asAuthor: boolean): Job => ({ ...job, chapterStartChoiceId: asAuthor ? job.chapterStartChoiceId : undefined, pendingChoice: asAuthor ? job.pendingChoice : undefined, title: asAuthor ? job.title : undefined, generationInput: asAuthor ? job.generationInput : undefined, payload: {}, message: asAuthor ? job.message : ({ queued: '任务等待中', running: '任务进行中', paused: '任务已暂停', failed: '任务未完成', completed: '任务已完成', cancelled: '任务已取消', stale: '起始版本已变化' })[job.status], error: asAuthor ? job.error : job.error ? '请进入作者视图查看具体原因。' : undefined });
   app.get('/api/jobs', async request => { const { projectId } = z.object({ projectId: z.string().optional() }).parse(request.query); return engine.listJobs(projectId).map(job => jobView(job, author(request))); });
@@ -339,7 +338,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     for (const role of ['writing', 'planning', 'extraction'] as const) {
       const id = b[`${role}ProviderId`];
       if (id && !ids.has(id)) fail('所选任务对应的供应商连接不存在。');
-      if (id && !b[`${role}Model`]) fail(`${role === 'writing' ? '写作' : role === 'planning' ? '规划' : '资料提取'}任务需要选择或填写模型名称。`);
+      if (id && !b[`${role}Model`]) fail(`${role === 'writing' ? '写作' : role === 'planning' ? '摘要压缩' : '资料提取'}任务需要选择或填写模型名称。`);
     }
     const profiles = new Set<string>();
     for (const profile of b.modelParameters ?? []) {

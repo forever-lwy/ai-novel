@@ -1,4 +1,5 @@
 import type { ModelActivityEvent, ProviderProtocol } from '../shared/types.js';
+import { partialWritingProse, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 
 type Json = Record<string, any>;
 type Event = { name: string; data: string; complete: boolean };
@@ -50,8 +51,19 @@ export function createStreamEndDetector(protocol: ProviderProtocol): (chunk: str
 }
 
 /** Emit prose only; public thoughts and tool execution are recorded through separate activity events. */
-export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text: string) => void): (chunk: string) => void {
+export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text: string) => void, writingTool = false): (chunk: string) => void {
   let pending = '';
+  const toolParts = new Map<string, { name: string; raw: string; sent: string }>();
+  let plain = ''; let sent = '';
+  const transport = (id: string, toolName?: string, fragment?: string, snapshot?: unknown) => {
+    const part = toolParts.get(id) ?? { name: '', raw: '', sent: '' };
+    if (toolName) part.name = toolName;
+    if (fragment) part.raw += fragment;
+    if (snapshot !== undefined) part.raw = typeof snapshot === 'string' ? snapshot : JSON.stringify(snapshot);
+    toolParts.set(id, part);
+    if (part.name !== WRITING_RESPONSE_NAME) return;
+    part.sent = partialWritingProse(part.raw);
+  };
   return chunk => {
     pending += chunk;
     let separator: RegExpExecArray | null;
@@ -61,6 +73,28 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
       let data: Json;
       try { const parsed: unknown = JSON.parse(item.data); if (!object(parsed)) continue; data = parsed; } catch { continue; }
       const name = item.name || data.type;
+      if (writingTool) {
+        if (protocol === 'openai-chat') {
+          const choice = objects(data.choices).find(value => value.index === undefined || value.index === 0);
+          for (const call of objects(choice?.delta?.tool_calls)) transport(String(call.index ?? 0), call.function?.name, call.function?.arguments);
+        } else if (protocol === 'openai-responses') {
+          const id = String(data.output_index ?? 0);
+          if (name === 'response.output_item.added' || name === 'response.output_item.done') {
+            if (data.item?.type === 'function_call') transport(id, data.item.name, undefined, data.item.arguments || undefined);
+          }
+          if (name === 'response.function_call_arguments.delta') transport(id, undefined, data.delta);
+          if (name === 'response.function_call_arguments.done') transport(id, undefined, undefined, data.arguments);
+          if (name === 'response.completed') objects(data.response?.output).forEach((value, index) => { if (value.type === 'function_call') transport(String(index), value.name, undefined, value.arguments); });
+        } else if (protocol === 'gemini') {
+          const candidate = objects(data.candidates).find(value => value.index === undefined || value.index === 0);
+          for (const part of objects(candidate?.content?.parts)) if (part.functionCall) transport(String(part.functionCall.id ?? 'gemini'), part.functionCall.name, undefined, part.functionCall.args);
+        } else {
+          const id = String(data.index ?? 0);
+          if (name === 'message_start') objects(data.message?.content).forEach((value, index) => { if (value.type === 'tool_use') transport(String(index), value.name, undefined, value.input); });
+          if (name === 'content_block_start' && data.content_block?.type === 'tool_use') transport(id, data.content_block.name, undefined, Object.keys(data.content_block.input ?? {}).length ? data.content_block.input : undefined);
+          if (name === 'content_block_delta' && data.delta?.type === 'input_json_delta') transport(id, undefined, data.delta.partial_json);
+        }
+      }
       let text = '';
       if (protocol === 'openai-chat') {
         const choice = objects(data.choices).find(value => value.index === undefined || value.index === 0);
@@ -75,7 +109,13 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
         if (name === 'content_block_start' && data.content_block?.type === 'text' && typeof data.content_block.text === 'string') text = data.content_block.text;
         if (name === 'content_block_delta' && data.delta?.type === 'text_delta' && typeof data.delta.text === 'string') text = data.delta.text;
       }
-      if (text) emit(text);
+      if (writingTool) {
+        plain += text;
+        const best = [plain, ...[...toolParts.values()].filter(part => part.name === WRITING_RESPONSE_NAME).map(part => part.sent)].reduce((longest, value) => value.length > longest.length ? value : longest, '');
+        // Two gateway channels can mirror the same output. Append only a
+        // compatible suffix; the final capture selects the complete candidate.
+        if (best.startsWith(sent) && best.length > sent.length) { emit(best.slice(sent.length)); sent = best; }
+      } else if (text) emit(text);
     }
   };
 }

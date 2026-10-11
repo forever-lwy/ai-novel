@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from './local-server.mjs';
 import type { ModelActivityEvent, ModelRequest, ModelToolContinuation, ProviderConfig, ProviderProtocol } from '../shared/types.js';
 import { buildRequestSnapshot, estimateModelRequestInputTokens, generateText, ModelChapterComplete, ModelInteractionPause, ModelOutputError } from '../server/providers.js';
 import { chapterBudgetInstruction, chapterBudgetReached, countProseWords, normalizeChapterWords } from '../shared/rpg-chapter.js';
@@ -15,7 +15,7 @@ async function upstream(reply: (body: any, response: ServerResponse, index: numb
     const body = JSON.parse(Buffer.concat(chunks).toString()); bodies.push(body);
     reply(body, response, bodies.length - 1);
   });
-  servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  servers.push(server); await listenLocalServer(server);
   return { bodies, baseUrl: `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}` };
 }
 

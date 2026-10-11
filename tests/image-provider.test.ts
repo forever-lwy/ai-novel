@@ -1,3 +1,4 @@
+import { listenLocalServer } from './local-server.mjs';
 import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetch, FormData, Response } from 'undici';
@@ -99,7 +100,7 @@ describe('image provider wire protocols', () => {
       response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }));
     });
     servers.push(server);
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    await listenLocalServer(server);
     const port = (server.address() as { port: number }).port;
     const localProvider = { ...provider, baseUrl: `http://127.0.0.1:${port}/v1` };
     await generateImage(localProvider, settings, '绘制立绘');

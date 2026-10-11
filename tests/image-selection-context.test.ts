@@ -1,3 +1,4 @@
+import { listenLocalServer } from './local-server.mjs';
 import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -248,7 +249,7 @@ describe('enabled images at the model context boundary', () => {
       bodies.push(Buffer.concat(chunks)); paths.push(request.url!);
       response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }));
     });
-    servers.push(server); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    servers.push(server); await listenLocalServer(server);
     let useWire = false; let count = 0;
     const ctx = harness(async (...args) => useWire ? generateImage(...args) : { bytes: ++count === 1 ? oldPixels : newPixels, mimeType: 'image/png' });
     const { old, newer } = await variants(ctx);

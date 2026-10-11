@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from './local-server.mjs';
 import type { ModelRequest, PromptMessage, ProviderConfig, ProviderProtocol } from '../shared/types.js';
 import { buildRequestSnapshot, estimateModelRequestInputTokens, generateStructured, generateText, structuredRequest } from '../server/providers.js';
 
@@ -55,7 +55,7 @@ async function upstream(reply: (index: number) => unknown) {
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify(reply(bodies.length - 1)));
   });
-  servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  servers.push(server); await listenLocalServer(server);
   return { bodies, baseUrl: `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}` };
 }
 

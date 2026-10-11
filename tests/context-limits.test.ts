@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from './local-server.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,7 +40,7 @@ async function upstream(reply: (path: string, body: GeminiBody, index: number) =
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify(reply(path, body, calls.length - 1)));
   });
-  servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  servers.push(server); await listenLocalServer(server);
   return { calls, baseUrl: `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1beta` };
 }
 function gemini(text = extraction, finishReason = 'STOP', usage = true) {
@@ -190,8 +190,8 @@ describe('single-request context and output limits', () => {
     expect(fixture.calls[0].body.generationConfig.maxOutputTokens).toBe(64000);
   });
 
-  it('uses independent task limits when planning, writing and extraction share the same connection and model', async () => {
-    const planning = JSON.stringify({ coarse: '旅人寻找灯塔', fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `第 ${chapter} 章`, goal: '寻找线索' })), foreshadows: [] });
+  it('uses independent task limits when compression, writing and extraction share the same connection and model', async () => {
+    const planning = JSON.stringify({ text: '摘要' });
     const fixture = await upstream((_path, _body, index) => gemini(index === 0 ? planning : index === 1 ? '旅人来到灯塔。' : extraction));
     const config = settings(fixture.baseUrl);
     config.writingModel = config.planningModel = config.extractionModel = 'shared-model';
@@ -205,7 +205,7 @@ describe('single-request context and output limits', () => {
     const saved = ctx.store.saveChapter(project.mainBranchId, { baseRevisionId: ctx.store.getBranch(project.mainBranchId).revisionId, title: '已有开场', text: '旅人离开村庄。' });
     ctx.store.applyExtraction(project.mainBranchId, saved.branch.revisionId, saved.state.chapters[0].id, { summary: '旅人离开村庄。', entities: [], relations: [], foreshadows: [] }, true);
     const branch = ctx.store.getBranch(project.mainBranchId);
-    const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId }); ctx.engine.start();
+    const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId, purpose: 'compress-summary' }); ctx.engine.start();
     expect((await terminal(ctx.engine, planJob.id)).status).toBe('completed');
     const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '写开场' });
     expect((await terminal(ctx.engine, job.id)).status).toBe('completed');
@@ -214,6 +214,6 @@ describe('single-request context and output limits', () => {
     expect(fixture.calls.map(call => call.path.split('/').at(-1))).toEqual(['shared-model:generateContent', 'shared-model:streamGenerateContent?alt=sse', 'shared-model:generateContent']);
     expect(fixture.calls.map(call => call.body.generationConfig.maxOutputTokens)).toEqual([8192, 2048, 64000]);
     const capturedLimits = Object.fromEntries([planJob.id, job.id, background.id].flatMap(id => ctx.engine.listOutputs(id)).map(output => [output.stage, JSON.parse(ctx.store.outputs.get(output.id)!.request!.body).generationConfig.maxOutputTokens]));
-    expect(capturedLimits).toEqual({ planning: 8192, writing: 2048, extraction: 64000 });
+    expect(capturedLimits).toEqual({ compression: 8192, writing: 2048, extraction: 64000 });
   });
 });

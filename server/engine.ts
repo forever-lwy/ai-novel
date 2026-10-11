@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { CapturedModelResponse, ExtractionResult, GenerateInput, Job, JobKind, ModelActivityEvent, ModelOutputDetail, ModelOutputRecord, ModelOutputSummary, ModelRequest, OutputIssue, OutputStage, PlanningResult, ProviderConfig, Settings, StoryState, WritingActivity, WritingEvent, PromptTask } from '../shared/types.js';
+import type { CapturedModelResponse, ExtractionResult, GenerateInput, Job, JobKind, ModelActivityEvent, ModelOutputDetail, ModelOutputRecord, ModelOutputSummary, ModelRequest, OutputIssue, OutputStage, ProviderConfig, Settings, StoryState, WritingActivity, WritingEvent, PromptTask } from '../shared/types.js';
 import { normalizeModelSettings, resolveModelConfig } from '../shared/model-settings.js';
 import { normalizeTaskSettings } from '../shared/task-settings.js';
 import { compileTaskPrompt, normalizePromptTemplates } from '../shared/prompt-templates.js';
+import { writingResponseTool } from '../shared/writing-output.js';
 import type { PromptRuntime, PromptPreviewInput, PromptPreviewResult } from '../shared/prompt-runtime.js';
 import { emptyState } from '../shared/types.js';
 import { generateStructured, generateText, buildRequestSnapshot, estimateModelRequestInputTokens, ModelOutputError, ModelInteractionPause, ModelChapterComplete, parseStructuredText, redactModelPayload, unwrapModelOutput, validateProviderOptions } from './providers.js';
@@ -16,8 +17,6 @@ import { normalizeImageSettings } from '../shared/image-settings.js';
 import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, StoryReference } from '../shared/types.js';
 export { extractionSchema } from './extraction.js';
 
-const foreshadowSchema = z.object({ title: z.string().min(1), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedNames: z.array(z.string()) });
-export const planningSchema = z.object({ fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })).min(1), foreshadows: z.array(foreshadowSchema) });
 const now = () => new Date().toISOString();
 const estimateTokens = (text: string) => Math.ceil([...text].reduce((n, c) => n + (c.charCodeAt(0) > 127 ? 1.3 : 0.3), 0));
 const MAX_COMPRESSION_PASSES = 3;
@@ -28,7 +27,7 @@ function compressionChunks(source: string, provider: ProviderConfig, build: (tex
   // A whitespace-only sizing probe still needs a user message; it is never sent to the model.
   const fits = (text: string) => requestTokens(provider, build(text.trim() ? text : `${text}\u200b`)) + provider.maxOutputTokens <= provider.contextTokens;
   const characters = [...source]; const chunks: string[] = [];
-  if (!fits(characters[0] ?? ' ')) throw new HttpError('摘要压缩提示词与完整输出上限已超出规划模型的上下文，请缩短提示词或提高上下文上限');
+  if (!fits(characters[0] ?? ' ')) throw new HttpError('摘要压缩提示词与完整输出上限已超出摘要压缩模型的上下文，请缩短提示词或提高上下文上限');
   for (let start = 0; start < characters.length;) {
     let low = 0; let high = Math.min(characters.length - start, Math.ceil(provider.contextTokens / 0.3));
     while (low < high) {
@@ -60,6 +59,9 @@ export class StoryEngine {
   constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'>) {}
   start() {
     if (this.started) return; this.started = true;
+    for (const job of this.jobsInternal()) if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary' && ['queued', 'running', 'paused', 'failed'].includes(job.status)) {
+      job.status = 'cancelled'; job.message = '剧情规划功能已移除；原记录保留供查看'; job.error = undefined; this.save(job);
+    }
     // Upgrade pre-release queues once; prose belongs in immutable input rows, never in the hot job record.
     for (const job of this.jobsInternal()) if (Array.isArray(job.payload.chapters)) {
       const chapters = job.payload.chapters as { title: string; text: string }[];
@@ -132,13 +134,13 @@ export class StoryEngine {
   private outputBlocker(job: Job, output: ModelOutputRecord): string | undefined {
     if (output.status === 'applied') return '此输出已经应用，不能重复应用';
     if (job.payload.rpgChoice && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice) return '剧情正在等待用户选择，请先回答当前剧情节点';
-    if (output.stage === 'planning' && job.payload.purpose !== 'compress-summary' && job.kind === 'plan') { try { this.assertPlanningAfterProse(job.branchId); } catch (error) { return error instanceof Error ? error.message : '当前正文尚未完成'; } }
+    if (output.stage === 'planning' && job.payload.purpose !== 'compress-summary') return '剧情规划功能已移除，历史输出仅供查看';
     if (!['failed', 'paused'].includes(job.status)) return '请先暂停任务；已取消、过期或完成的任务不能应用输出';
     if (this.controllers.has(job.id)) return '请求仍在结束中，请稍后再应用';
     if (job.branchId !== output.branchId || job.baseRevisionId !== output.baseRevisionId || this.store.getBranch(job.branchId).revisionId !== output.baseRevisionId) return '故事线已有新版本，此输出只能查看';
     if (this.jobsInternal(undefined, true).some(other => other.id !== job.id && other.branchId === job.branchId)) return '本故事线有其他进行中的任务';
     if (output.stage === 'extraction' && (String(job.payload.extractChapterId ?? '') !== output.chapterId || Number(job.payload.blockIndex ?? 0) !== output.blockIndex)) return '资料整理进度已经变化，此输出只能查看';
-    if (output.stage === 'planning' && job.payload.purpose === 'compress-summary' && output.blockIndex !== undefined && output.blockIndex !== (job.payload.compressionWork as CompressionWork | undefined)?.completed) return '摘要压缩进度已经变化，此输出只能查看';
+    if (['planning', 'compression'].includes(output.stage) && job.payload.purpose === 'compress-summary' && output.blockIndex !== undefined && output.blockIndex !== (job.payload.compressionWork as CompressionWork | undefined)?.completed) return '摘要压缩进度已经变化，此输出只能查看';
     return undefined;
   }
   outputDetail(jobId: string, outputId: string): ModelOutputDetail {
@@ -166,12 +168,12 @@ export class StoryEngine {
   private failOutput(output: ModelOutputRecord, error: unknown) { if (this.store.outputs.get(output.id)?.status !== 'applied') this.store.outputs.update(output.id, { status: 'invalid', error: this.redact(error instanceof Error ? error.message : '输出未通过校验，可在作者模式中修正'), issues: this.issues(error).map(issue => ({ ...issue, path: this.redact(issue.path), message: this.redact(issue.message), ...(issue.quote !== undefined ? { quote: this.redact(issue.quote) } : {}), ...(issue.sourceText !== undefined ? { sourceText: this.redact(issue.sourceText) } : {}) })) }); }
   private redact(text: string): string { return redactModelPayload(text, this.getSettings().providers.flatMap(config => config.apiKey ? [config.apiKey] : [])); }
   importOutput(jobId: string, text: string): ModelOutputRecord {
-    const job = this.get(jobId); if (!['failed', 'paused'].includes(job.status) || this.controllers.has(job.id)) throw new HttpError('仅可为已暂停或失败且请求已结束的任务导入输出', 409);
+    const job = this.get(jobId); if (job.payload.purpose !== 'compress-summary' && (job.kind === 'plan' || job.payload.generatedChapterId && job.payload.pendingStage === 'planning')) throw new HttpError('剧情规划功能已移除，历史输出仅供查看', 410); if (!['failed', 'paused'].includes(job.status) || this.controllers.has(job.id)) throw new HttpError('仅可为已暂停或失败且请求已结束的任务导入输出', 409);
     this.store.assertVersion(job.branchId, job.baseRevisionId);
     let stage = job.payload.pendingStage as OutputStage | undefined;
     let chapterId: string | undefined; let blockIndex: number | undefined;
     if (!stage) {
-      if (job.kind === 'plan') stage = 'planning';
+      if (job.kind === 'plan') { if (job.payload.purpose !== 'compress-summary') throw new HttpError('剧情规划功能已移除，不能导入新的规划输出', 410); stage = 'compression'; }
       else if (job.kind === 'import' || job.kind === 'extract' || job.payload.generatedChapterId) stage = 'extraction';
       else stage = 'writing';
     }
@@ -192,8 +194,7 @@ export class StoryEngine {
     if (input.baseRevisionId !== output.baseRevisionId) throw new HttpError('输出绑定版本不匹配，请刷新输出记录', 409);
     const editedText = this.redact(input.text); this.store.outputs.update(output.id, { editedText });
     try {
-      if (output.stage === 'planning' && job.payload.purpose === 'compress-summary') this.applyCompression(job, output, parseStructuredText(editedText, value => z.object({ text: z.string().min(1) }).parse(value)).text);
-      else if (output.stage === 'planning') this.applyPlan(job, output, parseStructuredText(editedText, value => planningSchema.parse(value)), true);
+      if (['planning', 'compression'].includes(output.stage) && job.payload.purpose === 'compress-summary') this.applyCompression(job, output, parseStructuredText(editedText, value => z.object({ text: z.string().min(1) }).parse(value)).text);
       else if (output.stage === 'writing') this.applyWriting(job, output, unwrapModelOutput(editedText), true);
       else this.applyExtracted(job, output, parseStructuredText(editedText, value => value), true);
       job = this.get(jobId); return this.publicJob(job);
@@ -267,7 +268,7 @@ export class StoryEngine {
   }
   enqueue(branchId: string, kind: JobKind, payload: Record<string, unknown>, onQueued?: () => void): Job {
     if (this.closed) throw new HttpError('任务服务正在关闭', 503);
-    if (kind === 'plan' && payload.purpose !== 'compress-summary') this.assertSeparatePlanning();
+    if (kind === 'plan' && payload.purpose !== 'compress-summary') throw new HttpError('剧情规划功能已移除', 410);
     let branch = this.store.assertVersion(branchId, String(payload.baseRevisionId ?? ''));
     if (this.deletingProjects.has(branch.projectId)) throw new HttpError('作品正在删除，不能创建任务', 409);
     let state = this.store.state(branchId); const rewriting = kind === 'generate' && Boolean(payload.chapterId);
@@ -277,7 +278,6 @@ export class StoryEngine {
     const unfinished = state.chapters.some(chapter => chapter.status !== 'ready');
     if (rewriting && (backgroundJobs.length || unfinished) && !payload.discardBackground) throw new HttpError('后台资料整理尚未完成，可以等待完成，或选择放弃后台任务后重新生成', 409);
     if (!startingRpg && branchJobs.some(job => ['queued', 'running', 'paused'].includes(job.status) && !(rewriting && payload.discardBackground && job.kind === 'extract'))) throw new HttpError('此故事线已有进行中或暂停的任务，请先完成或取消', 409);
-    if (kind === 'plan' && payload.purpose !== 'compress-summary') this.assertPlanningAfterProse(branchId);
     if ((kind === 'generate' || kind === 'import') && unfinished && !rewriting && !startingRpg) throw new HttpError('请先完成上一章资料整理', 409);
     if (kind === 'import' && (!Array.isArray(payload.chapters) || !payload.chapters.length)) throw new HttpError('导入目录为空');
     if (kind === 'generate') {
@@ -313,13 +313,13 @@ export class StoryEngine {
         smallPayload.chapterId = undefined; smallPayload.title = payload.title || original.title;
         if (payload.discardBackground) for (const background of backgroundJobs) { background.status = 'cancelled'; background.message = '作者放弃后台整理，已创建重新生成分支'; this.save(background); }
       }
-      if (kind === 'generate' || kind === 'plan' && payload.purpose !== 'compress-summary') {
+      if (kind === 'generate') {
         const reference = this.store.resolveSourceReference(branch.id);
         if (reference && !(kind === 'generate' && payload.mode === 'original' && !reference.sourceIds?.length)) smallPayload.sourceReference = reference;
         else delete smallPayload.sourceReference;
         smallPayload.sourceReferenceCaptured = true;
       }
-      if (kind === 'generate' && !smallPayload.title) smallPayload.title = (normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled && state.outline.fine.find(plan => plan.chapter === state.chapters.length + 1)?.title) || `第 ${state.chapters.length + 1} 章`;
+      if (kind === 'generate' && !smallPayload.title) smallPayload.title = `第 ${state.chapters.length + 1} 章`;
       job = { id: randomUUID(), projectId: branch.projectId, branchId: branch.id, kind, status: 'queued', baseRevisionId: branch.revisionId, progress: 0, total, message: '已排队', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: structuredClone(smallPayload) };
       if (kind === 'import') {
         const insert = this.store.db.prepare('INSERT INTO job_import_chapters VALUES(?,?,?,?)');
@@ -350,8 +350,7 @@ export class StoryEngine {
         job.payload.rpgChargedUsage = { inputTokens: continuation.inputTokens, outputTokens: continuation.outputTokens };
         this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, continuation.text);
       }
-      if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary') this.assertSeparatePlanning();
-      if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary') this.assertPlanningAfterProse(job.branchId);
+      if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary') throw new HttpError('剧情规划功能已移除，历史记录仅供查看', 410);
       this.store.assertVersion(job.branchId, job.baseRevisionId);
       if (this.jobsInternal(undefined, true).some(other => other.id !== job.id && other.branchId === job.branchId)) throw new HttpError('故事线已有其他任务', 409);
       delete job.payload.extractionRetry;
@@ -377,7 +376,7 @@ export class StoryEngine {
       // The choice, new version and next job commit together; a duplicate cannot queue another request.
       delete state.rpg!.nextChoice;
       const reference = this.store.resolveSourceReference(branchId);
-      const title = (normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled && state.outline.fine.find(plan => plan.chapter === state.chapters.length + 1)?.title) || `第 ${state.chapters.length + 1} 章`;
+      const title = `第 ${state.chapters.length + 1} 章`;
       let nextJob!: Job;
       this.store.commit(branchId, branch.revisionId, state, '确认章末选择，开始下一章', revisionId => {
         nextJob = { id: randomUUID(), projectId: job.projectId, branchId, kind: 'generate', status: 'queued', baseRevisionId: revisionId, progress: 0, total: 1, message: '已保存章末选择，等待开始下一章', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { mode: 'rpg', instruction: nextChoice.instruction, maxWords: nextChoice.maxWords, title, rpgChapterAnswer: { question: nextChoice.question, ...answer, ...(nextChoice.followingChoices?.length ? { unansweredQuestions: nextChoice.followingChoices } : {}) }, sourceReferenceCaptured: true, ...(reference ? { sourceReference: reference } : {}) } };
@@ -417,7 +416,7 @@ export class StoryEngine {
   private live(jobId: string): Job { const job = this.get(jobId); if (this.closed || job.status !== 'running') throw new DOMException('任务已停止', 'AbortError'); this.store.assertVersion(job.branchId, job.baseRevisionId); return job; }
   private provider(role: 'writing' | 'planning' | 'extraction'): ProviderConfig {
     const settings = normalizeModelSettings(this.getSettings()); const providerId = settings[`${role}ProviderId`]; const config = settings.providers.find(p => p.id === providerId);
-    const task = role === 'writing' ? '写作' : role === 'planning' ? '规划' : '资料提取';
+    const task = role === 'writing' ? '写作' : role === 'planning' ? '摘要压缩' : '资料提取';
     if (!config) throw new HttpError(`请先在供应商配置中选择${task}供应商`);
     const model = (settings[`${role}Model`] ?? config.model ?? '').trim();
     if (!model) throw new HttpError(`请先为${task}任务选择或填写模型名称`);
@@ -466,19 +465,18 @@ export class StoryEngine {
     const { task, templates, variables, runtime, protocol } = input;
     const compiled = compileTaskPrompt(templates, task, variables, runtime);
     const tools: ModelTool[] = [];
-    if (task === 'writing' || task === 'planning' && (runtime.planningMode === 'tool' || variables.originalReference?.trim())) tools.push(...buildWritingContext({ state: emptyState(), chapterText: () => '' }).tools);
+    if (task === 'writing') tools.push(...buildWritingContext({ state: emptyState(), chapterText: () => '' }).tools);
     if (task === 'writing') {
       tools.push(...this.imageTools('', runtime.illustrations ?? { portrait: false, cg: false }).tools);
       if (variables.mode === 'rpg' && runtime.rpg) tools.push(...this.rpgTools('').tools);
     }
-    if (task === 'planning' && runtime.planningMode === 'tool') tools.push(...this.planningTools('', Math.max(1, Math.trunc(Number(variables.chapterNumber) || 1))).tools);
     const request: ModelRequest = { ...compiled, tools, ...(task === 'writing' && variables.mode === 'rpg' ? { chapterBudget: { targetWords: normalizeChapterWords(Number(variables.maxWords)) } } : {}) };
     const body = buildRequestSnapshot({ id: 'preview', name: '提示词预览', protocol, baseUrl: 'https://preview.invalid', model: 'preview-model', maxOutputTokens: 4096, contextTokens: 2000000 }, request).body;
     const native = JSON.parse(body);
     const messages = protocol === 'openai-chat' ? native.messages : protocol === 'openai-responses' ? native.input : protocol === 'gemini'
       ? [...(native.systemInstruction ? [{ role: 'system', content: native.systemInstruction.parts.map((part: { text: string }) => part.text).join('\n\n') }] : []), ...native.contents.map((message: { role: string; parts: { text: string }[] }) => ({ role: message.role === 'model' ? 'assistant' : 'user', content: message.parts.map(part => part.text).join('\n\n') }))]
       : [...(native.system ? [{ role: 'system', content: native.system }] : []), ...native.messages.map((message: { role: string; content: string | { text: string }[] }) => ({ role: message.role, content: typeof message.content === 'string' ? message.content : message.content.map(part => part.text).join('\n\n') }))];
-    const previewTools = tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+    const previewTools: PromptPreviewResult['tools'] = compiled.writingOutputMode === 'tool' ? [writingResponseTool(tools)] : tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
     if (compiled.structuredOutput?.mode === 'tool') previewTools.push({ name: compiled.structuredOutput.name, description: compiled.structuredOutput.description, parameters: compiled.structuredOutput.schema });
     return { messages, runtimeBlocks: compiled.runtimeBlocks, tools: previewTools, body };
   }
@@ -493,62 +491,6 @@ export class StoryEngine {
   private outputCheckpoint(job: Job, output: ModelOutputRecord, payload: Record<string, unknown>, progress: number, message: string, local: boolean, completed = false) {
     if (local) { job.status = completed ? 'completed' : 'paused'; job.error = undefined; }
     return (revisionId: string, branchId: string) => { this.checkpoint(job, payload, completed ? job.total : progress, local && !completed ? `${message}；已暂停，可点击继续` : message)(revisionId, branchId); this.store.outputs.update(output.id, { status: 'applied', error: undefined, issues: [] }); };
-  }
-  private assertSeparatePlanning() {
-    const planning = normalizeTaskSettings(this.getSettings().taskSettings).planning;
-    if (!planning.enabled) throw new HttpError('剧情规划已关闭，请先在任务模型设置中开启', 400);
-    if (planning.mode !== 'separate') throw new HttpError('剧情规划当前由写作 AI 通过工具提交，请发起正文写作或切换为独立规划模型', 400);
-  }
-  private assertPlanningAfterProse(branchId: string) {
-    const branch = this.store.getBranch(branchId); const state = this.store.state(branchId);
-    if (!state.chapters.length) throw new HttpError('请先完成一章正文，再规划后续剧情');
-    if (this.jobsInternal(branch.projectId).some(job => job.branchId === branchId && job.kind === 'generate' && job.baseRevisionId === branch.revisionId && !job.payload.generatedChapterId && ['queued', 'running', 'paused', 'failed'].includes(job.status))) throw new HttpError('当前章节正文尚未完成，请先完成正文，再规划后续剧情');
-  }
-  private updatePlanState(state: StoryState, value: PlanningResult) {
-    const next = state.chapters.length + 1;
-    for (let chapter = next; chapter <= next + 3; chapter++) if (!value.fine.some(f => f.chapter === chapter)) throw new OutputValidationError([{ path: 'fine', message: `缺少第 ${chapter} 章预期规划，需提供当前章和接下来三章` }]);
-    if (new Set(value.fine.map(plan => plan.chapter)).size !== value.fine.length) throw new OutputValidationError([{ path: 'fine', message: '章节规划序号不能重复' }]);
-    state.outline.fine = value.fine.filter(f => f.chapter >= next && f.chapter <= next + 3);
-    for (const [index, item] of value.foreshadows.entries()) {
-      const relatedEntityIds = item.relatedNames.map((name, nameIndex) => { const matches = state.entities.filter(e => !e.mergedInto && [e.name, ...e.aliases].includes(name)); if (matches.length !== 1) throw new OutputValidationError([{ path: `foreshadows[${index}].relatedNames[${nameIndex}]`, message: '关联名称必须匹配唯一的已有实体' }]); return matches[0].id; });
-      const titleKey = (title: string) => title.normalize('NFKC').trim().toLocaleLowerCase();
-      const old = state.foreshadows.find(f => titleKey(f.title) === titleKey(item.title)); if (old) { if (old.status === 'planned') Object.assign(old, { detail: item.detail, dueChapter: item.dueChapter, revealCondition: item.revealCondition, relatedEntityIds }); } else state.foreshadows.push({ id: randomUUID(), title: item.title, detail: item.detail, dueChapter: item.dueChapter, revealCondition: item.revealCondition, relatedEntityIds, status: 'planned' });
-    }
-  }
-  private applyPlan(job: Job, output: ModelOutputRecord, value: PlanningResult, local: boolean) {
-    if (job.kind === 'generate' && job.payload.postWritingPlanning === 'pending' && job.payload.generatedChapterId) { this.applyPostWritingPlan(job, output, value, local); return; }
-    this.assertSeparatePlanning();
-    this.assertPlanningAfterProse(job.branchId);
-    const state = this.store.state(job.branchId); this.updatePlanState(state, value);
-    if (job.payload.sourceReference) state.sourceReference = structuredClone(job.payload.sourceReference as StoryReference);
-    this.store.commit(job.branchId, job.baseRevisionId, state, '更新未发生剧情的预期规划', this.outputCheckpoint(job, output, { ...job.payload, planned: true, pendingStage: undefined }, job.progress, '预期规划已保存', local, local && job.kind === 'plan'));
-  }
-  private planningTools(jobId: string, previewChapter?: number): { tools: ModelTool[] } {
-    const config = normalizeTaskSettings(this.getSettings().taskSettings).planning;
-    if (previewChapter === undefined && (!config.enabled || config.mode !== 'tool')) return { tools: [] };
-    const next = previewChapter ?? this.store.state(this.live(jobId).branchId).chapters.length + 1;
-    const tool: ModelTool = {
-      name: 'update_plot_plan', description: `本章正文已经完整保存。直接编写第 ${next} 章至第 ${next + 3} 章尚未发生的预期剧情及隐藏伏笔。由你提供完整规划内容，不会调用其他模型。校验成功后暂存，当前后置规划阶段成功结束后独立保存；再次调用会替换此前暂存规划，不能修改已保存正文。`,
-      parameters: { type: 'object', properties: {
-        fine: { type: 'array', minItems: 4, maxItems: 4, items: { type: 'object', properties: { chapter: { type: 'integer', minimum: next, maximum: next + 3 }, title: { type: 'string' }, goal: { type: 'string' } }, required: ['chapter', 'title', 'goal'], additionalProperties: false } },
-        foreshadows: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, detail: { type: 'string' }, status: { type: 'string', enum: ['planned'] }, dueChapter: { type: 'integer', minimum: next }, revealCondition: { type: 'string' }, relatedNames: { type: 'array', items: { type: 'string' } } }, required: ['title', 'detail', 'status', 'revealCondition', 'relatedNames'], additionalProperties: false } },
-      }, required: ['fine', 'foreshadows'], additionalProperties: false },
-      execute: args => {
-        const job = this.live(jobId);
-        if (!job.payload.generatedChapterId || job.payload.postWritingPlanning !== 'pending' || job.payload.pendingStage !== 'planning') return { error: '本章正文尚未完整保存，不能提前提交剧情规划；请先完成正文。' };
-        const planning = normalizeTaskSettings(this.getSettings().taskSettings).planning;
-        if (!planning.enabled || planning.mode !== 'tool') return { error: '剧情规划工具已停用，本次内容未暂存。' };
-        try {
-          const value = planningSchema.strict().parse(args);
-          if (value.fine.length !== 4 || value.fine.some(plan => plan.chapter < next || plan.chapter > next + 3)) throw new Error('只提供当前待写章和接下来三章的四项规划。');
-          if (value.foreshadows.some(item => item.status !== 'planned' || item.dueChapter !== undefined && item.dueChapter < next)) throw new Error('只能规划尚未发生的伏笔，status 必须为 planned，预期章节不能早于当前待写章。');
-          this.updatePlanState(this.store.state(job.branchId), value);
-          job.payload.pendingPlotPlan = value; this.save(job);
-          return { status: 'staged', fine: value.fine, message: '后续规划已暂存，本次规划阶段成功结束后独立保存。正文已经固定，不得继续输出或修改小说正文。' };
-        } catch (error) { return { error: this.redact(error instanceof Error ? error.message : '剧情规划未通过校验，请修正工具参数。') }; }
-      },
-    };
-    return { tools: [tool] };
   }
   private rpgTools(jobId: string): { tools: ModelTool[] } {
     return { tools: [{
@@ -582,62 +524,19 @@ export class StoryEngine {
     if (job.payload.mode === 'rpg' && !job.payload.rpgChoice && !job.payload.rpgChapterAnswer) throw new OutputValidationError([{ path: '$', message: 'RPG 剧情没有询问玩家的选择节点，请使用支持工具调用的写作模型并重新生成；正文已保留供作者查看' }]);
     const input = job.payload as unknown as GenerateInput; const original = job.payload.sourceChapterId ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined; const state = this.store.state(job.branchId);
     const text = original && input.selection ? String(original.text).slice(0, input.selection.start) + prose + String(original.text).slice(input.selection.end) : prose;
-    const planning = normalizeTaskSettings(this.getSettings().taskSettings).planning;
-    const postPlanning = planning.enabled && planning.mode === 'tool';
-    this.store.saveChapter(job.branchId, { baseRevisionId: job.baseRevisionId, title: input.title || (normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled && state.outline.fine.find(f => f.chapter === state.chapters.length + 1)?.title) || `第 ${state.chapters.length + 1} 章`, text }, (revisionId, branchId) => {
+    this.store.saveChapter(job.branchId, { baseRevisionId: job.baseRevisionId, title: input.title || `第 ${state.chapters.length + 1} 章`, text }, (revisionId, branchId) => {
       const saved = this.store.revisionState(revisionId).chapters.at(-1)!;
-      job.status = postPlanning ? 'running' : 'completed'; job.error = undefined;
+      job.status = 'completed'; job.error = undefined;
       if (original && input.selection) this.store.shiftWritingActivityOffsets(job.id, this.redact(String(original.text).slice(0, input.selection.start)).length);
       this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, text);
-      this.outputCheckpoint(job, output, { ...job.payload, pendingPlotPlan: undefined, generatedChapterId: saved.id, postWritingPlanning: postPlanning ? 'pending' : undefined, pendingStage: postPlanning ? 'planning' : undefined }, job.total, postPlanning ? '正文已保存，准备后续剧情规划' : '正文已保存，资料在后台整理', local, !postPlanning)(revisionId, branchId);
-      if (!postPlanning) this.queueExtraction(job, saved.id, local);
+      this.outputCheckpoint(job, output, { ...job.payload, pendingPlotPlan: undefined, generatedChapterId: saved.id, postWritingPlanning: undefined, pendingStage: undefined }, job.total, '正文已保存，资料在后台整理', local, true)(revisionId, branchId);
+      this.queueExtraction(job, saved.id, local);
     }, state => {
       if (job.payload.sourceReference) state.sourceReference = structuredClone(job.payload.sourceReference as StoryReference);
       if (state.rpg && job.payload.rpgNextChoice) state.rpg.nextChoice = { ...structuredClone(job.payload.rpgNextChoice as RpgChoice), jobId: job.id, chapterId: state.chapters.at(-1)!.id, maxWords: normalizeChapterWords(input.maxWords), instruction: input.instruction };
     });
-    if (postPlanning) this.emitWriting(job.id, this.writingSnapshot(job.id)); this.notifyWriting(job);
+    this.notifyWriting(job);
     queueMicrotask(() => this.pump());
-  }
-  private finishSavedWriting(job: Job, pausedExtraction: boolean, message: string) {
-    const chapterId = String(job.payload.generatedChapterId); this.store.assertVersion(job.branchId, job.baseRevisionId);
-    this.store.db.exec('BEGIN IMMEDIATE');
-    try {
-      job.status = 'completed'; job.progress = job.total; job.error = undefined; job.message = message;
-      job.payload.postWritingPlanning = 'skipped'; delete job.payload.pendingPlotPlan; delete job.payload.pendingStage; this.save(job, false);
-      if (this.store.state(job.branchId).chapters.find(chapter => chapter.id === chapterId)?.status !== 'ready' && !this.jobsInternal(undefined, true).some(other => other.branchId === job.branchId && other.kind === 'extract')) this.queueExtraction(job, chapterId, pausedExtraction);
-      this.store.db.exec('COMMIT');
-    } catch (error) { this.store.db.exec('ROLLBACK'); throw error; }
-    this.notifyWriting(job); queueMicrotask(() => this.pump());
-  }
-  private applyPostWritingPlan(job: Job, output: ModelOutputRecord, value: PlanningResult, local: boolean) {
-    const config = normalizeTaskSettings(this.getSettings().taskSettings).planning;
-    if (!config.enabled || config.mode !== 'tool') throw new HttpError('后置剧情规划工具已停用，请继续任务以保存正文并完成资料整理');
-    const state = this.store.state(job.branchId); const next = state.chapters.length + 1;
-    if (job.payload.postWritingPlanning !== 'pending' || job.payload.pendingStage !== 'planning' || state.chapters.at(-1)?.id !== job.payload.generatedChapterId) throw new HttpError('后置规划阶段或已保存章节发生变化，请刷新后重试', 409);
-    if (value.fine.length !== 4 || value.fine.some(plan => plan.chapter < next || plan.chapter > next + 3) || value.foreshadows.some(item => item.status !== 'planned' || item.dueChapter !== undefined && item.dueChapter < next)) throw new OutputValidationError([{ path: '$', message: '后置规划只能包含刚完成章节之后的四章和未发生伏笔' }]);
-    this.updatePlanState(state, value);
-    this.store.outputs.update(output.id, { normalizedText: this.redact(JSON.stringify(value)) });
-    job.status = 'completed'; job.error = undefined;
-    this.store.commit(job.branchId, job.baseRevisionId, state, '正文完成后更新后续剧情规划', (revisionId, branchId) => {
-      this.outputCheckpoint(job, output, { ...job.payload, pendingPlotPlan: undefined, postWritingPlanning: 'completed', planned: true, pendingStage: undefined }, job.total, '正文与后续规划已保存，资料在后台整理', local, true)(revisionId, branchId);
-      this.queueExtraction(job, String(job.payload.generatedChapterId), local);
-    });
-    this.notifyWriting(job); queueMicrotask(() => this.pump());
-  }
-  private async postWritingPlan(jobId: string, signal: AbortSignal) {
-    let job = this.live(jobId); const config = normalizeTaskSettings(this.getSettings().taskSettings).planning;
-    if (!config.enabled || config.mode !== 'tool') { this.finishSavedWriting(job, false, '正文已保存，后置规划已停用，资料在后台整理'); return; }
-    const state = this.store.state(job.branchId); const next = state.chapters.length + 1; const provider = { ...this.provider('writing'), stream: true };
-    delete job.payload.pendingPlotPlan; job.payload.pendingStage = 'planning'; job.payload.postPlanningAttempt = Number(job.payload.postPlanningAttempt ?? 0) + 1; job.message = '正文已完整保存，正在规划后续剧情'; this.save(job);
-    const attempt = Number(job.payload.postPlanningAttempt); const original = this.writingReference(job);
-    const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original });
-    const planning = this.planningTools(job.id); const prompt = this.taskPrompt('planning', { ...this.promptVariables(job, state), ...context.variables, context: context.text, endChapter: String(next + 3) }, { planningMode: 'tool' });
-    const request = this.budget(job, provider, { ...prompt, signal, tools: [...context.tools, ...planning.tools], onActivity: event => this.writingActivity(jobId, { ...event, id: `post-planning-${attempt}:${event.id}` }) });
-    const { output } = await this.requestCaptured(jobId, 'planning', request, req => this.models.generateText(provider, req), result => result.text);
-    job = this.live(jobId); const current = normalizeTaskSettings(this.getSettings().taskSettings).planning;
-    if (!current.enabled || current.mode !== 'tool') { this.finishSavedWriting(job, false, '正文已保存，后置规划已停用，资料在后台整理'); return; }
-    if (!job.payload.pendingPlotPlan) throw new OutputValidationError([{ path: '$', message: '正文已经保存，但本次后续规划没有通过 update_plot_plan 提交有效内容；可只重试规划阶段' }]);
-    this.applyPostWritingPlan(job, output, planningSchema.parse(job.payload.pendingPlotPlan), false);
   }
   private queueExtraction(writing: Job, chapterId: string, paused: boolean, blockIndex = 0) {
     const background: Job = { id: randomUUID(), projectId: writing.projectId, branchId: writing.branchId, kind: 'extract', status: paused ? 'paused' : 'queued', baseRevisionId: writing.baseRevisionId, progress: 0, total: 1, message: paused ? '正文已修复；请手动继续后台资料整理' : '正文已保存，等待后台资料整理', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { extractChapterId: chapterId, blockIndex, writingJobId: writing.id } };
@@ -717,7 +616,7 @@ export class StoryEngine {
       if (estimateTokens(combined) >= estimateTokens(String(job.payload.summarySource ?? ''))) throw new HttpError('最终压缩候选没有比完整原摘要更短，请重新生成压缩候选');
       job.payload = { ...job.payload, compressionText: combined, pendingStage: undefined }; job.status = 'completed'; job.progress = job.total; job.message = '摘要压缩候选已生成，等待作者确认'; job.error = undefined; this.save(job); return;
     }
-    if (work.pass + 1 >= MAX_COMPRESSION_PASSES) throw new HttpError(`摘要压缩已完成 ${MAX_COMPRESSION_PASSES} 轮，合并候选仍超出规划模型的上下文；已完成片段保留，请提高规划模型上下文上限后继续，或重新创建压缩任务`);
+    if (work.pass + 1 >= MAX_COMPRESSION_PASSES) throw new HttpError(`摘要压缩已完成 ${MAX_COMPRESSION_PASSES} 轮，合并候选仍超出摘要压缩模型的上下文；已完成片段保留，请提高摘要压缩模型上下文上限后继续，或重新创建压缩任务`);
     job.payload = { ...job.payload, compressionWork: { pass: work.pass + 1, chunks: nextChunks, index: 0, results: [], completed: work.completed } satisfies CompressionWork, pendingStage: undefined };
     job.total = work.completed + nextChunks.length; job.message = `准备第 ${work.pass + 2} 轮${nextChunks.length === 1 ? '合并' : '分段'}压缩`; this.save(job);
   }
@@ -750,7 +649,7 @@ export class StoryEngine {
       const provider = this.provider('planning');
       job.message = `第 ${work.pass + 1} 轮压缩片段 ${work.index + 1}/${work.chunks.length}`; this.save(job);
       const request = this.budget(job, provider, { ...this.taskPrompt('compression', { ...this.promptVariables(job), summaryText: work.chunks[work.index] }), signal });
-      const { result, output } = await this.requestCaptured(jobId, 'planning', request, req => this.models.generateStructured(provider, req, value => z.object({ text: z.string().min(1) }).parse(value)), result => JSON.stringify(result.value), undefined, work.completed);
+      const { result, output } = await this.requestCaptured(jobId, 'compression', request, req => this.models.generateStructured(provider, req, value => z.object({ text: z.string().min(1) }).parse(value)), result => JSON.stringify(result.value), undefined, work.completed);
       this.applyCompression(this.live(jobId), output, result.value.text);
       if (this.get(jobId).status === 'completed') return;
     }
@@ -773,17 +672,6 @@ export class StoryEngine {
     }
     this.store.applyExtraction(job.branchId, job.baseRevisionId, output.chapterId, value, complete, this.outputCheckpoint(job, output, payload, progress, complete ? '本章资料已保存' : `已保存片段 ${output.blockIndex + 1}/${blocks.length}`, local, finished));
     if (complete) this.illustrateChapter(job, output.chapterId);
-  }
-  private async plan(jobId: string, signal: AbortSignal) {
-    this.assertSeparatePlanning();
-    this.assertPlanningAfterProse(this.get(jobId).branchId);
-    const job = this.live(jobId); const state = this.store.state(job.branchId); const provider = this.provider('planning'); const next = state.chapters.length + 1;
-    if (!state.chapters.length) throw new HttpError('请先完成一章正文，再规划后续剧情');
-    const original = this.writingReference(job);
-    const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original });
-    const request = this.budget(job, provider, { ...this.taskPrompt('planning', { ...this.promptVariables(job, state), ...context.variables, context: context.text, endChapter: String(next + 3) }), signal, ...(original ? { tools: context.tools } : {}) });
-    const { result, output } = await this.requestCaptured(jobId, 'planning', request, req => this.models.generateStructured<PlanningResult>(provider, req, value => planningSchema.parse(value)), result => JSON.stringify(result.value));
-    this.applyPlan(this.live(jobId), output, result.value, false);
   }
   private async extractChapter(jobId: string, chapterId: string, signal: AbortSignal) {
     let job = this.live(jobId); const chapter = this.store.chapter(job.branchId, chapterId); const blocks = splitBlocks(chapter.text); let blockIndex = job.payload.extractChapterId === chapterId ? Number(job.payload.blockIndex ?? 0) : 0;
@@ -855,16 +743,16 @@ export class StoryEngine {
       this.live(jobId);
       if (job.kind === 'plan') {
         if (job.payload.purpose === 'compress-summary') { await this.compressSummary(jobId, controller.signal); return; }
-        await this.plan(jobId, controller.signal);
+        throw new HttpError('剧情规划功能已移除', 410);
       }
       if (job.kind === 'generate') {
         // Completed prose owns an independent extraction job; tool continuations do not regenerate it.
         if (job.payload.generatedChapterId) {
-          if (job.payload.postWritingPlanning === 'pending') { await this.postWritingPlan(jobId, controller.signal); return; }
           const chapter = this.store.chapter(job.branchId, String(job.payload.generatedChapterId));
           this.store.db.exec('BEGIN IMMEDIATE');
           try {
             job.status = 'completed'; job.progress = job.total; job.message = '正文已保存，资料在后台整理'; job.error = undefined;
+            delete job.payload.postWritingPlanning; delete job.payload.pendingPlotPlan; delete job.payload.pendingStage;
             this.store.db.prepare('INSERT OR IGNORE INTO job_writing_drafts VALUES(?,?)').run(job.id, chapter.text); this.save(job, false);
             if (chapter.status !== 'ready' && !this.jobsInternal(undefined, true).some(other => other.branchId === job.branchId && other.kind === 'extract')) this.queueExtraction(job, chapter.id, false, job.payload.extractChapterId === chapter.id ? Number(job.payload.blockIndex ?? 0) : 0);
             this.store.db.exec('COMMIT');
@@ -873,7 +761,7 @@ export class StoryEngine {
         }
         const input = job.payload as unknown as GenerateInput;
         const state = this.store.state(job.branchId); const provider = { ...this.provider('writing'), stream: true };
-        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, planningEnabled: normalizeTaskSettings(this.getSettings().taskSettings).planning.enabled, original: this.writingReference(job) });
+        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original: this.writingReference(job) });
         const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
         const selected = original ? input.selection ? String(original.text).slice(input.selection.start, input.selection.end) : String(original.text) : undefined;
         const continuation = input.mode === 'rpg' ? job.payload.rpgContinuation as ModelToolContinuation | undefined : undefined;
@@ -886,7 +774,7 @@ export class StoryEngine {
         if (!continuation) { job.payload.imageStartingEntityIds = state.entities.map(entity => entity.id); job.payload.imageRequests = []; delete job.payload.pendingPlotPlan; this.save(job); }
         const illustrations = this.imageTools(jobId);
         const rpg = input.mode === 'rpg' && state.rpg ? this.rpgTools(jobId) : { tools: [] };
-        const prompt: ModelRequest = continuation ? { system: '', prompt: '' } : this.taskPrompt('writing', {
+        const prompt: ModelRequest = continuation ? { system: '', prompt: '', writingOutputMode: continuation.writingOutputMode } : this.taskPrompt('writing', {
           ...this.promptVariables(job, state), ...context.variables, context: context.text, mode: input.mode,
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
           writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : `请写第 ${state.chapters.length + 1} 章。`,
@@ -895,9 +783,9 @@ export class StoryEngine {
         const retrievalTools = aliases ? context.tools.map(tool => ({ ...tool, execute: (args: Record<string, unknown>) => tool.execute({ ...args, ...(typeof args.id === 'string' ? { id: aliases[args.id] ?? args.id } : {}), ...(typeof args.chapterId === 'string' ? { chapterId: aliases[args.chapterId] ?? args.chapterId } : {}) }) })) : context.tools;
         const tools = [...retrievalTools, ...illustrations.tools, ...rpg.tools];
         if (continuation) {
-          const declared = (continuation.body.tools ?? []) as { name?: string; function?: { name?: string }; functionDeclarations?: { name: string }[] }[];
-          const names = declared.flatMap(tool => tool.functionDeclarations?.map(value => value.name) ?? [tool.function?.name ?? tool.name ?? '']);
-          for (const name of names.filter(name => ['update_plot_plan', 'generate_character_portrait', 'generate_scene_cg'].includes(name) && !tools.some(tool => tool.name === name))) tools.push({ name, description: '原会话声明的工具在当前正文阶段不可执行。', parameters: { type: 'object' }, execute: () => ({ error: name === 'update_plot_plan' ? '当前正文尚未完整保存，禁止提前提交剧情规划；请先完成正文，后续规划阶段会提供此工具。' : '此工具已由用户停用，本次请求未执行；请继续剧情，不得假设图片已经生效。' }) });
+          const declared = (continuation.body.tools ?? []) as Record<string, any>[];
+          const names = declared.flatMap(tool => tool.functionDeclarations ?? [tool.function ?? tool]).flatMap(tool => [tool.name ?? '', ...((tool.parameters ?? tool.parametersJsonSchema ?? tool.input_schema)?.properties?.toolCalls?.items?.properties?.name?.enum ?? [])]);
+          for (const name of names.filter(name => ['update_plot_plan', 'generate_character_portrait', 'generate_scene_cg'].includes(name) && !tools.some(tool => tool.name === name))) tools.push({ name, description: '原会话工具已经停用。', parameters: { type: 'object' }, execute: () => ({ error: name === 'update_plot_plan' ? '剧情规划功能已移除，此工具不会执行。' : '此工具已由用户停用，本次请求未执行；请继续剧情，不得假设图片已经生效。' }) });
         }
         if (input.mode === 'rpg') {
           const previous = job.payload.rpgProvider as { id: string; protocol: string; model: string; baseUrl: string } | undefined;
@@ -907,7 +795,6 @@ export class StoryEngine {
         const request = this.budget(job, provider, { ...prompt, signal: controller.signal, tools, onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event), ...(input.mode === 'rpg' ? { continuation, chapterBudget: { targetWords: normalizeChapterWords(input.maxWords) }, maxToolRounds: 24, onContinuation: (value: ModelToolContinuation) => { const fresh = this.live(jobId); fresh.payload.rpgContinuation = JSON.parse(this.redact(JSON.stringify(value))) as ModelToolContinuation; this.save(fresh); } } : {}) });
         const { result, output } = await this.requestCaptured(jobId, 'writing', request, req => this.models.generateText(provider, req), result => result.text);
         this.applyWriting(this.live(jobId), output, result.text, false);
-        if (this.get(jobId).payload.postWritingPlanning === 'pending') await this.postWritingPlan(jobId, controller.signal);
         return;
       }
       if (job.kind === 'extract') {

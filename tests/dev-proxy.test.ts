@@ -1,4 +1,5 @@
 import { createServer as createHttpServer, type Server } from 'node:http';
+import { listenLocalServer } from './local-server.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -26,10 +27,7 @@ describe('real Vite development proxy routing', () => {
         response.end('Frontend module incorrectly forwarded to the API backend');
       }
     });
-    await new Promise<void>((resolveListen, reject) => {
-      backend!.once('error', reject);
-      backend!.listen(0, '127.0.0.1', () => { backend!.off('error', reject); resolveListen(); });
-    });
+    await listenLocalServer(backend);
     const address = backend.address();
     if (!address || typeof address === 'string') throw new Error('测试后端未取得监听端口');
     const target = `http://127.0.0.1:${address.port}`;
@@ -43,10 +41,7 @@ describe('real Vite development proxy routing', () => {
     } satisfies ProxyOptions]));
     // Vite treats port=0 as its default 5173, so obtain an OS-assigned port first.
     const reservation = createHttpServer();
-    await new Promise<void>((resolveListen, reject) => {
-      reservation.once('error', reject);
-      reservation.listen(0, '127.0.0.1', () => { reservation.off('error', reject); resolveListen(); });
-    });
+    await listenLocalServer(reservation);
     const reservedAddress = reservation.address();
     await new Promise<void>((resolveClose, reject) => reservation.close(error => error ? reject(error) : resolveClose()));
     if (!reservedAddress || typeof reservedAddress === 'string') throw new Error('测试未取得可用的随机端口');

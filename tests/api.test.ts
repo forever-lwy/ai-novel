@@ -71,7 +71,7 @@ describe('HTTP boundaries and persistence', () => {
     expect((await ctx.app.inject({ url: `/api/projects/${p.id}?view=author`, cookies: { session } })).body).toContain('未来真相不公开');
     expect((await ctx.app.inject({ url: `/api/branches/${branch.id}/search?q=${encodeURIComponent('幕后')}`, cookies: { session } })).json().entities).toEqual([]);
     ctx.store.saveChapter(branch.id, { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, title: '已完成正文', text: '林舟走进城里。' });
-    const job = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId });
+    const job = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, purpose: 'compress-summary' });
     const row = JSON.parse(String(ctx.store.db.prepare('SELECT data FROM jobs WHERE id=?').get(job.id)!.data));
     row.status = 'failed'; row.message = '规划幕后身份失败'; row.error = '幕后身份是守门人';
     ctx.store.db.prepare('UPDATE jobs SET status=?,data=? WHERE id=?').run('failed', JSON.stringify(row), job.id);

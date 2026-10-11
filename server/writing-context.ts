@@ -119,7 +119,7 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
     entityDirectory: original.state.entities.filter(entity => !entity.mergedInto).slice(0, 100).map(entity => ({ id: entity.id, name: entity.name, kind: entity.kind, aliases: entity.aliases.slice(0, 3), ...(entity.aliases.length > 3 ? { aliasesTruncated: true } : {}) })),
     entityDirectoryTotal: original.state.entities.filter(entity => !entity.mergedInto).length,
     entityDirectoryTruncated: original.state.entities.filter(entity => !entity.mergedInto).length > 100,
-    foreshadows: original.state.foreshadows, plans: original.state.outline.fine,
+    foreshadows: original.state.foreshadows,
   } : undefined;
   const requiredEntities = activeEntities.filter(isMainCharacter).map(entity => ({ ...entity, facts: entity.facts.filter(fact => fact.temporal !== 'future' && (fact.temporal === 'current' || fact.locked || isMajorEvent(fact.attribute))) }));
   const requiredIds = new Set(requiredEntities.map(entity => entity.id));
@@ -142,7 +142,6 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
     ...(compressionApplies ? { authorConfirmedSummary: { text: compression!.text, chapterIds: compression!.chapterIds } } : {}),
     completePlotSummaries: summaries,
     recentCompleteChapters: recent,
-    currentChapterPlan: input.planningEnabled === false ? null : state.outline.fine.find(plan => plan.chapter === nextChapter) ?? null,
     ...(originalReference ? { originalReference } : {}),
   };
   const tools: ModelTool[] = [
@@ -241,12 +240,14 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
       },
     },
   ];
+  const { recentCompleteChapters, ...storyMaterials } = context;
   return { text: `本次写作的必要资料（完整保留）：\n${JSON.stringify(context)}`, tools, variables: {
+    storyMaterials: JSON.stringify(storyMaterials),
     worldview: context.worldview, locked: context.locked,
     worldRules: JSON.stringify(context.worldRules), mainCharacters: JSON.stringify(context.mainCharacters),
     mainCharacterRelations: JSON.stringify(context.mainCharacterRelations), unrevealedForeshadows: JSON.stringify(context.unrevealedForeshadows),
     plotSummaries: JSON.stringify({ ...(context.authorConfirmedSummary ? { authorConfirmedSummary: context.authorConfirmedSummary } : {}), completePlotSummaries: summaries }),
-    recentChapters: JSON.stringify(recent), currentChapterPlan: JSON.stringify(context.currentChapterPlan),
+    recentChapters: JSON.stringify(recentCompleteChapters),
     originalReference: originalReference ? JSON.stringify(originalReference) : '',
   } };
 }

@@ -1,3 +1,4 @@
+import { listenLocalServer } from './local-server.mjs';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -21,7 +22,7 @@ async function service(handler: (req: IncomingMessage, res: ServerResponse, body
     handler(req, res, body);
   });
   servers.push(server);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await listenLocalServer(server);
   const addr = server.address();
   if (!addr || typeof addr === 'string') throw new Error('Missing fixture address');
   return `http://127.0.0.1:${addr.port}`;

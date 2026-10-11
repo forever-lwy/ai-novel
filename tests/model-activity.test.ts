@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from './local-server.mjs';
 import { generateText } from '../server/providers.js';
 import type { ModelActivityEvent, ModelRequest, ProviderConfig, ProviderProtocol } from '../shared/types.js';
 
@@ -13,7 +13,7 @@ const config = (protocol: ProviderProtocol, baseUrl: string, stream: boolean): P
 async function upstream(reply: (body: any, response: ServerResponse, index: number) => void | Promise<void>) {
   const bodies: any[] = [];
   const server = createServer(async (request, response) => { const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk)); const body = JSON.parse(Buffer.concat(chunks).toString()); bodies.push(body); await reply(body, response, bodies.length - 1); });
-  servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  servers.push(server); await listenLocalServer(server);
   return { bodies, baseUrl: `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}` };
 }
 function envelope(protocol: ProviderProtocol, text = thought) {

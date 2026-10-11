@@ -38,7 +38,7 @@ export function unwrapVisualText(text: string): { text: string; unwrapped: boole
   throw new Error('这份响应嵌套过多，暂时无法转成表单。请在高级 JSON 中保留最里面的模型正文，或重新粘贴输出。');
 }
 
-export function parseVisualOutput(text: string, stage: OutputStage, compression = false): { ok: true; value: OutputObject; unwrapped: boolean } | { ok: false; message: string } {
+export function parseVisualOutput(text: string, stage: OutputStage, compression = stage === 'compression'): { ok: true; value: OutputObject; unwrapped: boolean } | { ok: false; message: string } {
   try {
     const unwrapped = unwrapVisualText(text);
     const parsed: unknown = JSON.parse(stripFence(unwrapped.text));

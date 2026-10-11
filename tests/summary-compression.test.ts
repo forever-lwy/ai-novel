@@ -4,12 +4,14 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Store } from '../server/store.js';
 import { StoryEngine, type TextModels } from '../server/engine.js';
+import { defaultPromptTemplates } from '../shared/prompt-templates.js';
 import { ModelOutputError } from '../server/providers.js';
 import type { Job, ModelRequest, Settings } from '../shared/types.js';
 
 const stores: Store[] = []; const engines: StoryEngine[] = [];
 afterEach(async () => { for (const engine of engines.splice(0)) await engine.close(); for (const store of stores.splice(0)) store.close(); });
-const settings = (): Settings => ({ providers: [{ id: 'local', name: '中性模拟服务', protocol: 'openai-chat', baseUrl: 'http://unused.invalid', model: 'fixture', maxOutputTokens: 1000, contextTokens: 2200 }], writingProviderId: 'local', planningProviderId: 'local', extractionProviderId: 'local' });
+// This intentionally tiny budget tests segmentation with task-only prompts.
+const settings = (): Settings => { const promptTemplates = defaultPromptTemplates(); promptTemplates.presets.compression[0].useGeneral = false; return ({ promptTemplates, providers: [{ id: 'local', name: '中性模拟服务', protocol: 'openai-chat', baseUrl: 'http://unused.invalid', model: 'fixture', maxOutputTokens: 1000, contextTokens: 3200 }], writingProviderId: 'local', planningProviderId: 'local', extractionProviderId: 'local' }); };
 type Work = { pass: number; index: number; completed: number; chunks: string[]; results: string[] };
 type Call = { prompt: string; work: Work; maxOutputTokens: number | undefined };
 async function terminal(engine: StoryEngine, jobId: string) { const deadline = Date.now() + 5000; for (;;) { const job = engine.listJobs().find(value => value.id === jobId)!; if (['completed', 'failed', 'cancelled', 'paused', 'stale'].includes(job.status)) return job; if (Date.now() > deadline) throw new Error('中性模拟压缩任务超时'); await new Promise(resolve => setTimeout(resolve, 5)); } }

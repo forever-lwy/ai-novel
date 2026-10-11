@@ -1,3 +1,4 @@
+import { listenLocalServer } from './local-server.mjs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { providerNetworkPolicy, checkedProviderAddresses, isPublicAddress, providerFetch } from '../server/outbound.js';
@@ -8,7 +9,7 @@ import type { CapturedModelResponse } from '../shared/types.js';
 const servers: Server[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); } });
 async function fixture(handler: Parameters<typeof createServer>[0]) {
-  const server = createServer(handler); servers.push(server); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const server = createServer(handler); servers.push(server); await listenLocalServer(server);
   return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 }
 

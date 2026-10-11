@@ -3,12 +3,13 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type Server, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from './local-server.mjs';
 import { Store } from '../server/store.js';
 import { StoryEngine, type TextModels } from '../server/engine.js';
 import { generateText } from '../server/providers.js';
 import { buildApp } from '../server/app.js';
 import { defaultPromptTemplates, validatePromptTemplates } from '../shared/prompt-templates.js';
+import { WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 import type { Entity, ExtractionResult, Job, Settings } from '../shared/types.js';
 
 const stores: Store[] = [], engines: StoryEngine[] = [], servers: Server[] = [];
@@ -36,7 +37,7 @@ async function upstream(reply?: (body: any, response_: ServerResponse, index: nu
     else if (bodies.length === 1) response(response_, '你站在岔路口。', [{ id: 'decision-1', name: 'ask_user', args: { question: '接下来去哪里？', options } }]);
     else response(response_, '你依照自己的决定走向桥头。');
   });
-  servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  servers.push(server); await listenLocalServer(server);
   return { bodies, url: `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1` };
 }
 const settings = (url: string): Settings => ({ providers: [{ id: 'local', name: '本地协议模拟', protocol: 'openai-chat', baseUrl: url, model: 'writer', maxOutputTokens: 1000, contextTokens: 64000 }], writingProviderId: 'local', planningProviderId: 'local', extractionProviderId: 'local' });
@@ -59,6 +60,29 @@ function append(store: Store, branchId: string, title: string) {
 function originalSetup() { return { character: { kind: 'original' as const, name: '顾舟', description: '用户确认的旅人' }, entryInstruction: '从客栈进入故事' }; }
 
 describe('durable RPG story choices', () => {
+  it('restores a layered-tool choice from backup and continues with original transport after preset changes', async () => {
+    const service = await upstream((_body, reply, index) => response(reply, '', [{ id: `outer-${index}`, name: WRITING_RESPONSE_NAME, args: {
+      prose: index === 0 ? '你站在岔路口。' : '你沿着桥头继续前进。',
+      toolCalls: index === 0 ? [{ name: 'ask_user', argumentsJson: JSON.stringify({ question: '接下来去哪里？', options }) }] : [],
+    } }]));
+    const store = makeStore(), config = settings(service.url);
+    config.promptTemplates = defaultPromptTemplates(); config.promptTemplates.presets.writing[0].writingOutputMode = 'tool';
+    const engine = engineFor(store, config), project = store.createProject({ title: '工具通道体验' });
+    const queued = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'rpg', instruction: '体验', rpg: originalSetup() });
+    const waiting = await paused(engine, queued.id); expect(engine.writingSnapshot(queued.id).text).toBe('你站在岔路口。');
+    expect(rawJob(store, queued.id).payload.rpgContinuation).toMatchObject({ writingOutputMode: 'tool' }); await engine.close();
+    const restored = store.restoreProject(store.exportProject(project.id));
+    config.promptTemplates.presets.writing[0].writingOutputMode = 'text';
+    const replacement = engineFor(store, config); const copy = replacement.listJobs(restored.id).find(value => value.kind === 'generate')!;
+    replacement.choose(copy.id, { choiceId: copy.pendingChoice!.id, optionId: 'bridge' });
+    expect((await completed(replacement, copy.id)).status).toBe('completed'); expect(service.bodies).toHaveLength(2);
+    expect(store.exportText(copy.branchId)).toBe('第 1 章\n\n你站在岔路口。你沿着桥头继续前进。');
+    expect(store.exportText(copy.branchId)).not.toContain('argumentsJson');
+    expect(rawJob(store, copy.id).payload.rpgContinuation).toMatchObject({ writingOutputMode: 'tool' });
+    expect(JSON.stringify(service.bodies[1])).toContain('toolResults'); expect(JSON.stringify(service.bodies[1])).toContain('前往桥头');
+    expect(replacement.listWritingActivities(copy.id).some(value => value.name === 'ask_user' && value.status === 'completed')).toBe(true);
+    expect(job(replacement, waiting.id).status).toBe('paused');
+  });
   it('forks at the selected boundary and resolves existing characters there without modifying canon', () => {
     const store = makeStore(), project = store.createProject({ title: '原作' });
     const character: Entity = { id: '', name: '林舟', kind: 'character', aliases: [], description: '仍然活着的旅人', locked: true, visibility: 'public', facts: [] };
@@ -224,27 +248,6 @@ describe('durable RPG story choices', () => {
     engine.choose(queued.id, { choiceId: waiting.pendingChoice!.id, optionId: 'bridge' });
     const finished = await completed(engine, queued.id); expect(finished.status).toBe('completed'); expect(finished.usageEstimated).toBe(true);
     expect(finished.inputTokens).toBeGreaterThan(waiting.inputTokens); expect(finished.outputTokens).toBeGreaterThan(waiting.outputTokens);
-  });
-
-  it('retries RPG post-planning without restoring the old prose continuation or duplicating billed usage', async () => {
-    const plan = { fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `后续${chapter}`, goal: '按玩家选择发展' })), foreshadows: [] };
-    const service = await upstream((_body, reply, index) => {
-      if (index === 0) response(reply, '你站在岔路口。', [{ id: 'choose', name: 'ask_user', args: { question: '去哪里？', options } }]);
-      else if (index === 1) response(reply, '你走向桥头。');
-      else if (index === 2) response(reply, '未调用规划工具，本次规划无效。');
-      else if (index === 3) response(reply, '', [{ id: 'post-plan', name: 'update_plot_plan', args: plan }]);
-      else response(reply, '这条后置完成消息不能成为小说正文。');
-    });
-    const store = makeStore(), config = settings(service.url); config.taskSettings = { extraction: { autoRetry: false, maxRetries: 0, retryDelayMs: 0 }, planning: { enabled: true, mode: 'tool' } };
-    const engine = engineFor(store, config), project = store.createProject({ title: 'RPG 后置规划' });
-    const queued = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'rpg', instruction: '', rpg: originalSetup() });
-    const waiting = await paused(engine, queued.id); expect(service.bodies).toHaveLength(1); expect(service.bodies[0].tools.some((tool: any) => tool.function?.name === 'update_plot_plan')).toBe(false);
-    engine.choose(queued.id, { choiceId: waiting.pendingChoice!.id, optionId: 'bridge' }); expect((await completed(engine, queued.id)).status).toBe('failed');
-    const savedText = '你站在岔路口。你走向桥头。'; expect(engine.writingSnapshot(queued.id).text).toBe(savedText); expect(job(engine, queued.id)).toMatchObject({ inputTokens: 30, outputTokens: 15 });
-    config.writingModel = 'different'; engine.action(queued.id, 'retry'); expect(engine.writingSnapshot(queued.id).text).toBe(savedText); expect((await completed(engine, queued.id)).status).toBe('completed');
-    expect(service.bodies).toHaveLength(5); expect(service.bodies.map(body => body.model)).toEqual(['writer', 'writer', 'writer', 'different', 'different']);
-    expect(job(engine, queued.id)).toMatchObject({ inputTokens: 50, outputTokens: 25 }); expect(engine.writingSnapshot(queued.id).text).toBe(savedText); expect(store.state(queued.branchId).outline.fine).toEqual(plan.fine);
-    expect(engine.listWritingActivities(queued.id).find(activity => activity.name === 'update_plot_plan')?.proseOffset).toBe(savedText.length);
   });
 
   it('requires author view for RPG generation and choices, and omits role setup and choices from reader JSON', async () => {

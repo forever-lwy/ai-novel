@@ -48,11 +48,14 @@ export interface ProviderConfig extends ModelParameters {
 /** Generation fields and model are accepted only when upgrading older settings. */
 export type ProviderConnection = Omit<ProviderConfig, keyof ModelParameters | 'model'> & Partial<ModelParameters> & { model?: string; hasUrlCredentials?: boolean };
 export interface ProviderModel { id: string; name?: string }
-export type PromptTask = 'writing' | 'planning' | 'extraction' | 'compression';
+export type PromptTask = 'writing' | 'extraction' | 'compression';
+export type PromptScope = PromptTask | 'general';
+export type WritingOutputMode = 'text' | 'tool';
+export type PromptFeature = 'snow' | 'cot-three' | 'cot-single' | 'defense-normal' | 'defense-laoda';
 export interface PromptMessage { role: 'system' | 'user' | 'assistant'; content: string }
-export interface PromptBlock extends PromptMessage { id: string; name: string; enabled: boolean; modes?: Mode[] }
-export interface PromptPreset { id: string; name: string; blocks: PromptBlock[]; variables?: Record<string, string> }
-export interface PromptTemplateSettings { presets: Record<PromptTask, PromptPreset[]>; selected: Record<PromptTask, string> }
+export interface PromptBlock extends PromptMessage { id: string; name: string; enabled: boolean; modes?: Mode[]; tasks?: (PromptTask | 'planning')[]; feature?: PromptFeature; slot?: 'task' }
+export interface PromptPreset { id: string; name: string; blocks: PromptBlock[]; variables?: Record<string, string>; useGeneral?: boolean; generalPresetId?: string; writingOutputMode?: WritingOutputMode; textFilter?: 'dramatron' }
+export interface PromptTemplateSettings { presets: Record<PromptTask, PromptPreset[]> & { planning?: PromptPreset[] }; selected: Record<PromptTask, string> & { planning?: string }; general?: { presets: PromptPreset[]; selected: string } }
 export interface ImageSettings {
   providerId: string; model: string; protocol: 'openai-images' | 'gemini' | 'together-images'; size: string;
   quality: 'auto' | 'low' | 'medium' | 'high' | 'standard' | 'hd' | 'xhigh' | 'max'; stylePrompt: string; autoPortrait: boolean; autoCG: boolean; timeoutMs: number;
@@ -74,7 +77,8 @@ export interface WritingImageRequest { kind: 'portrait' | 'cg'; name?: string; d
 export type ExtractionOutputMode = 'prompt' | 'structured' | 'tool';
 export interface TaskSettings {
   extraction: { outputMode?: ExtractionOutputMode; autoRetry: boolean; maxRetries: number; retryDelayMs: number };
-  planning: { enabled: boolean; mode: 'separate' | 'tool' };
+  /** Accepted only for older settings; never used by current tasks. */
+  planning?: { enabled: boolean; mode: 'separate' | 'tool' };
 }
 export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings; taskSettings?: TaskSettings }
 export type JobKind = 'import' | 'extract' | 'generate' | 'plan';
@@ -101,12 +105,14 @@ export interface ModelToolCall { id: string; name: string; arguments: unknown }
 export interface ModelToolContinuation {
   protocol: ProviderProtocol; model: string; body: Record<string, unknown>; text: string;
   inputTokens: number; outputTokens: number; round: number; callCount: number; usageEstimated?: boolean;
+  writingOutputMode?: WritingOutputMode;
+  textFilter?: 'dramatron';
   pending?: { data: Record<string, unknown>; calls: ModelToolCall[]; results: { call: ModelToolCall; output: string }[]; nextIndex: number };
 }
 /** A submission tool only returns data; it is never executed or continued. */
 export interface ModelStructuredOutput { mode: 'json_schema' | 'tool'; name: string; description: string; schema: Record<string, unknown> }
-export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; structuredOutput?: ModelStructuredOutput; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
-export type OutputStage = 'planning' | 'writing' | 'extraction';
+export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; writingOutputMode?: WritingOutputMode; textFilter?: 'dramatron'; structuredOutput?: ModelStructuredOutput; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
+export type OutputStage = 'planning' | 'compression' | 'writing' | 'extraction';
 export interface OutputIssue { path: string; message: string; paragraph?: number; quote?: string; sourceText?: string }
 export interface ModelOutputRecord extends CapturedModelResponse {
   id: string; jobId: string; projectId: string; branchId: string; baseRevisionId: string;

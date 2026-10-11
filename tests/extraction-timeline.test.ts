@@ -138,7 +138,7 @@ describe('extracted chapter summaries, clues and character location snapshots', 
     expect(planned.state.outline).toEqual(plan);
     const job = engine.enqueue(branchId, 'generate', { baseRevisionId: planned.branch.revisionId, mode: 'continuation', instruction: '接着写' });
     await waitForJob(job.id);
-    expect(writingPrompt).toContain(first.summary); expect(writingPrompt).toContain(second.summary); expect(writingPrompt).toContain(plan.worldview); expect(writingPrompt).toContain('追查旧塔');
+    expect(writingPrompt).toContain(first.summary); expect(writingPrompt).toContain(second.summary); expect(writingPrompt).toContain(plan.worldview); expect(writingPrompt).not.toContain('追查旧塔');
     const background = engine.listJobs().find(item => item.kind === 'extract')!;
     await waitForJob(background.id);
     expect(store.state(branchId).outline.fine.map(item => item.chapter)).toEqual([4, 5, 6]);

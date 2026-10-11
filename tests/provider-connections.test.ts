@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from './local-server.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,7 +30,7 @@ async function endpoint(handler: (request: IncomingMessage, response: ServerResp
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const raw = Buffer.concat(chunks).toString(); handler(request, response, raw ? JSON.parse(raw) : undefined);
   });
-  servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  servers.push(server); await listenLocalServer(server);
   return `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1`;
 }
 function json(response: ServerResponse, value: unknown, status = 200) { response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify(value)); }
@@ -187,17 +187,17 @@ describe('provider connections and task model assignments', () => {
     expect(failed.statusCode).toBe(502); expect(failed.body).not.toContain('private-draft-key'); expect(failed.body).not.toContain('internal-upstream-detail'); expect(calls).toBe(1);
   });
 
-  it('routes planning, writing and extraction through distinct models on one supplier', async () => {
+  it('routes compression, writing and extraction through distinct models on one supplier', async () => {
     const ctx = await context(); const requests: { model: string; max_tokens: number; temperature: number }[] = [];
     const baseUrl = await endpoint((_request, response, body) => {
       requests.push(body);
-      const text = body.model === 'planner' ? JSON.stringify({ coarse: '旅人寻找灯塔', fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `${chapter}`, goal: '寻找线索' })), foreshadows: [] })
+      const text = body.model === 'planner' ? JSON.stringify({ text: '灯塔' })
         : body.model === 'extractor' ? JSON.stringify({ summary: '旅人抵达灯塔', entities: [], relations: [], foreshadows: [] }) : '旅人来到灯塔。';
       json(response, { choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 20 } });
     });
     ctx.settings.save({ ...settings(provider({ baseUrl })), modelParameters: ['writer', 'planner', 'extractor'].map((model, index) => ({ ...defaultModelParameters(), role: modelRoles[index], providerId: 'upstream', model, maxOutputTokens: 1024 * (index + 1), contextTokens: 128000, temperature: index / 2 })) });
     const project = ctx.store.createProject({ title: '分任务模型' }); seedReadyChapter(ctx, project.mainBranchId); const branch = ctx.store.getBranch(project.mainBranchId);
-    ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId });
+    ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId, purpose: 'compress-summary' });
     await waitForTask(ctx.engine, planJob.id);
     const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
     const deadline = Date.now() + 4000;
@@ -220,17 +220,17 @@ describe('provider connections and task model assignments', () => {
     expect(result.statusCode).toBe(200); expect(result.json().ok).toBe(true); expect(requestedModels).toEqual(['custom-remote-model']);
   });
 
-  it('uses independent role limits and temperatures for planning, writing and extraction on the same supplier and model', async () => {
+  it('uses independent role limits and temperatures for compression, writing and extraction on the same supplier and model', async () => {
     const ctx = await context(); const requests: { model: string; max_tokens: number; temperature: number }[] = [];
     const baseUrl = await endpoint((_request, response, body) => {
       requests.push(body);
-      const text = body.max_tokens === 2048 ? JSON.stringify({ coarse: '旅人寻找灯塔', fine: [2, 3, 4, 5].map(chapter => ({ chapter, title: `${chapter}`, goal: '寻找线索' })), foreshadows: [] })
+      const text = body.max_tokens === 2048 ? JSON.stringify({ text: '灯塔' })
         : body.max_tokens === 3072 ? JSON.stringify({ summary: '旅人抵达灯塔', entities: [], relations: [], foreshadows: [] }) : '旅人来到灯塔。';
       json(response, { choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 20 } });
     });
     ctx.settings.save({ ...settings(provider({ baseUrl })), writingModel: 'shared-model', planningModel: 'shared-model', extractionModel: 'shared-model', modelParameters: modelRoles.map((role, index) => ({ ...defaultModelParameters(), role, providerId: 'upstream', model: 'shared-model', maxOutputTokens: 1024 * (index + 1), contextTokens: 128000, temperature: index / 2 })) });
     const project = ctx.store.createProject({ title: '相同模型按任务隔离参数' }); seedReadyChapter(ctx, project.mainBranchId); const branch = ctx.store.getBranch(project.mainBranchId);
-    ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId });
+    ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId, purpose: 'compress-summary' });
     await waitForTask(ctx.engine, planJob.id);
     const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
     const deadline = Date.now() + 4000;

@@ -21,15 +21,15 @@ const variables = { context: '示例故事资料', mode: 'original', instruction
 const input = (task: PromptTask, protocol: ProviderProtocol): PromptPreviewInput => ({ task, protocol, templates: defaultPromptTemplates(), variables, runtime: {} });
 
 describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s final prompt preview', protocol => {
-  it.each<PromptTask>(['writing', 'planning', 'extraction', 'compression'])('shows all messages and native payload for %s, with no provider-added JSON instruction', async task => {
+  it.each<PromptTask>(['writing', 'extraction', 'compression'])('shows all messages and native payload for %s, with no provider-added JSON instruction', async task => {
     const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: input(task, protocol) });
     expect(response.statusCode).toBe(200);
     const preview = response.json<PromptPreviewResult>();
     const dialogue = preview.messages.filter(message => message.role !== 'system');
-    expect(dialogue.map(message => message.role)).toEqual(task === 'compression' || task === 'extraction' ? ['user'] : ['user', 'assistant', 'user']);
+    expect(dialogue.map(message => message.role)).toEqual(task === 'compression' || task === 'extraction' ? ['user', 'assistant', 'user'] : ['user', 'assistant', 'user', 'assistant', 'user']);
     if (task === 'extraction') {
-      expect(dialogue[0].content).toContain(variables.context);
-      expect(dialogue[0].content).toContain(variables.blockText);
+      expect(dialogue[2].content).toContain(variables.context);
+      expect(dialogue[2].content).toContain(variables.blockText);
     }
     for (const block of preview.runtimeBlocks) expect(preview.messages.map(message => message.content).join('\n')).toContain(block.content);
     expect(preview.tools.length).toBe(task === 'writing' ? 6 : 0);
@@ -51,23 +51,11 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     const text = preview.messages.map(message => message.content).join('\n');
     for (const part of ['原作已有角色“林舟”', '码头入场', '必须调用 ask_user', '不能当作已确认行动', '本章目标 1500 字', '已累计生成正文 0 字', '登船']) expect(text).toContain(part);
     expect(preview.tools.map(tool => tool.name)).toEqual(expect.arrayContaining(['ask_user', 'generate_character_portrait', 'generate_scene_cg']));
-    expect(preview.messages.filter(message => message.role !== 'system').map(message => message.role)).toEqual(['user', 'assistant', 'user']);
+    expect(preview.messages.filter(message => message.role !== 'system').map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user']);
     const native = JSON.parse(preview.body);
     const nativeText = JSON.stringify(native);
     expect(nativeText.split('[ai-novel:rpg-chapter-budget]')).toHaveLength(2);
     expect(nativeText).toContain('description');
-  });
-
-  it('shows tool planning instead of imposing a contradictory final-JSON requirement, and supports original reference tools', () => {
-    const request = input('planning', protocol);
-    request.runtime.planningMode = 'tool';
-    const preview = ctx.engine.previewPrompt(request);
-    expect(preview.messages.map(message => message.content).join('\n')).not.toContain(STRUCTURED_OUTPUT_INSTRUCTION);
-    expect(preview.messages.map(message => message.content).join('\n')).toContain('最终文本或 JSON 都不能替代工具调用');
-    expect(preview.tools.find(tool => tool.name === 'update_plot_plan')?.parameters).toMatchObject({ properties: { fine: { items: { properties: { chapter: { minimum: 2, maximum: 5 } } } } } });
-    request.runtime.planningMode = 'separate'; request.variables = { ...variables, originalReference: '{"worldview":"原作"}' };
-    expect(ctx.engine.previewPrompt(request).tools.map(tool => tool.name)).toContain('read_text_file');
-    expect(ctx.engine.previewPrompt(request).tools.map(tool => tool.name)).not.toContain('update_plot_plan');
   });
 
   it.each(['structured', 'tool'] as const)('previews extraction %s with the same schema and submission instructions used in real requests', async mode => {
@@ -83,6 +71,18 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
       expect(structuredRequest(request)).toBe(request);
     } else { expect(preview.tools).toEqual([]); expect(preview.messages.map(message => message.content).join('\n')).toContain('无法确定的可空字段填 null'); }
   });
+});
+
+it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s preview shows the selected general framework and the complete layered transport tool', async protocol => {
+  const draft = input('writing', protocol);
+  draft.templates.general!.presets[0].blocks[0].content += '\n通用框架可见';
+  draft.templates.presets.writing[0].writingOutputMode = 'tool';
+  const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: draft });
+  expect(response.statusCode).toBe(200);
+  const preview = response.json(); expect(preview.messages.map((value: { content: string }) => value.content).join('\n')).toContain('通用框架可见');
+  expect(preview.runtimeBlocks).toContainEqual(expect.objectContaining({ name: '正文工具通道规则' }));
+  expect(preview.tools).toHaveLength(1); expect(preview.tools[0]).toMatchObject({ name: 'emit_writing_response', parameters: { required: ['prose', 'toolCalls'] } });
+  expect(preview.tools[0].description).toContain('read_text_file'); expect(preview.body).toContain('argumentsJson');
 });
 
 it('requires authentication, validates drafts, and never saves settings or creates a model job', async () => {

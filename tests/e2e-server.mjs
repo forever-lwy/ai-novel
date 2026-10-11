@@ -110,6 +110,14 @@ const modelServer = createServer(async (req, res) => {
       res.end(`data: ${JSON.stringify({ promptFeedback: { blockReason: 'SAFETY' }, usageMetadata: { promptTokenCount: 12 } })}\n\n`); return;
     }
     lastModelParameters = Object.fromEntries(['model', 'temperature', 'top_p', 'seed', 'stream', 'max_tokens', 'max_completion_tokens', 'reasoning_effort'].filter(key => body[key] !== undefined).map(key => [key, body[key]]));
+    if (body.model === 'e2e-writing-envelope') {
+      const hasResults = body.messages?.some(message => message.role === 'tool');
+      const envelope = { prose: '<Interleaving><thinking>辅助场景核对</thinking>' + (hasResults ? '林舟走进白石城，开始寻找新的线索。' : '林舟来到城门前。') + '</Interleaving>', toolCalls: hasResults ? [] : [{ name: 'search_story', argumentsJson: JSON.stringify({ keywords: ['城门'], scope: 'chapters' }) }] };
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const raw = JSON.stringify(envelope); const pivot = raw.indexOf('toolCalls');
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `outer-${hasResults ? 'final' : 'lookup'}`, type: 'function', function: { name: 'emit_writing_response', arguments: raw.slice(0, pivot) } }] } }] })}\n\n`);
+      setTimeout(() => { if (res.destroyed) return; res.end(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: raw.slice(pivot) } }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 30, completion_tokens: 15 } })}\n\ndata: [DONE]\n\n`); }, 150); return;
+    }
     if (body.model === 'e2e-http500') {
       setTimeout(() => { if (res.destroyed) return; res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Deliberate local HTTP 500 fixture' } })); }, 100);
       return;

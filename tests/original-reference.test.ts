@@ -188,7 +188,7 @@ describe('version-bound original novel references', () => {
     expect((rawJob(store, imported.id).payload.sourceReference as StoryReference).sourceIds).toEqual(['confirmed-canon']);
   });
 
-  it('pins queued generation and planning, persists the reference with prose, and excludes it from extraction context', async () => {
+  it('pins queued generation, persists the reference with prose, and excludes it from extraction context', async () => {
     const { store, project, firstChapterId } = fixture(); const fork = store.fork(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, chapterId: firstChapterId, name: '生成集成' });
     const extractionRequests: ModelRequest[] = []; const engine = engineFor(store, extractionRequests);
     const queued = engine.enqueue(fork.branch.id, 'generate', { baseRevisionId: fork.branch.revisionId, mode: 'fanfiction', instruction: '' }); const pinned = rawJob(store, queued.id).payload.sourceReference as StoryReference;
@@ -198,6 +198,5 @@ describe('version-bound original novel references', () => {
     expect(read).toHaveBeenCalledWith(fork.branch.id, pinned); expect(store.state(fork.branch.id).sourceReference).toEqual(pinned);
     await until(() => store.state(fork.branch.id).chapters, chapters => chapters.every(chapter => chapter.status === 'ready'));
     expect(extractionRequests.length).toBeGreaterThan(0); for (const request of extractionRequests) expect(JSON.stringify(request)).not.toContain('后续人物的未来身份');
-    const plan = engine.enqueue(fork.branch.id, 'plan', { baseRevisionId: store.getBranch(fork.branch.id).revisionId }); expect(rawJob(store, plan.id).payload.sourceReference).toEqual(pinned); engine.action(plan.id, 'cancel');
   });
 });

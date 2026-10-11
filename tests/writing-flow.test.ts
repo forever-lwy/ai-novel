@@ -79,7 +79,7 @@ describe('streaming prose, detached extraction and regeneration', () => {
     const writing = start(ctx, { chapterId: original.state.chapters[0].id, regenerate: true });
     expect((await terminal(ctx.engine, writing.id)).status).toBe('completed');
     const request = vi.mocked(models.generateText).mock.calls[0][1];
-    expect(request.prompt).toContain('发现必须保留的目标章暗号');
+    expect(request.prompt).not.toContain('发现必须保留的目标章暗号');
     expect(ctx.store.state(writing.branchId).outline.fine).toContainEqual({ chapter: 2, title: '新追踪安排', goal: '作者修改后的后续规划' });
     expect(ctx.store.state(branch.id).chapters[0].id).toBe(original.state.chapters[0].id);
   });
@@ -123,7 +123,7 @@ describe('streaming prose, detached extraction and regeneration', () => {
     expect(request.prompt).not.toContain('第二章内容'); expect(request.prompt).not.toContain('第一章内容');
   });
 
-  it('publishes the complete rewritten chapter and shifts fragment activity before post-planning', async () => {
+  it('publishes the complete rewritten chapter and shifts fragment activity without post-planning', async () => {
     const prefix = '原文开头🙂\n'; const old = '旧片段'; const suffix = '\n原文结尾。'; const replacement = '新的片段。'; const expected = prefix + replacement + suffix;
     const events: WritingEvent[] = []; let writingId = ''; const config = settings(); config.taskSettings = { extraction: { autoRetry: false, maxRetries: 0, retryDelayMs: 0 }, planning: { enabled: true, mode: 'tool' } };
     const models = mockModels(); let ctx!: ReturnType<typeof harness>;
@@ -138,8 +138,8 @@ describe('streaming prose, detached extraction and regeneration', () => {
     });
     ctx = harness(models, config); const saved = readyChapter(ctx.store, ctx.project.mainBranchId, prefix + old + suffix);
     const writing = start(ctx, { mode: 'rewrite', chapterId: saved.state.chapters[0].id, selection: { start: prefix.length, end: prefix.length + old.length } }); writingId = writing.id; ctx.engine.subscribeWriting(writing.id, event => events.push(event));
-    expect((await terminal(ctx.engine, writing.id)).status).toBe('failed'); expect(ctx.engine.writingSnapshot(writing.id).text).toBe(expected); expect(ctx.store.chapter(writing.branchId, ctx.engine.listJobs().find(job => job.id === writing.id)!.generatedChapterId!).text).toBe(expected);
-    expect(models.generateStructured).not.toHaveBeenCalled();
+    expect((await terminal(ctx.engine, writing.id)).status).toBe('completed'); expect(ctx.engine.writingSnapshot(writing.id).text).toBe(expected); expect(ctx.store.chapter(writing.branchId, ctx.engine.listJobs().find(job => job.id === writing.id)!.generatedChapterId!).text).toBe(expected);
+    expect(models.generateText).toHaveBeenCalledTimes(1); expect(ctx.engine.listWritingActivities(writing.id).find(activity=>activity.id==='rewrite-thought')?.proseOffset).toBe(prefix.length);
   });
 
   it('restores historical AI role classification while carrying explicit author choices into regeneration', async () => {

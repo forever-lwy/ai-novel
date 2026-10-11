@@ -25,7 +25,7 @@ describe('task settings compatibility and validation', () => {
     const old = JSON.stringify({ ...base, imageSettings: { ...defaultImageSettings(), stylePrompt: '保留原画风' } });
     ctx.settings.setMeta('settings', old);
     const read = (await ctx.app.inject({ url: '/api/settings', cookies: ctx.cookies })).json();
-    expect(read.taskSettings).toEqual({ extraction: { outputMode: 'prompt', autoRetry: false, maxRetries: 2, retryDelayMs: 5000 }, planning: { enabled: true, mode: 'separate' } });
+    expect(read.taskSettings).toEqual({ extraction: { outputMode: 'prompt', autoRetry: false, maxRetries: 2, retryDelayMs: 5000 } });
     expect(read.imageSettings.stylePrompt).toBe('保留原画风');
     expect(ctx.settings.meta('settings')).toBe(old);
     expect((await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: base })).statusCode).toBe(200);
@@ -35,7 +35,7 @@ describe('task settings compatibility and validation', () => {
   it('fills absent nested fields during stored-config migration and saves a complete value', async () => {
     const ctx = await context();
     const partial = { extraction: { autoRetry: true }, planning: { enabled: false } };
-    const expected = { extraction: { outputMode: 'prompt', autoRetry: true, maxRetries: 2, retryDelayMs: 5000 }, planning: { enabled: false, mode: 'separate' } };
+    const expected = { extraction: { outputMode: 'prompt', autoRetry: true, maxRetries: 2, retryDelayMs: 5000 } };
     expect(normalizeTaskSettings(partial)).toEqual(expected);
     const raw = JSON.stringify({ ...base, taskSettings: partial }); ctx.settings.setMeta('settings', raw);
     expect(ctx.settings.get().taskSettings).toEqual(expected);
@@ -46,7 +46,7 @@ describe('task settings compatibility and validation', () => {
 
   it('roundtrips configured settings and preserves them with other settings when an older client omits them', async () => {
     const ctx = await context();
-    const taskSettings = { extraction: { outputMode: 'tool', autoRetry: true, maxRetries: 4, retryDelayMs: 1200 }, planning: { enabled: false, mode: 'tool' } };
+    const taskSettings = { extraction: { outputMode: 'tool', autoRetry: true, maxRetries: 4, retryDelayMs: 1200 } };
     const promptTemplates = defaultPromptTemplates(); promptTemplates.presets.writing[0].blocks[0].content = '保留作者提示词';
     const imageSettings = { ...defaultImageSettings(), stylePrompt: '保留作者画风' };
     const input = { ...base, providers: [{ id: 'text', name: '测试连接', protocol: 'openai-chat', baseUrl: 'https://fixture.invalid/v1', apiKey: 'task-fixture-secret' }], promptTemplates, imageSettings, taskSettings };

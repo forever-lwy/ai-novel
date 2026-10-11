@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from './local-server.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,7 +22,7 @@ function settings(overrides: Partial<ProviderConfig> = {}): Settings {
 }
 async function endpoint(reply: (body: any, response: import('node:http').ServerResponse) => void) {
   const server = createServer(async (request, response) => { const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk)); reply(JSON.parse(Buffer.concat(chunks).toString()), response); });
-  servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening'); return `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
+  servers.push(server); await listenLocalServer(server); return `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
 }
 
 it('round-trips optional parameters including zero and rejects conflicting thinking without changing saved settings', async () => {

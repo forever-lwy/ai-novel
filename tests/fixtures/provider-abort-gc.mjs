@@ -1,7 +1,7 @@
 // Run in an isolated Node process with --expose-gc; never contacts a real provider.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { once } from 'node:events';
+import { listenLocalServer } from '../local-server.mjs';
 import { setTimeout as delay, setImmediate as nextTurn } from 'node:timers/promises';
 import { generateText } from '../../server/providers.ts';
 import { providerFetch } from '../../server/outbound.ts';
@@ -40,7 +40,7 @@ async function run(mode) {
     if (mode === 'idle' || mode === 'cancel') response.write(partialText());
     sent.resolve();
   });
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  await listenLocalServer(server);
   const url = `http://127.0.0.1:${server.address().port}`;
   const controller = new AbortController(), deltas = [];
   const started = performance.now();

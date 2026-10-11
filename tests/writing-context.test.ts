@@ -24,7 +24,7 @@ describe('writing context and version-bound lookup', () => {
     expect(context.text).toContain('拥有夜视能力'); expect(context.text).toContain('小白');
     expect(context.text).not.toContain('独有配角资料'); expect(context.text).not.toContain('小灰'); expect(context.text).not.toContain('尚未发生的主角晋升');
     expect(context.text).toContain('伏笔planned'); expect(context.text).toContain('伏笔planted'); expect(context.text).not.toContain('伏笔resolved'); expect(context.text).not.toContain('伏笔abandoned');
-    expect(context.text).toContain('调查失踪船只'); expect(context.text).not.toContain('未来规划不应默认注入');
+    expect(context.text).not.toContain('调查失踪船只'); expect(context.text).not.toContain('未来规划不应默认注入');
   });
 
   it('reads older prose and full supporting-character dossiers only through tools pinned before later state changes', async () => {

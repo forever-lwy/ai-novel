@@ -125,10 +125,10 @@ describe('novel deletion', () => {
     const targetBranches = ctx.store.listBranches(project.id).map(branch => branch.id);
     const targetRevisions = ctx.store.db.prepare('SELECT id FROM revisions WHERE branch_id IN (SELECT id FROM branches WHERE project_id=?)').all(project.id).map(row => String(row.id));
     const targetChapters = new Set(targetRevisions.flatMap(revisionId => ctx.store.revisionState(revisionId).chapters.map(chapter => chapter.id)));
-    const extraJob = ctx.engine.enqueue(fork.branch.id, 'plan', { baseRevisionId: oldBranch.revisionId });
+    const extraJob = ctx.engine.enqueue(fork.branch.id, 'plan', { baseRevisionId: oldBranch.revisionId, purpose: 'compress-summary' });
     ctx.store.outputs.create({ projectId: project.id, branchId: fork.branch.id, jobId: extraJob.id, baseRevisionId: oldBranch.revisionId, stage: 'planning' }, { rawResponse: '{"fixture":true}', text: '{"fixture":true}', inputTokens: 10, outputTokens: 10 });
     const keepView = append(ctx.store, keep.mainBranchId, '保留小说的独有正文。', keepSource.id);
-    const keepJob = ctx.engine.enqueue(keep.mainBranchId, 'plan', { baseRevisionId: keepView.branch.revisionId });
+    const keepJob = ctx.engine.enqueue(keep.mainBranchId, 'plan', { baseRevisionId: keepView.branch.revisionId, purpose: 'compress-summary' });
     ctx.store.outputs.create({ projectId: keep.id, branchId: keep.mainBranchId, jobId: keepJob.id, baseRevisionId: keepView.branch.revisionId, stage: 'planning' }, { rawResponse: '保留的输出', text: '保留的输出', inputTokens: 10, outputTokens: 10 });
     const keepBackup = ctx.store.exportProject(keep.id);
 
@@ -288,11 +288,11 @@ describe('novel deletion', () => {
     let request: ModelRequest | undefined;
     const engine = engineFor(store, {
       generateText: async (_provider, incoming) => { request = incoming; return gate.promise; },
-      generateStructured: async (_provider, _request, validate) => ({ value: validate(plan(2)), inputTokens: 10, outputTokens: 10 }),
+      generateStructured: async (_provider, _request, validate) => ({ value: validate({ text: '短' }), inputTokens: 10, outputTokens: 10 }),
     });
-    const paused = engine.enqueue(pausedBranch.branch.id, 'plan', { baseRevisionId: pausedBranch.branch.revisionId });
+    const paused = engine.enqueue(pausedBranch.branch.id, 'plan', { baseRevisionId: pausedBranch.branch.revisionId, purpose: 'compress-summary' });
     engine.action(paused.id, 'pause');
-    const failed = engine.enqueue(failedBranch.branch.id, 'plan', { baseRevisionId: failedBranch.branch.revisionId });
+    const failed = engine.enqueue(failedBranch.branch.id, 'plan', { baseRevisionId: failedBranch.branch.revisionId, purpose: 'compress-summary' });
     setJobStatus(store, failed, 'failed');
     const writing = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: prepared.branch.revisionId, mode: 'original', instruction: '模拟写作' });
     engine.start();
@@ -307,10 +307,10 @@ describe('novel deletion', () => {
       expect(store.getProject(project.id)).toMatchObject({ id: project.id, title: project.title });
       const active = engine.listJobs(project.id);
       for (const job of [writing, paused, queued]) expect(active.find(current => current.id === job.id)?.status).toBe('cancelled');
-      expect(() => engine.enqueue(queuedBranch.branch.id, 'plan', { baseRevisionId: queuedBranch.branch.revisionId })).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => engine.enqueue(queuedBranch.branch.id, 'plan', { baseRevisionId: queuedBranch.branch.revisionId, purpose: 'compress-summary' })).toThrow(expect.objectContaining({ statusCode: 409 }));
       expect(() => engine.action(paused.id, 'resume')).toThrow(expect.objectContaining({ statusCode: 409 }));
       expect(() => engine.action(failed.id, 'retry')).toThrow(expect.objectContaining({ statusCode: 409 }));
-      const independent = engine.enqueue(keep.mainBranchId, 'plan', { baseRevisionId: store.getBranch(keep.mainBranchId).revisionId });
+      const independent = engine.enqueue(keep.mainBranchId, 'plan', { baseRevisionId: store.getBranch(keep.mainBranchId).revisionId, purpose: 'compress-summary' });
       await until(() => engine.listJobs(keep.id).find(job => job.id === independent.id)?.status === 'completed');
       expect(finished).toBe(false);
       // Simulate a provider that receives a response even after its request was aborted.

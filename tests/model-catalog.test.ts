@@ -1,3 +1,4 @@
+import { listenLocalServer } from './local-server.mjs';
 import { createServer, type Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetch, Response } from 'undici';
@@ -154,8 +155,8 @@ describe('provider model catalogs', () => {
       res.writeHead(302, { Location: `http://127.0.0.1:${address.port}/models` }); res.end();
     });
     servers.push(destination, original);
-    await new Promise<void>(resolve => destination.listen(0, '127.0.0.1', resolve));
-    await new Promise<void>(resolve => original.listen(0, '127.0.0.1', resolve));
+    await listenLocalServer(destination);
+    await listenLocalServer(original);
     const address = original.address();
     if (!address || typeof address === 'string') throw new Error('Missing fixture address');
     await expect(listProviderModels(config('openai-chat', { baseUrl: `http://127.0.0.1:${address.port}/v1` }))).rejects.toThrow('无法读取');

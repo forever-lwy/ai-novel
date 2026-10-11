@@ -21,7 +21,7 @@ const protocols: Record<ProviderProtocol, { name: string; url: string }> = {
 };
 const roles = [
   { role: 'writing', providerKey: 'writingProviderId', modelKey: 'writingModel', label: '正文写作' },
-  { role: 'planning', providerKey: 'planningProviderId', modelKey: 'planningModel', label: '剧情规划' },
+  { role: 'planning', providerKey: 'planningProviderId', modelKey: 'planningModel', label: '摘要压缩' },
   { role: 'extraction', providerKey: 'extractionProviderId', modelKey: 'extractionModel', label: '资料提取' },
 ] as const;
 type Role = typeof roles[number];
@@ -30,8 +30,8 @@ type ModelRequest = { signature: string; controller: AbortController; timer?: Re
 const connectionSignature = (provider: ProviderConnection) => JSON.stringify([provider.id, provider.protocol, provider.baseUrl, provider.apiKey || '', !!provider.clearApiKey, !!provider.hasKey]);
 const sections = [
   { id: 'providers', label: '供应商连接', icon: KeyRound, description: '管理服务地址、接口协议和 API 密钥。密钥保存在服务端，作品备份不包含密钥。' },
-  { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '为各类任务选择模型，设置资料提取自动重试和剧情规划方式。每个任务独立保存参数，同模型用于不同任务也不共用。' },
-  { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '为四类任务管理提示词预设、调整消息顺序，并预览编排后的内容。' },
+  { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '为各类任务选择模型，设置资料提取输出方式与自动重试。每个任务独立保存参数，同模型用于不同任务也不共用。' },
+  { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '管理通用预设和三类任务提示词、调整消息顺序，并预览编排后的内容。' },
   { id: 'images', label: '生图与自动插画', icon: Image, description: '选择图片模型，设置作品画风、新人物立绘与场景 CG 的自动生成。' },
   { id: 'account', label: '账号安全', icon: ShieldCheck, description: '修改登录密码，管理其他设备的登录。' },
 ] as const;
@@ -246,12 +246,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
           </div></div>
           <p className="hint">只重试资料提取，不重新生成正文。每次重试会再次调用模型，可能产生用量；0 次表示不重试。</p>
         </>}
-        {role.role === 'planning' && <>
-          <label className="checkbox"><input type="checkbox" aria-label="启用剧情规划" checked={tasks.planning.enabled} onChange={e => updateTaskSettings('planning', { enabled: e.target.checked })} />启用剧情规划</label>
-          <label>剧情规划方式<select aria-label="剧情规划方式" value={tasks.planning.mode} disabled={!tasks.planning.enabled} onChange={e => updateTaskSettings('planning', { mode: e.target.value as TaskSettings['planning']['mode'] })}><option value="separate">独立规划模型</option><option value="tool">写作 AI 工具</option></select></label>
-          <p className="hint">{!tasks.planning.enabled ? '关闭后，写作不使用预期规划，也不会生成新规划。已有规划仍可查看和手动编辑。' : tasks.planning.mode === 'tool' ? '正文完整保存后，写作 AI 通过 update_plot_plan 规划接下来的 4 章，不调用独立规划模型；规划失败可单独重试，不重新生成正文。' : '正文完整保存后，使用下面配置的模型规划接下来的 4 章。已有正文时，也可通过“让 AI 规划”单独更新预期规划。'}</p>
-          <p className="hint">下面的模型配置同时用于摘要压缩和默认生图提示词优化。关闭规划或切换到工具模式时，配置仍会保留。</p>
-        </>}
+        {role.role === 'planning' && <p className="hint">生成已发生剧情的压缩摘要候选，也用于未单独配置模型时的生图提示词优化。</p>}
         <label>供应商<select aria-label={`${role.label}供应商`} value={settings[role.providerKey]} onChange={e => updateRole(role, e.target.value)}><option value="">暂不设置</option>{settings.providers.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
         {provider && <>
           <label>上游模型<select aria-label={`${role.label}上游模型`} value={list?.models.some(value => value.id === model) ? model : ''} disabled={list?.loading || !list?.models.length} onChange={e => updateModel(role, e.target.value)}><option value="">{list?.loading ? '正在获取模型…' : list?.models.length ? '选择上游模型' : '暂无可选模型'}</option>{list?.models.map(value => <option key={value.id} value={value.id}>{value.name && value.name !== value.id ? `${value.name} · ${value.id}` : value.id}</option>)}</select></label>
@@ -323,9 +318,9 @@ export function ImageSettingsEditor({ settings, onChange }: { settings: Settings
     <label>图片模型名称<input aria-label="图片模型名称" maxLength={300} value={image.model} onChange={event => changeImageModel({ model: event.target.value })} placeholder="填写供应商提供的图片生成模型 ID" /></label>
     <p className="hint">图片接口复用供应商连接的服务地址和密钥。下方参数与参考图能力按所选协议和型号显示。</p>
     <section className="image-optimization-settings form-stack"><h3>AI 生图提示词</h3><p className="hint">绘图前，文字 AI 根据剧情、资料、人物参考和画风编写专用提示词。选择“AI 自行决定”时，还会选择适合本次画面的尺寸。</p><div className="form-grid">
-      <label>生图提示词优化供应商<select aria-label="生图提示词优化供应商" value={image.promptProviderId || ''} onChange={event => patch({ promptProviderId: event.target.value, promptModel: '' })}><option value="">自动使用剧情规划或正文写作模型</option>{settings.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
+      <label>生图提示词优化供应商<select aria-label="生图提示词优化供应商" value={image.promptProviderId || ''} onChange={event => patch({ promptProviderId: event.target.value, promptModel: '' })}><option value="">自动使用摘要压缩或正文写作模型</option>{settings.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
       <label>生图提示词优化模型<input aria-label="生图提示词优化模型" maxLength={300} value={image.promptModel || ''} onChange={event => patch({ promptModel: event.target.value })} placeholder={image.promptProviderId ? '填写此供应商的文字模型 ID' : fallbackModel || '自动使用已配置的文字模型'} /></label>
-    </div>{!image.promptProviderId && <p className="hint">默认先使用剧情规划模型，再使用正文写作模型。{fallbackName && fallbackModel ? `当前默认：${fallbackName} · ${fallbackModel}。` : '请先配置至少一个文字模型。'}</p>}<label>提示词优化系统要求（可选）<textarea aria-label="提示词优化系统要求" maxLength={10000} rows={3} value={image.promptSystemPrompt || ''} onChange={event => patch({ promptSystemPrompt: event.target.value })} placeholder="例如：按画面主体、构图、服装、环境、光线组织提示词，保留已确认的角色外貌。" /></label></section>
+    </div>{!image.promptProviderId && <p className="hint">默认先使用摘要压缩模型，再使用正文写作模型。{fallbackName && fallbackModel ? `当前默认：${fallbackName} · ${fallbackModel}。` : '请先配置至少一个文字模型。'}</p>}<label>提示词优化系统要求（可选）<textarea aria-label="提示词优化系统要求" maxLength={10000} rows={3} value={image.promptSystemPrompt || ''} onChange={event => patch({ promptSystemPrompt: event.target.value })} placeholder="例如：按画面主体、构图、服装、环境、光线组织提示词，保留已确认的角色外貌。" /></label></section>
     <div className="form-grid image-dimension-fields">
       {capabilities.dimensionMode !== 'aspect-ratio' && <label>图片尺寸<select aria-label="图片尺寸" value={image.size} onChange={event => patch({ size: event.target.value as ImageSettings['size'], ...(capabilities.dimensionMode === 'width-height' ? { width: undefined, height: undefined } : {}) })}><option value="auto">AI 自行决定</option>{pixelSizes.map(size => <option key={size} value={size}>{size.replace('x', ' × ')}</option>)}{image.size !== 'auto' && !pixelSizes.includes(image.size) && <option value={image.size}>自定义 · {image.size.replace('x', ' × ')}</option>}</select></label>}
       {capabilities.customSize && capabilities.dimensionMode === 'size' && <label>自定义图片尺寸<input aria-label="自定义图片尺寸" pattern="[0-9]+x[0-9]+" value={image.size === 'auto' ? '' : image.size} onChange={event => patch({ size: event.target.value.trim() || 'auto' })} placeholder="例如 2048x2048；留空由 AI 决定" /></label>}

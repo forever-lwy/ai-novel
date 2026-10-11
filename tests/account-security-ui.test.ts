@@ -1,3 +1,4 @@
+import { listenLocalServer } from './local-server.mjs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -57,7 +58,7 @@ describe('ordinary account security interactions in an isolated browser fixture'
       else if (request.url === '/styles.css') { response.setHeader('Content-Type', 'text/css'); response.end(styles); }
       else { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end('<!doctype html><html lang="zh-CN"><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body><div id="root"></div><script type="module" src="/bundle.js"></script></body></html>'); }
     });
-    await new Promise<void>(ready => server.listen(0, '127.0.0.1', ready));
+    await listenLocalServer(server);
     origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     browser = await chromium.launch({ channel: 'msedge', headless: true });
   });

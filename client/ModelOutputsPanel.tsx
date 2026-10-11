@@ -7,7 +7,7 @@ import { VisualOutputEditor } from './VisualOutputEditor';
 import { humanIssuePath, parseVisualOutput, unwrapVisualText } from './output-form';
 import { RequestDiagnostics } from './RequestDiagnostics';
 
-const stageNames: Record<OutputStage, string> = { planning: '剧情规划', writing: '正文生成', extraction: '资料提取' };
+const stageNames: Record<OutputStage, string> = { planning: '历史规划', compression: '摘要压缩', writing: '正文生成', extraction: '资料提取' };
 const outputStatusNames: Record<ModelOutputRecord['status'], string> = { received: '已收到', invalid: '校验未通过', applied: '已应用' };
 
 function downloadText(text: string, filename: string) {
