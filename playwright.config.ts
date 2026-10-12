@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test';
 
 const port = Number(process.env.E2E_PORT || 14328);
 export default defineConfig({
-  testDir: './tests', testMatch: ['browser.spec.ts', 'rpg-browser.spec.ts'], fullyParallel: false, workers: 1,
+  testDir: './tests', testMatch: ['browser.spec.ts', 'import-browser.spec.ts', 'rpg-browser.spec.ts'], fullyParallel: false, workers: 1,
   retries: 0, timeout: 60_000, expect: { timeout: 15_000 },
   outputDir: 'test-results', reporter: [['list'], ['html', { open: 'never' }]],
   globalTeardown: './tests/e2e-teardown.mjs',

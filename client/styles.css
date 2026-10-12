@@ -533,3 +533,14 @@
   .branch-tree-copy strong { font-size: 13px; }
 }
 @media(max-width:600px) { .chapter-actions-menu { left: 0; right: auto; max-width: calc(100vw - 32px); } }
+/* Import rule selection and author-selected heading samples. */
+.import-rules{border:1px solid #dce3d5;border-radius:10px;padding:16px;background:#f8faf5;min-width:0}
+.import-rule-toolbar{display:flex;align-items:end;gap:12px;flex-wrap:wrap}.import-rule-toolbar>label{flex:1;min-width:210px}
+.import-rule-editor{padding:14px;border:1px solid #dce3d5;border-radius:8px;background:white;margin:12px 0}
+.import-rule-pattern{font-family:Consolas,monospace;font-size:12px;overflow-wrap:anywhere}
+.import-rule-note{font-size:12px;color:#3e5b30;line-height:1.7}
+.import-ai-rules{margin-top:12px;border-top:1px solid #dce3d5;padding-top:12px}.import-ai-rules>summary{cursor:pointer;display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600}.import-ai-rules>.form-stack{margin-top:14px}
+.import-candidate-search>input{flex:1;min-width:130px}.import-heading-candidates{max-height:245px;overflow:auto;border:1px solid #dce3d5;border-radius:7px;background:white}
+.import-heading-option{display:flex!important;flex-direction:row!important;align-items:start;gap:9px;padding:8px 10px;cursor:pointer;border-bottom:1px solid #eef1e9;font-size:12px!important;line-height:1.6!important}.import-heading-option input{flex:none;margin-top:4px;width:auto}.import-heading-option small{color:#87917f;font-variant-numeric:tabular-nums;min-width:30px}.import-heading-option span{overflow-wrap:anywhere;min-width:0}
+.import-heading-selection{font-size:12px}.import-sample-chip{display:inline-flex;gap:8px;align-items:center;max-width:100%;border:1px solid #cad6c0;border-radius:6px;padding:6px 9px;margin:7px 7px 0 0;background:#eef4e8;color:#405c33;overflow-wrap:anywhere;text-align:left;cursor:pointer}.import-sample-chip span{flex:none}
+@media(max-width:600px){.import-rules{padding:12px}.import-rule-toolbar{gap:9px}.import-rule-toolbar>label{min-width:100%;width:100%}.import-rule-editor .form-grid{grid-template-columns:1fr}.import-heading-option{padding:8px}.import-heading-candidates{max-height:205px}}

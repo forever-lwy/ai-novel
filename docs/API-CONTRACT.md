@@ -65,6 +65,17 @@
 - OpenAI 多图输入为 `images/edits` multipart 的 `image[]`；Gemini 为多条 `inlineData` 及原生 `systemInstruction/generationConfig`；已知 Together 型号为 `/images/generations` JSON，单图 `image_url` 或多图 `reference_images`，响应格式固定 `base64`。CG 仅按已保存剧情和当前版本中的明确人物选择已完成立绘，记录实际参考图对应关系；自动 CG 等同批相关立绘完成或失败后再生成。不支持人物参考的型号按资料绘制。
 - 全部参考图原始字节合计不超过 20 MiB；Gemini 另检查完整内联 JSON 请求（含 Base64、提示词及系统提示）不超过 20,000,000 字节。Together 的 `data:` 私有参考输入已实现并经本地协议模拟验证，官方资料只明确 URL 输入，真实服务接受情况未验收；拒绝时不上传公开地址、不取消参考后偷偷重试。每个任务固定生成一张图片，不提供图片流式分块或搜索工具。能力与设置说明见 [使用指南](USAGE.md#插画与故事图册)。
 
+## 分章规则接口
+
+以下路径带 `/api` 前缀，均需登录及 `?view=author`，缺少作者视图返回 403。规则库在服务端全局保存，独立于 `Settings` 和作品备份，完整数据目录迁移保留。
+
+- `GET /chapter-rules -> {rules:ChapterRule[]}`：返回 9 条内置规则与至多 100 条自定义规则。规则字段为 `{id,name,pattern,flags,description,builtIn?}`，内置 ID 为 auto/chinese/volume/english/numbered/bracketed/markdown/special/none。
+- `POST /chapter-rules {name,pattern,flags?,description?} -> ChapterRule`；`PUT /chapter-rules/:id` 同请求体；`DELETE /chapter-rules/:id -> {ok:true}`。名称去首尾空白后为 1–80 字符，不与已有规则重复；表达式 1–1000 字符，说明最多 500 字符，flags 为 `""|"i"|"u"|"iu"`、默认 i。拒绝未知字段、无效表达式及匹配空行的规则。内置规则不能覆盖或删除，另存时由服务生成新 ID。
+- `POST /sources/:id/split {ruleId} | {rule:ChapterRuleInput} | {native:true} -> SourcePreview & {headingCount?}`：三个字段恰好提供一个。从保留的原始 TXT（沿用编码识别）或 EPUB 正文按阅读顺序重算；native 恢复原始分章，EPUB 默认保留原有阅读顺序。匹配去首尾空白的完整短行、最多 160 字符；标题最多 10000 个、含前言的最终章节最多 10000 个。连续及无正文的末尾标题保留在相邻正文中，不产生空章；没有匹配时全文为一章。返回预览不写入 sources、正文或故事版本；只有原有 confirm 接口保存最终目录。
+- `GET /sources/:id/heading-candidates?q=&offset=0&limit=60 -> {candidates:[{line,title}],nextOffset:number|null}`：短行候选来自原始正文，可能包括短正文段落，由作者选择实际标题。q 最多 160 字符，使用不区分大小写的字面包含检索；limit 为 1–120，offset 为上页最后的原文行号（从 1 开始，空行仍计数），nextOffset 为 null 表示结束。行号基于去 BOM、统一换行、去首尾空白后的 TXT；EPUB 为按正文阅读顺序拼接的文本。
+- `POST /sources/:id/generate-rule {lines:number[],instruction?} -> GeneratedChapterRule`：选 2–20 个不同的有效行号，至少两个不同标题，补充要求最多 1000 字符。服务重新读取原文核对样本，只发送所选标题及要求，依次使用已保存的 extraction/writing/planning 模型和任务参数，完整请求及输出预留计入上下文。只请求模型一次，生成失败不自动重试，也不受资料提取的自动重试开关影响。成功返回 `{ok:true,rule,headingCount,chapterCount,examples,inputTokens,outputTokens,capture}`，验证全部样本匹配后再计算原文匹配数，examples 至多 8 项；不保存规则、不替换目录、不创建故事任务。模型／结果失败返回 `{ok:false,error,capture?}` 以保留诊断，非法样本和未配置模型在发送前返回 400。capture 包含脱敏后的实际请求／响应，在当前窗口可查看或下载，不作为作品资料保存。
+- 已确认原文的 split/heading-candidates/generate-rule 返回 409；预览计算或 AI 结束时再次检查原文仍存在且未确认，拒绝迟到结果。自定义表达式仅在独立工作线程执行，单次最多 4 秒、最多 4 个并发；超时终止线程，繁忙返回 429，不阻塞 HTTP 服务。AI 生成沿用模型操作限流（默认 20 次／分钟），客户端断开会取消模型请求。
+
 ## 文字与作品接口
 
 - 认证接口见上文“登录与安全边界”，初始密码由服务器环境提供；改密与会话撤销不进入作品备份。

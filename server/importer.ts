@@ -3,6 +3,7 @@ import { unzipSync } from 'fflate';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import iconv from 'iconv-lite';
 import { decodeHTML } from 'entities';
+import { builtInChapterRules, MAX_CHAPTER_HEADINGS, MAX_HEADING_LENGTH } from '../shared/chapter-rules.js';
 
 export interface ImportedChapter { title: string; text: string }
 const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
@@ -23,31 +24,57 @@ function decodeText(bytes: Uint8Array): string {
   catch { return iconv.decode(Buffer.from(bytes), 'gb18030'); }
 }
 
-function normalize(text: string): string {
+export function normalizeNovelText(text: string): string {
   if (text.length > MAX_TEXT_LENGTH) throw new Error('小说正文超过 2000 万字，请拆分后导入。');
   if (text.includes('\0')) throw new Error('文件包含无法识别的二进制内容，请使用 TXT 或 EPUB 文件。');
   return text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim();
 }
 
-/** Split by standalone chapter headings without repeatedly copying the entire novel. */
-export function splitText(text: string): ImportedChapter[] {
-  const normalized = normalize(text);
+export interface ChapterHeading { index: number; end: number; title: string }
+
+export function* novelLines(text: string): Generator<{ index: number; end: number; line: number; title: string }> {
+  let index = 0; let line = 1;
+  while (index < text.length) {
+    const newline = text.indexOf('\n', index); const end = newline < 0 ? text.length : newline;
+    yield { index, end, line, title: end - index <= MAX_HEADING_LENGTH + 100 ? text.slice(index, end).trim() : '' };
+    index = end + 1; line++;
+  }
+}
+
+/** Preserve introductory prose and consecutive headings while avoiding empty chapters. */
+export function chaptersFromHeadings(normalized: string, headings: ChapterHeading[]): ImportedChapter[] {
   if (!normalized) throw new Error('文件没有可读取的小说正文。');
-  const heading = /^[\t \u3000]*(第[零〇一二三四五六七八九十百千万亿两0-9０-９]{1,24}[章回节卷部集篇][^\n]{0,100}|(?:chapter|book|part)\s+(?:[0-9]+|[ivxlcdm]+)(?:[\s.:：-][^\n]{0,100})?|(?:序章|序言|楔子|引子|前言|尾声|后记|终章|番外)(?:[\s：:、—-][^\n]{0,100})?)[\t \u3000]*$/gim;
   const chapters: ImportedChapter[] = [];
   let start = 0;
   let title = '序章';
-  for (const match of normalized.matchAll(heading)) {
-    const body = normalized.slice(start, match.index).trim();
-    if (body) chapters.push({ title, text: body });
-    title = match[1].trim();
-    start = match.index + match[0].length;
-    if (chapters.length > MAX_ENTRIES) throw new Error('章节数量超过 10000，请调整文件后导入。');
+  let pending: string[] = [];
+  for (const heading of headings) {
+    const body = normalized.slice(start, heading.index).trim();
+    if (body) { chapters.push({ title, text: [...pending, body].join('\n\n') }); pending = []; }
+    else if (start > 0) pending.push(title);
+    title = heading.title;
+    start = heading.end;
   }
   const body = normalized.slice(start).trim();
-  if (body) chapters.push({ title: start === 0 ? '正文' : title, text: body });
+  if (body) chapters.push({ title: start === 0 ? '正文' : title, text: [...pending, body].join('\n\n') });
+  else if (chapters.length && start > 0) chapters[chapters.length - 1].text += '\n\n' + [...pending, title].join('\n\n');
   if (!chapters.length) throw new Error('文件只有标题，没有可读取的小说正文。');
+  if (chapters.length > MAX_CHAPTER_HEADINGS) throw new Error('章节数量超过 10000，请调整文件后导入。');
   return chapters;
+}
+
+/** Default patterns are fixed; user-supplied patterns run only in a bounded worker. */
+export function splitText(text: string, ruleId = 'auto'): ImportedChapter[] {
+  const normalized = normalizeNovelText(text);
+  const rule = builtInChapterRules.find(value => value.id === ruleId);
+  if (!rule) throw new Error('分章规则不存在。');
+  const pattern = new RegExp(`^(?:${rule.pattern})$`, rule.flags);
+  const headings: ChapterHeading[] = [];
+  for (const line of novelLines(normalized)) if (line.title && line.title.length <= MAX_HEADING_LENGTH && pattern.test(line.title)) {
+    headings.push(line);
+    if (headings.length > MAX_CHAPTER_HEADINGS) throw new Error('章节标题超过 10000，请调整分章规则。');
+  }
+  return chaptersFromHeadings(normalized, headings);
 }
 
 function safeArchivePath(name: string): string {
@@ -87,7 +114,7 @@ function htmlText(html: string): { title: string; text: string } {
   body = body.replace(/<(?:br|hr)\b[^>]*\/?\s*>/gi, '\n').replace(/<\/(?:p|div|h[1-6]|li|blockquote|section|article|tr|pre)\s*>/gi, '\n\n').replace(/<[^>]*>/g, '');
   // HTML source indentation is not a paragraph boundary; block elements are.
   body = decodeEntities(body).replace(/[\t ]+\n/g, '\n').replace(/\n[\t ]+/g, '\n').replace(/\n{3,}/g, '\n\n');
-  return { title, text: normalize(body) };
+  return { title, text: normalizeNovelText(body) };
 }
 
 function parseEpub(bytes: Uint8Array): ImportedChapter[] {
@@ -145,4 +172,10 @@ export function parseNovel(filename: string, bytes: Uint8Array): { format: 'txt'
   if (extension === 'txt') return { format: 'txt', chapters: splitText(decodeText(bytes)) };
   if (extension === 'epub') return { format: 'epub', chapters: parseEpub(bytes) };
   throw new Error('目前只支持 TXT 和 EPUB 文件。');
+}
+
+/** Always derive rule previews/samples from the preserved original, never edited prose. */
+export function novelText(filename: string, bytes: Uint8Array): string {
+  if (filename.toLowerCase().endsWith('.txt')) return normalizeNovelText(decodeText(bytes));
+  return normalizeNovelText(parseNovel(filename, bytes).chapters.map(chapter => chapter.text).join('\n\n'));
 }
