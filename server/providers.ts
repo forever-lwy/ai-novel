@@ -2,7 +2,7 @@ import { ZodError } from 'zod';
 import type { Response } from 'undici';
 import { providerFetch } from './outbound.js';
 import { createSecretStreamRedactor, redactSseFragments, secretVariants } from './stream-redaction.js';
-import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequestSnapshot, ModelResult, ModelToolCall, ModelToolContinuation, ModelTransportDiagnostics, OutputIssue, ProviderConfig } from '../shared/types.js';
+import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequestSnapshot, ModelResult, ModelToolCall, ModelToolContinuation, ModelTransportDiagnostics, OutputIssue, ProviderConfig, ThinkingSource } from '../shared/types.js';
 import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions } from './provider-options.js';
 import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream, streamFrameFragments } from './model-stream.js';
 import { chapterBudgetInstruction, chapterBudgetReached } from '../shared/rpg-chapter.js';
@@ -404,8 +404,33 @@ function inspectBody(config: ProviderConfig, response: Response | undefined, bod
 /** A single billable request. Failures never trigger automatic retries. */
 async function sendModelRequest(config: ProviderConfig, request: ModelRequest, wire: ReturnType<typeof requestBody>): Promise<{ data: JsonObject; result: ModelResult }> {
   const clean = (text: string) => request.textFilter === 'dramatron' ? cleanDramatronText(text) : text;
-  const textFilter = request.textFilter === 'dramatron' ? createDramatronTextFilter() : undefined;
-  const emitText = request.onTextDelta ? (text: string) => { const visible = textFilter ? textFilter.feed(text) : text; if (visible) request.onTextDelta!(visible); } : undefined;
+  let outputCallbackFailed = false;
+  const publishOutput = (publish: () => void) => {
+    if (outputCallbackFailed || request.signal?.aborted) return;
+    try { publish(); } catch (error) { outputCallbackFailed = true; throw error; }
+  };
+  const textFilter = request.textFilter === 'dramatron' ? createDramatronTextFilter({
+    // Flush each prose segment before the following auxiliary thought so its
+    // author-side position is correct even when both arrive in one frame.
+    onText: text => publishOutput(() => request.onTextDelta?.(text)),
+    onThinking: event => publishOutput(() => {
+      request.onActivity?.('text' in event ? { type: 'thinking', id: event.id, text: event.text, thinkingSource: 'preset' } : { type: 'thinking_done', id: event.id });
+    }),
+  }) : undefined;
+  const emitText = request.onTextDelta || textFilter && request.onActivity ? (text: string) => {
+    if (textFilter) textFilter.feed(text); else request.onTextDelta?.(text);
+  } : undefined;
+  const rawOutputText = (data: JsonObject) => {
+    let text = responseText(config.protocol, data);
+    if (request.writingOutputMode === 'tool') {
+      const calls = responseToolCalls(config.protocol, data);
+      if (calls.length === 1 && calls[0].name === WRITING_RESPONSE_NAME) {
+        const carrier = partialWritingProse(typeof calls[0].arguments === 'string' ? calls[0].arguments : JSON.stringify(calls[0].arguments) ?? '');
+        if (carrier.length >= text.length) text = carrier;
+      }
+    }
+    return text;
+  };
   const snapshot = requestSnapshot(config, wire);
   const started = Date.now();
   const controller = new AbortController();
@@ -421,13 +446,7 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
   const capture = () => {
     const inspection = inspectBody(config, response, received);
     if (inspection.data && request.structuredOutput?.mode === 'tool') inspection.text = submissionText(config.protocol, inspection.data, request.structuredOutput.name) ?? inspection.text;
-    if (inspection.data && request.writingOutputMode === 'tool') {
-      const calls = responseToolCalls(config.protocol, inspection.data);
-      if (calls.length === 1 && calls[0].name === WRITING_RESPONSE_NAME) {
-        const carrier = partialWritingProse(typeof calls[0].arguments === 'string' ? calls[0].arguments : JSON.stringify(calls[0].arguments) ?? '');
-        if (carrier.length >= inspection.text.length) inspection.text = carrier;
-      }
-    }
+    if (inspection.data && request.writingOutputMode === 'tool') inspection.text = rawOutputText(inspection.data);
     inspection.text = clean(inspection.text);
     capturedTokens = inspection.tokens;
     if (captured) return inspection;
@@ -488,7 +507,12 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     } : undefined, request.writingOutputMode === 'tool');
     transport = request.signal?.aborted ? 'cancelled' : timedOut ? 'timeout' : received.error === 'read' ? 'interrupted' : 'http';
     const { data, tokens, streamError } = capture();
-    if (data && response.ok && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) emitResponseActivities(config.protocol, data, event => request.onActivity?.(event));
+    if (data && response.ok && !request.signal?.aborted && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) {
+      emitResponseActivities(config.protocol, data, event => request.onActivity?.(event));
+      // Preserve auxiliary thoughts before cleanup, including partial output
+      // returned as JSON by a compatible gateway. This never executes tools.
+      emitText?.(redactPayload(rawOutputText(data), config.apiKey));
+    }
     if (received.error === 'limit') throw new ModelOutputError('模型响应超过 16 MiB，已保留收到的部分内容，请缩小本次生成范围。', tokens);
     if (received.error === 'read') throw new ModelOutputError('读取模型响应中断，已保留收到的部分内容，请检查网络连接。', tokens);
     if (!response.ok) {
@@ -514,16 +538,11 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
         const carrier = request.writingOutputMode === 'tool' ? unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name), Boolean(clean(plain).trim())).prose : plain;
         const text = clean(redactPayload(request.writingOutputMode === 'tool' && plain.length > carrier.length ? plain : carrier, config.apiKey));
         if (!text.trim() && request.writingOutputMode === 'tool' && !unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name)).calls.length) throw new Error('清理辅助标签后没有正文或工具调用，已保留原始响应。');
-        // A compatible gateway may also answer a tool turn with ordinary JSON;
-        // keep any visible prose available before the continuation can fail.
-        if (text && emitText && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) emitText(text);
         return { data, result: { text, ...responseUsage(config.protocol, data) } };
       }
       const result = parseResult(config.protocol, data);
       const text = clean(redactPayload(result.text, config.apiKey));
       if (!text.trim()) throw new Error('清理辅助标签后没有正文或任务结果，已保留原始响应。');
-      // Some compatible gateways answer a streaming request with ordinary JSON.
-      if (emitText && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) emitText(text);
       return { data, result: { ...result, text } };
     }
     catch (error) {
@@ -542,9 +561,8 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     if (error instanceof TypeError) throw new Error('读取模型响应失败，请检查网络连接后手动重试。');
     throw error;
   } finally {
-    const tail = textFilter?.finish(); if (tail) request.onTextDelta?.(tail);
-    clearTimeout(timer);
-    request.signal?.removeEventListener('abort', abort);
+    try { textFilter?.finish(); }
+    finally { clearTimeout(timer); request.signal?.removeEventListener('abort', abort); }
   }
 }
 
@@ -614,7 +632,7 @@ function updateChapterBudget(config: ProviderConfig, body: JsonObject, text: str
 
 /** Redact whole normalized events, including credential fields inside tool objects and thought JSON. */
 function activityEmitter(config: ProviderConfig, request: ModelRequest, round: number): (event: ModelActivityEvent) => void {
-  const thoughts = new Map<string, { raw: string; published: string }>();
+  const thoughts = new Map<string, { raw: string; published: string; thinkingSource?: ThinkingSource }>();
   const keys = config.apiKey ? [config.apiKey] : [];
   const variants = [...new Set(keys.flatMap(key => [key, key.trim(), JSON.stringify(key).slice(1, -1), encodeURIComponent(key)]).filter(Boolean))];
   const deliver = (event: ModelActivityEvent) => { if (request.onActivity) request.onActivity(JSON.parse(redactModelPayload(JSON.stringify({ ...event, id: `round-${round + 1}:${event.id}` }), keys)) as ModelActivityEvent); };
@@ -631,12 +649,12 @@ function activityEmitter(config: ProviderConfig, request: ModelRequest, round: n
     // wait until recursive field redaction can inspect the complete document.
     if (!finished) { const jsonStart = safe.search(/[\[{]\s*"/); if (jsonStart >= 0) { try { JSON.parse(thought.raw.slice(jsonStart)); } catch { end = Math.min(end, jsonStart); } } }
     if (safe.startsWith(thought.published) && end > thought.published.length) {
-      deliver({ type: 'thinking', id, text: safe.slice(thought.published.length, end) }); thought.published = safe.slice(0, end);
+      deliver({ type: 'thinking', id, text: safe.slice(thought.published.length, end), ...(thought.thinkingSource ? { thinkingSource: thought.thinkingSource } : {}) }); thought.published = safe.slice(0, end);
     }
   };
   return event => {
     if (!request.onActivity) return;
-    if (event.type === 'thinking') { const thought = thoughts.get(event.id) ?? { raw: '', published: '' }; thought.raw += event.text; thoughts.set(event.id, thought); flush(event.id); }
+    if (event.type === 'thinking') { const thought = thoughts.get(event.id) ?? { raw: '', published: '', thinkingSource: event.thinkingSource }; thought.raw += event.text; thoughts.set(event.id, thought); flush(event.id); }
     else if (event.type === 'thinking_done') { flush(event.id, true); deliver(event); thoughts.delete(event.id); }
     else deliver(event);
   };

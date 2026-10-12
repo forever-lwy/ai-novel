@@ -139,6 +139,36 @@ describe('public author model activity separated from novel prose', () => {
     expect(service.bodies[1].messages.at(-1)).toMatchObject({ role: 'tool', content: JSON.stringify({ error: '未找到此资料' }) });
   });
 
+  it('keeps native and preset thoughts separate and redacts split secrets in preset thoughts', async () => {
+    const events: ModelActivityEvent[] = []; let visible = '';
+    const service = await upstream((_body, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const values = ['前文。<thi', 'nking>核对 ', apiKey.slice(0, 12), apiKey.slice(12), '。', '{"api_key":"', 'unknown-preset-secret', '"}', '</thinking>结尾。<disclaimer>隐藏尾段</disclaimer>'];
+      response.end(sse({ choices: [{ delta: { reasoning_content: '原生摘要。' } }] }) + values.map(content => sse({ choices: [{ delta: { content } }] })).join('') + sse({ choices: [{ delta: {}, finish_reason: 'stop' }] }) + sse('[DONE]'));
+    });
+    const result = await generateText(config('openai-chat', service.baseUrl, true), { system: '中性测试', prompt: '正文', textFilter: 'dramatron', onTextDelta: text => { visible += text; }, onActivity: event => events.push(event) });
+    expect(result.text).toBe('前文。结尾。'); expect(visible).toBe(result.text);
+    const preset = events.filter(event => event.type === 'thinking' && event.thinkingSource === 'preset');
+    expect(preset.map(event => event.text).join('')).toContain('[REDACTED]');
+    expect(events.filter(event => event.type === 'thinking' && !event.thinkingSource).map(event => event.text).join('')).toBe('原生摘要。');
+    expect(events.filter(event => event.type === 'thinking_done')).toHaveLength(2);
+    expect(JSON.stringify(events)).not.toContain(apiKey); expect(JSON.stringify(events)).not.toContain('unknown-preset-secret'); expect(JSON.stringify(events)).not.toContain('隐藏尾段');
+  });
+
+  it('retains incomplete preset thoughts on cancellation without falsely completing them or calling tools', async () => {
+    const controller = new AbortController(); const events: ModelActivityEvent[] = []; const capture = vi.fn(); const execute = vi.fn();
+    const service = await upstream((_body, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      response.write(sse({ choices: [{ delta: { content: '<thinking>准备调用 lookup，但尚未提交实际调用。' } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }));
+    });
+    await expect(generateText(config('openai-chat', service.baseUrl, true), { system: '中性测试', prompt: '正文', textFilter: 'dramatron', signal: controller.signal,
+      tools: [{ name: 'lookup', description: '查询', parameters: { type: 'object' }, execute }], onResponse: capture,
+      onActivity: event => { events.push(event); if (event.type === 'thinking' && event.thinkingSource === 'preset') controller.abort(); },
+    })).rejects.toThrow('已取消');
+    expect(events).toEqual([{ type: 'thinking', id: 'round-1:preset:0', text: '准备调用 lookup，但尚未提交实际调用。', thinkingSource: 'preset' }]);
+    expect(execute).not.toHaveBeenCalled(); expect(capture).toHaveBeenCalledTimes(1); expect(capture.mock.calls[0][0].rawResponse).toContain('尚未提交实际调用');
+  });
+
   it('redacts a known key split over thinking deltas and credential fields inside thought JSON', async () => {
     const events: ModelActivityEvent[] = [];
     const service = await upstream((_body, response) => {
@@ -180,6 +210,17 @@ describe('public author model activity separated from novel prose', () => {
     const service = await upstream((_body, response) => { response.writeHead(200, { 'Content-Type': 'text/event-stream' }); response.end(stream('openai-chat')); });
     await expect(generateText(config('openai-chat', service.baseUrl, true), { system: '中性测试', prompt: '正文', onResponse: capture, onActivity: () => { throw new Error('模拟过程记录存储失败'); } })).rejects.toThrow('响应中断');
     expect(capture).toHaveBeenCalledTimes(1); expect(capture.mock.calls[0][0].rawResponse).toContain('核对'); expect(service.bodies).toHaveLength(1);
+  });
+
+  it('does not publish preset thought fragments again after the activity callback fails', async () => {
+    const capture = vi.fn(); const onActivity = vi.fn(() => { throw new Error('模拟辅助过程保存失败'); });
+    const service = await upstream((_body, response) => {
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      response.end(sse({ choices: [{ delta: { content: '<thinking>已经收到的辅助核对</thinking>正文。' }, finish_reason: 'stop' }] }) + sse('[DONE]'));
+    });
+    await expect(generateText(config('openai-chat', service.baseUrl, true), { system: '中性测试', prompt: '正文', textFilter: 'dramatron', onActivity, onResponse: capture })).rejects.toThrow('响应中断');
+    expect(onActivity).toHaveBeenCalledTimes(1); expect(capture).toHaveBeenCalledTimes(1); expect(capture.mock.calls[0][0].rawResponse).toContain('已经收到的辅助核对');
+    expect(service.bodies).toHaveLength(1);
   });
 
   it('cancellation during a tool ends its activity and prevents any continuation', async () => {

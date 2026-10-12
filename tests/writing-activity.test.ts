@@ -33,9 +33,9 @@ describe('author writing activity persistence and streaming', () => {
       request.onActivity?.({ type: 'tool_call', id: 'at-journey', name: 'search_story', arguments: { q: '途中' } });
       request.onTextDelta?.(middle);
       request.onActivity?.({ type: 'tool_result', id: 'at-journey', name: 'search_story', result: '找到资料。' });
-      request.onActivity?.({ type: 'thinking', id: 'after-journey', text: '确认行动后果。' });
+      request.onActivity?.({ type: 'thinking', id: 'after-journey', text: '确认行动后果。', thinkingSource: 'preset' });
       request.onTextDelta?.(suffix);
-      request.onActivity?.({ type: 'thinking', id: 'after-journey', text: '继续核对。' });
+      request.onActivity?.({ type: 'thinking', id: 'after-journey', text: '继续核对。', thinkingSource: 'preset' });
       request.onActivity?.({ type: 'thinking_done', id: 'after-journey' });
       return prefix + middle + suffix;
     }));
@@ -45,10 +45,11 @@ describe('author writing activity persistence and streaming', () => {
     expect(activities.map(activity => activity.proseOffset)).toEqual([0, prefix.length, prefix.length + middle.length]);
     expect(activityEvents(events).filter(activity => activity.id === 'at-journey').every(activity => activity.proseOffset === prefix.length)).toBe(true);
     expect(activities[2].text).toBe('确认行动后果。继续核对。');
+    expect(activities[2].thinkingSource).toBe('preset');
     expect(context.engine.writingSnapshot(writing.id).text).toBe(prefix + middle + suffix);
     const restored = context.store.restoreProject(context.store.exportProject(context.project.id));
     const restoredWriting = context.engine.listJobs(restored.id).find(job => job.kind === 'generate')!;
-    expect(context.engine.listWritingActivities(restoredWriting.id).map(activity => activity.proseOffset)).toEqual(activities.map(activity => activity.proseOffset));
+    expect(context.engine.listWritingActivities(restoredWriting.id)).toEqual(activities);
   });
 
   it('uses author-visible redacted prose positions and preserves legacy unpositioned activity', async () => {
@@ -239,16 +240,19 @@ describe('author-only activity API and SSE', () => {
     const writing = context.engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章' });
     context.store.recordWritingActivity(writing.id, { type: 'thinking', id: 'private-thinking', text: '作者可见的思考过程' });
     context.store.recordWritingActivity(writing.id, { type: 'tool_call', id: 'private-tool', name: 'search_story', arguments: { q: '未揭晓的钥匙' } });
+    context.store.recordWritingActivity(writing.id, { type: 'thinking', id: 'private-preset', text: '预设中的作者辅助核对', thinkingSource: 'preset' });
+    context.store.recordWritingActivity(writing.id, { type: 'tool_call', id: 'private-image', name: 'generate_character_portrait', arguments: { name: '未出场人物' } });
     context.engine.action(writing.id, 'pause');
     expect((await context.app.inject(`/api/jobs/${writing.id}/activities?view=author`)).statusCode).toBe(401);
     expect((await context.app.inject({ url: `/api/jobs/${writing.id}/activities`, cookies })).statusCode).toBe(403);
     expect((await context.app.inject({ url: `/api/jobs/${writing.id}/activities?view=reader`, cookies })).statusCode).toBe(403);
     const history = await context.app.inject({ url: `/api/jobs/${writing.id}/activities?view=author`, cookies });
-    expect(history.statusCode).toBe(200); expect(history.json()).toMatchObject([{ kind: 'thinking', text: '作者可见的思考过程' }, { kind: 'tool', name: 'search_story' }]);
+    expect(history.statusCode).toBe(200); expect(history.json()).toMatchObject([{ kind: 'thinking', text: '作者可见的思考过程' }, { kind: 'tool', name: 'search_story' }, { kind: 'thinking', thinkingSource: 'preset', text: '预设中的作者辅助核对' }, { kind: 'tool', name: 'generate_character_portrait' }]);
     const stream = await context.app.inject({ url: `/api/jobs/${writing.id}/events?view=author`, cookies });
     expect(stream.statusCode).toBe(200); const snapshot = JSON.parse(stream.body.trim().slice('data: '.length));
     expect(snapshot.activities).toEqual(history.json()); expect(snapshot.text).toBe(''); expect(snapshot.job.status).toBe('paused');
     const readerJobs = await context.app.inject({ url: '/api/jobs', cookies }); expect(readerJobs.body).not.toContain('作者可见的思考过程'); expect(readerJobs.body).not.toContain('未揭晓的钥匙');
+    expect(readerJobs.body).not.toContain('预设中的作者辅助核对'); expect(readerJobs.body).not.toContain('未出场人物');
     const other = context.store.createProject({ title: '不是正文任务' }); const extractionJob = context.engine.enqueue(other.mainBranchId, 'extract', { baseRevisionId: context.store.getBranch(other.mainBranchId).revisionId });
     expect((await context.app.inject({ url: `/api/jobs/${extractionJob.id}/activities?view=author`, cookies })).statusCode).toBe(400);
   });

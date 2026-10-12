@@ -62,4 +62,26 @@ describe('Dramatron anti-truncation and empty-response structure', () => {
     const comparison='数字 1 < 2。<thinking>辅助推演</thinking>继续正文。';
     for(let split=0; split<=comparison.length; split++) { const filter=createDramatronTextFilter(); expect(filter.feed(comparison.slice(0,split))+filter.feed(comparison.slice(split))+filter.finish()).toBe('数字 1 < 2。继续正文。'); }
   });
+  it('separates preset thoughts in prose order at every split without displaying auxiliary tails or JSON field values', () => {
+    const raw = '前文。<Interleaving><thinking>先核对<think>资料</think>。</thinking>中段。<think>再核对。</think>结尾。</Interleaving><Reference_Example><thinking>尾段示例</thinking></Reference_Example>';
+    for (let split = 0; split <= raw.length; split++) {
+      let prose = '';
+      const thoughts = new Map<string, { text: string; offset: number; done: boolean }>();
+      const filter = createDramatronTextFilter({ onText: value => { prose += value; }, onThinking: event => {
+        const thought = thoughts.get(event.id) ?? { text: '', offset: prose.length, done: false };
+        if ('text' in event) thought.text += event.text; else thought.done = true;
+        thoughts.set(event.id, thought);
+      } });
+      expect(filter.feed(raw.slice(0, split)) + filter.feed(raw.slice(split)) + filter.finish()).toBe('前文。中段。结尾。');
+      expect(prose).toBe('前文。中段。结尾。');
+      expect([...thoughts.values()]).toEqual([{ text: '先核对资料。', offset: 3, done: true }, { text: '再核对。', offset: 6, done: true }]);
+    }
+    const events: unknown[] = [];
+    const quoted = createDramatronTextFilter({ onThinking: event => events.push(event) });
+    const evidence = JSON.stringify({ text: '<thinking>原文证据</thinking>' });
+    expect(quoted.feed(evidence) + quoted.finish()).toBe(evidence); expect(events).toEqual([]);
+    const unfinished = createDramatronTextFilter({ onThinking: event => events.push(event) });
+    expect(unfinished.feed('正文。<thinking>已收到的辅助思考') + unfinished.finish()).toBe('正文。');
+    expect(events).toEqual([{ id: 'preset:0', text: '已收到的辅助思考' }]);
+  });
 });

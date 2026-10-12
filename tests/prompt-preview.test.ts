@@ -58,6 +58,24 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     expect(nativeText).toContain('description');
   });
 
+  it('reminds both writing channels to use declared tools while keeping all protection blocks intact', () => {
+    for (const writingOutputMode of ['text', 'tool'] as const) {
+      const request = input('writing', protocol);
+      request.templates.presets.writing[0].writingOutputMode = writingOutputMode;
+      const originalGeneral = structuredClone(request.templates.general);
+      request.runtime.illustrations = { portrait: true, cg: false };
+      const preview = ctx.engine.previewPrompt(request);
+      const text = preview.messages.map(message => message.content).join('\n');
+      expect(text).toContain('当前材料不足时，先调用本次提供的资料工具');
+      expect(text).toContain('不必为了凑齐三段或单段格式而延后');
+      expect(text).toContain('模拟调用文本不算执行工具');
+      expect(text).toContain('generate_character_portrait'); expect(text).not.toContain('generate_scene_cg');
+      expect(preview.body).toContain('search_story'); expect(preview.body).toContain('generate_character_portrait');
+      expect(text.match(/SKIP silently thinking/g)).toHaveLength(2);
+      expect(request.templates.general).toEqual(originalGeneral);
+    }
+  });
+
   it.each(['structured', 'tool'] as const)('previews extraction %s with the same schema and submission instructions used in real requests', async mode => {
     const draft = input('extraction', protocol); draft.runtime.extractionOutputMode = mode;
     const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: draft });

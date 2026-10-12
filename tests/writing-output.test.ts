@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import { listenLocalServer } from './local-server.mjs';
-import type { ModelRequest, ModelToolContinuation, ProviderConfig, ProviderProtocol } from '../shared/types.js';
+import type { ModelActivityEvent, ModelRequest, ModelToolContinuation, ProviderConfig, ProviderProtocol } from '../shared/types.js';
 import { buildRequestSnapshot, generateStructured, generateText, ModelInteractionPause } from '../server/providers.js';
 import { partialWritingProse, unpackWritingResponse, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 
@@ -44,6 +44,41 @@ function streamEnd(protocol: ProviderProtocol, tail: string, full: unknown) {
 }
 
 describe('layered writing tool transport', () => {
+  it.each(protocols)('%s exposes streamed preset thoughts and executed inner search/image tools in prose order', async protocol => {
+    const first = { prose: '前文。<thinking>先核对人物资料。</thinking>中段。', toolCalls: [
+      { name: 'read_entity', argumentsJson: '{"id":"person"}' },
+      { name: 'generate_character_portrait', argumentsJson: '{"name":"林舟"}' },
+    ] };
+    const last = payload('<think>按真实工具结果继续。</think>结尾。');
+    const service = await upstream((index, _body, res) => {
+      const value = index ? last : first;
+      const raw = JSON.stringify(value); const split = protocol === 'gemini' ? raw.length : raw.indexOf('toolCalls');
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end(streamStart(protocol, raw.slice(0, split)) + streamEnd(protocol, raw.slice(split), value));
+    });
+    const events: ModelActivityEvent[] = []; const thoughts = new Map<string, { text: string; offset: number }>(); let visible = '';
+    const execute = vi.fn(() => ({ name: '林舟' })); const portrait = vi.fn(() => ({ status: 'requested' }));
+    const base = request(execute); base.tools!.push({ name: 'generate_character_portrait', description: '登记立绘', parameters: { type: 'object', properties: { name: { type: 'string' } } }, execute: portrait });
+    const result = await generateText(config(protocol, service.baseUrl), { ...base, textFilter: 'dramatron', onTextDelta: value => { visible += value; }, onActivity: event => {
+      events.push(event);
+      if (event.type === 'thinking' && event.thinkingSource === 'preset') { const thought = thoughts.get(event.id) ?? { text: '', offset: visible.length }; thought.text += event.text; thoughts.set(event.id, thought); }
+    } });
+    expect(visible).toBe('前文。中段。结尾。'); expect(result.text).toBe(visible);
+    expect([...thoughts.values()]).toEqual([{ text: '先核对人物资料。', offset: 3 }, { text: '按真实工具结果继续。', offset: 6 }]);
+    expect(events.filter(event => event.type === 'thinking_done')).toHaveLength(2);
+    expect(events.filter(event => event.type === 'tool_call').map(event => event.name)).toEqual(['read_entity', 'generate_character_portrait']);
+    expect(events.filter(event => event.type === 'tool_result').map(event => event.result)).toEqual([{ name: '林舟' }, { status: 'requested' }]);
+    expect(execute).toHaveBeenCalledExactlyOnceWith({ id: 'person' }); expect(portrait).toHaveBeenCalledExactlyOnceWith({ name: '林舟' });
+    expect(service.bodies).toHaveLength(2); expect(JSON.stringify(service.bodies[1])).toContain('toolResults');
+  });
+
+  it.each(protocols)('%s exposes ordinary JSON preset thoughts once, even without a prose callback', async protocol => {
+    const service = await upstream((_index, _body, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(plainResponse(protocol, '前文。<thinking>文本中的辅助核对。</thinking>结尾。'))); });
+    const events: ModelActivityEvent[] = [];
+    const result = await generateText(config(protocol, service.baseUrl), { system: '中性写作', prompt: '继续', textFilter: 'dramatron', onActivity: event => events.push(event) });
+    expect(result.text).toBe('前文。结尾。');
+    expect(events).toEqual([{ type: 'thinking', id: 'round-1:preset:0', text: '文本中的辅助核对。', thinkingSource: 'preset' }, { type: 'thinking_done', id: 'round-1:preset:0' }]);
+  });
   it('preserves paragraph boundaries across tool rounds after auxiliary cleanup', async () => {
     const service=await upstream((index,_body,res)=>{res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(response('openai-chat',index===0 ? payload('第一段。\n\n','read_entity') : payload('<thinking>核对</thinking>第二段。'))));});
     const deltas:string[]=[]; const result=await generateText(config('openai-chat',service.baseUrl),{...request(),textFilter:'dramatron',onTextDelta:delta=>deltas.push(delta)});
@@ -52,11 +87,12 @@ describe('layered writing tool transport', () => {
   it.each(protocols)('%s retains original auxiliary output in diagnostics and native history while nested tools use only cleaned prose', async protocol => {
     const auxiliary = '<Interleaving><thinking>辅助核对</thinking>信使来到码头。</Interleaving><disclaimer>辅助尾段</disclaimer>';
     const service = await upstream((index, _body, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(response(protocol, index === 0 ? payload(auxiliary, 'read_entity') : payload('<think>再次核对</think>他登上船。')))); });
-    const deltas: string[]=[]; const captures: any[]=[]; const execute=vi.fn(()=>({ location: '码头' }));
-    const result=await generateText(config(protocol, service.baseUrl), { ...request(execute), textFilter: 'dramatron', onTextDelta: value=>deltas.push(value), onResponse: value=>captures.push(value) });
+    const deltas: string[]=[]; const captures: any[]=[]; const activities: ModelActivityEvent[]=[]; const execute=vi.fn(()=>({ location: '码头' }));
+    const result=await generateText(config(protocol, service.baseUrl), { ...request(execute), textFilter: 'dramatron', onTextDelta: value=>deltas.push(value), onResponse: value=>captures.push(value), onActivity: event=>activities.push(event) });
     expect(result.text).toBe('信使来到码头。他登上船。'); expect(deltas.join('')).toBe(result.text);
     expect(execute).toHaveBeenCalledExactlyOnceWith({id:'person'}); expect(service.bodies).toHaveLength(2);
     expect(captures[0].text).toBe('信使来到码头。'); expect(captures[0].rawResponse).toContain('辅助核对');
+    expect(activities.filter(event=>event.type==='thinking'&&event.thinkingSource==='preset').map(event=>event.text)).toEqual(['辅助核对','再次核对']);
     expect(JSON.stringify(service.bodies[1])).toContain('辅助核对'); expect(JSON.stringify(service.bodies[1])).toContain('toolResults');
   });
   it.each(protocols)('%s salvages a complete plain reply from the same tool-mode response without retries', async protocol => {

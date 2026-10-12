@@ -386,7 +386,7 @@ test('作者实时查看公开思考与工具过程，默认折叠且正文独�
     await expect(searchTool).toHaveJSProperty('open', false); await expect(failedTool).toHaveJSProperty('open', false);
     await searchTool.locator('summary').click();
     await expect(searchTool.getByLabel('工具调用参数', { exact: true })).toContainText('林舟');
-    await expect(searchTool.getByLabel('工具查询结果', { exact: true })).toContainText('entities');
+    await expect(searchTool.getByLabel('工具结果', { exact: true })).toContainText('entities');
     await failedTool.locator('summary').click();
     await expect(failedTool.getByRole('alert')).toContainText('没有此资料');
     await page.screenshot({ path: testInfo.outputPath('author-activities-desktop.png'), fullPage: true, animations: 'disabled' });
@@ -1665,6 +1665,54 @@ test('通用框架可跨任务编辑、独立选择和预览，工具通道真�
     const text = await visibleProse(page); expect(text).toContain('林舟来到城门前。'); expect(text).not.toContain('argumentsJson'); expect(text).not.toContain('toolResults'); expect(text).not.toContain('辅助场景核对'); expect(text).not.toContain('<thinking>');
     const jobs = await (await page.request.get('/api/jobs?view=author')).json(); const written = jobs.find((value: any) => value.kind === 'generate' && value.branchId === branchId);
     const activities = await (await page.request.get(`/api/jobs/${written.id}/activities?view=author`)).json(); expect(activities.some((value: any) => value.name === 'search_story' && value.status === 'completed')).toBe(true);
+    expect(activities.filter((value: any) => value.thinkingSource === 'preset').map((value: any) => value.text)).toEqual(['辅助场景核对', '辅助场景核对']);
+    const thoughts = page.locator('.writing-activity[data-thinking-source="preset"]');
+    await expect(thoughts).toHaveCount(2); await expect(thoughts.first().locator('summary')).toContainText('预设思考（非原生）');
+    await thoughts.first().locator('summary').click(); await expect(thoughts.first().locator('.writing-thinking')).toHaveText('辅助场景核对');
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('非原生思考与资料查询、生图工具在作者视角显示，刷新和阅读视图隔离', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-preset-process';
+  try {
+    expect((await page.request.put('/api/settings', { data: { ...previous,
+      providers: [{ id: providerId, name: '预设思考验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }],
+      writingProviderId: providerId, writingModel: 'e2e-preset-activities', planningProviderId: providerId, planningModel: 'e2e-fixture', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
+      modelParameters: [], promptTemplates: defaultPromptTemplates(),
+      taskSettings: { extraction: { outputMode: 'prompt', autoRetry: false, maxRetries: 0, retryDelayMs: 0 } },
+      imageSettings: { providerId, model: 'gpt-image-1', protocol: 'openai-images', size: '1024x1024', quality: 'auto', stylePrompt: '', autoPortrait: true, autoCG: false, timeoutMs: 120000 },
+    } })).ok()).toBeTruthy();
+    await createProject(page, 'E2E 预设思考与工具');
+    await page.getByRole('button', { name: '开始创作', exact: true }).click();
+    await page.getByRole('dialog').getByLabel('这一次，你想写什么？', { exact: true }).fill('先核对城门资料，再继续写作并为新人物登记立绘。');
+    await page.getByRole('dialog').getByRole('button', { name: '开始生成', exact: true }).click();
+    await expect.poll(() => visibleProse(page)).toContain('林舟走进白石城');
+    const branchId = await currentBranchId(page);
+    await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).state.chapters[0]?.status).toBe('ready');
+    const thoughts = page.locator('.writing-activity[data-thinking-source="preset"]');
+    const search = page.locator('.writing-activity[data-kind="tool"]').filter({ hasText: 'search_story' });
+    const portrait = page.locator('.writing-activity[data-kind="tool"]').filter({ hasText: 'generate_character_portrait' });
+    await expect(thoughts).toHaveCount(2); await expect(search).toHaveAttribute('data-status', 'completed'); await expect(portrait).toHaveAttribute('data-status', 'completed');
+    expect(await thoughts.evaluateAll(elements => elements.every(element => !(element as HTMLDetailsElement).open))).toBe(true);
+    await thoughts.first().locator('summary').click(); await expect(thoughts.first()).toContainText('PRESET_BEFORE');
+    await search.locator('summary').click(); await expect(search.getByLabel('工具结果', { exact: true })).toContainText('chapters');
+    await portrait.locator('summary').click(); await expect(portrait.locator('summary')).toContainText('请求人物立绘');
+    await expect(portrait.getByLabel('工具调用参数', { exact: true })).toContainText('林舟');
+    await expect(portrait.getByLabel('工具结果', { exact: true })).toContainText('requested');
+    const text = await visibleProse(page); expect(text).not.toContain('PRESET_'); expect(text).not.toContain('<thinking>');
+    const jobs = await (await page.request.get('/api/jobs?view=author')).json(); const written = jobs.find((value: any) => value.kind === 'generate' && value.branchId === branchId);
+    const activities = await (await page.request.get(`/api/jobs/${written.id}/activities?view=author`)).json();
+    expect(activities.filter((value: any) => value.thinkingSource === 'preset').every((value: any) => value.proseOffset === '林舟来到城门前。'.length)).toBe(true);
+    const exported = await page.request.get(`/api/branches/${branchId}/export`); expect(await exported.text()).not.toContain('PRESET_');
+    await page.screenshot({ path: testInfo.outputPath('preset-thought-tools-desktop.png'), animations: 'disabled' });
+    await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 预设思考与工具', exact: true }).click();
+    await expect(page.getByRole('region', { name: '生成过程', exact: true })).toHaveCount(0); await expect(page.locator('main')).not.toContainText('PRESET_');
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await expect(thoughts).toHaveCount(2);
+    await page.setViewportSize({ width: 390, height: 844 }); await thoughts.first().locator('summary').click(); await portrait.locator('summary').click();
+    await expect(portrait.getByLabel('工具结果', { exact: true })).toContainText('requested');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('preset-thought-tools-mobile.png'), animations: 'disabled' });
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await expect(page.getByRole('region', { name: '生成过程', exact: true })).toHaveCount(0);
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 

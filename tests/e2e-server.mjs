@@ -111,6 +111,20 @@ const modelServer = createServer(async (req, res) => {
       res.end(`data: ${JSON.stringify({ promptFeedback: { blockReason: 'SAFETY' }, usageMetadata: { promptTokenCount: 12 } })}\n\n`); return;
     }
     lastModelParameters = Object.fromEntries(['model', 'temperature', 'top_p', 'seed', 'stream', 'max_tokens', 'max_completion_tokens', 'reasoning_effort'].filter(key => body[key] !== undefined).map(key => [key, body[key]]));
+    if (body.model === 'e2e-preset-activities') {
+      const hasResults = body.messages?.some(message => message.role === 'tool');
+      const frame = (delta, finish_reason = null) => `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }], usage: { prompt_tokens: 30, completion_tokens: 15 } })}\n\n`;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (hasResults) res.end(frame({ content: '<think>PRESET_AFTER：已收到资料及生图登记结果。</think>林舟走进白石城，开始寻找新的线索。' }, 'stop') + 'data: [DONE]\n\n');
+      else {
+        res.write(frame({ content: '林舟来到城门前。<thi' }));
+        setTimeout(() => { if (res.destroyed) return; res.end(frame({ content: 'nking>PRESET_BEFORE：先查询城门资料，再登记人物立绘。</thinking>' }) + frame({ tool_calls: [
+          { index: 0, id: 'preset-search', type: 'function', function: { name: 'search_story', arguments: JSON.stringify({ keywords: ['城门'], scope: 'chapters' }) } },
+          { index: 1, id: 'preset-portrait', type: 'function', function: { name: 'generate_character_portrait', arguments: JSON.stringify({ name: '林舟', description: '穿着旧风衣的旅人。' }) } },
+        ] }, 'tool_calls') + 'data: [DONE]\n\n'); }, 150);
+      }
+      return;
+    }
     if (body.model === 'e2e-writing-envelope') {
       const hasResults = body.messages?.some(message => message.role === 'tool');
       const envelope = { prose: '<Interleaving><thinking>辅助场景核对</thinking>' + (hasResults ? '林舟走进白石城，开始寻找新的线索。' : '林舟来到城门前。') + '</Interleaving>', toolCalls: hasResults ? [] : [{ name: 'search_story', argumentsJson: JSON.stringify({ keywords: ['城门'], scope: 'chapters' }) }] };
