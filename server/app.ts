@@ -13,6 +13,7 @@ import { ImageService } from './images.js';
 import { validateImageParameters } from './image-provider.js';
 import { parseNovel } from './importer.js';
 import { registerImportRuleRoutes } from './import-rules.js';
+import { registerChapterTitleRoutes } from './chapter-titles.js';
 import { generateText, redactKnownSecrets, redactModelPayload, validateProviderOptions } from './providers.js';
 import { listProviderModels } from './model-catalog.js';
 import { SettingsStore, tokenHash, normalizeSettings, hasUrlCredentials } from './security.js';
@@ -144,7 +145,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     if (!traffic.accept(request.ip)) fail('请求过于频繁，请稍后重试。', 429);
     if (path.endsWith('/search') && !searches.accept(request.ip)) fail('搜索过于频繁，请稍后重试。', 429);
     if (['/api/restore', '/api/projects/:id/import', '/api/projects/:id/backup'].includes(path) && !imports.accept(request.ip)) fail('备份或导入操作过于频繁，请稍后重试。', 429);
-    if (['/api/settings/models', '/api/settings/test', '/api/sources/:id/generate-rule'].includes(path) && !models.accept(request.ip)) fail('模型操作过于频繁，请稍后重试。', 429);
+    if (['/api/settings/models', '/api/settings/test', '/api/sources/:id/generate-rule', '/api/sources/:id/chapter-titles/preview', '/api/branches/:id/chapter-titles/preview'].includes(path) && !models.accept(request.ip)) fail('模型操作过于频繁，请稍后重试。', 429);
   });
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof z.ZodError) return reply.status(400).send({ error: error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('；') });
@@ -162,6 +163,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   const source = (id: string): SourceRow => (store.db.prepare('SELECT * FROM sources WHERE id=?').get(id) as SourceRow | undefined) || fail('找不到原文文件。', 404);
   const sourceList = (projectId: string) => (store.db.prepare('SELECT * FROM sources WHERE project_id=? ORDER BY created_at').all(projectId) as SourceRow[]).map(sourcePublic);
   registerImportRuleRoutes(app, { settings, source, sourcePublic: value => sourcePublic(source(value.id)), bytes: value => readFileSync(join(uploadDir, source(value.id).storage_name)) });
+  registerChapterTitleRoutes(app, { store, settings, engine, source, bytes: id => readFileSync(join(uploadDir, source(id).storage_name)) });
   app.get('/api/projects', async request => store.listProjects().map(project => author(request) ? project : { ...project, premise: '' }));
   app.post('/api/projects', async request => store.createProject(z.object({ title: z.string().trim().min(1).max(200), premise: z.string().max(100000).default(''), mode: mode.default('original') }).parse(request.body)));
   app.get('/api/projects/:id', async request => { const project = store.getProject(param(request)); return { project: author(request) ? project : { ...project, premise: '' }, branches: store.listBranches(param(request)), branchTree: store.listBranchTree(param(request)), sources: sourceList(param(request)) }; });

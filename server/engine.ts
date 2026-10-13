@@ -323,7 +323,7 @@ export class StoryEngine {
         else delete smallPayload.sourceReference;
         smallPayload.sourceReferenceCaptured = true;
       }
-      if (kind === 'generate' && !smallPayload.title) smallPayload.title = `第 ${state.chapters.length + 1} 章`;
+      if (kind === 'generate' && !smallPayload.title) smallPayload.title = '新章节';
       job = { id: randomUUID(), projectId: branch.projectId, branchId: branch.id, kind, status: 'queued', baseRevisionId: branch.revisionId, progress: 0, total, message: '已排队', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: structuredClone(smallPayload) };
       if (kind === 'import') {
         const insert = this.store.db.prepare('INSERT INTO job_import_chapters VALUES(?,?,?,?)');
@@ -381,7 +381,7 @@ export class StoryEngine {
       // The choice, new version and next job commit together; a duplicate cannot queue another request.
       delete state.rpg!.nextChoice;
       const reference = this.store.resolveSourceReference(branchId);
-      const title = `第 ${state.chapters.length + 1} 章`;
+      const title = '新章节';
       let nextJob!: Job;
       this.store.commit(branchId, branch.revisionId, state, '确认章末选择，开始下一章', revisionId => {
         nextJob = { id: randomUUID(), projectId: job.projectId, branchId, kind: 'generate', status: 'queued', baseRevisionId: revisionId, progress: 0, total: 1, message: '已保存章末选择，等待开始下一章', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { mode: 'rpg', instruction: nextChoice.instruction, maxWords: nextChoice.maxWords, title, rpgChapterAnswer: { question: nextChoice.question, ...answer, ...(nextChoice.followingChoices?.length ? { unansweredQuestions: nextChoice.followingChoices } : {}) }, sourceReferenceCaptured: true, ...(reference ? { sourceReference: reference } : {}) } };
@@ -449,7 +449,7 @@ export class StoryEngine {
   }
   private promptVariables(job: Job, state = this.store.state(job.branchId)): Record<string, string> {
     const project = this.store.getProject(job.projectId);
-    return { projectTitle: project.title, premise: project.premise || '', chapterNumber: String(state.chapters.length + 1), instruction: String(job.payload.instruction ?? '') };
+    return { projectTitle: project.title, premise: project.premise || '', instruction: String(job.payload.instruction ?? '') };
   }
   private writingReference(job: Job) {
     let reference = job.payload.sourceReference as StoryReference | undefined;
@@ -529,7 +529,7 @@ export class StoryEngine {
     if (job.payload.mode === 'rpg' && !job.payload.rpgChoice && !job.payload.rpgChapterAnswer) throw new OutputValidationError([{ path: '$', message: 'RPG 剧情没有询问玩家的选择节点，请使用支持工具调用的写作模型并重新生成；正文已保留供作者查看' }]);
     const input = job.payload as unknown as GenerateInput; const original = job.payload.sourceChapterId ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined; const state = this.store.state(job.branchId);
     const text = original && input.selection ? String(original.text).slice(0, input.selection.start) + prose + String(original.text).slice(input.selection.end) : prose;
-    this.store.saveChapter(job.branchId, { baseRevisionId: job.baseRevisionId, title: input.title || `第 ${state.chapters.length + 1} 章`, text }, (revisionId, branchId) => {
+    this.store.saveChapter(job.branchId, { baseRevisionId: job.baseRevisionId, title: input.title || '新章节', text }, (revisionId, branchId) => {
       const saved = this.store.revisionState(revisionId).chapters.at(-1)!;
       job.status = 'completed'; job.error = undefined;
       if (original && input.selection) this.store.shiftWritingActivityOffsets(job.id, this.redact(String(original.text).slice(0, input.selection.start)).length);
@@ -692,7 +692,7 @@ export class StoryEngine {
         const message = `整理「${chapter.title}」片段 ${blockIndex + 1}/${blocks.length}`;
         job.message = failedAttempts ? `${message}；正在第 ${failedAttempts} 次自动重试` : message; this.save(job);
         // Configuration and context-budget failures require an author change, not another request.
-        const request = this.budget(job, provider, { ...this.taskPrompt('extraction', { ...this.promptVariables(job, state), chapterNumber: String(state.chapters.findIndex(value => value.id === chapterId) + 1), context, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }, { extractionOutputMode: retryConfig.outputMode }), signal });
+        const request = this.budget(job, provider, { ...this.taskPrompt('extraction', { ...this.promptVariables(job, state), context, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }, { extractionOutputMode: retryConfig.outputMode }), signal });
         validateProviderOptions(provider, request.maxOutputTokens);
         let url: URL;
         try { url = new URL(provider.baseUrl); } catch { throw new HttpError('模型服务地址无效，请填写完整的 HTTP 或 HTTPS 地址。'); }
@@ -766,7 +766,8 @@ export class StoryEngine {
         }
         const input = job.payload as unknown as GenerateInput;
         const state = this.store.state(job.branchId); const provider = { ...this.provider('writing'), stream: true };
-        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original: this.writingReference(job) });
+        const aliases = job.payload.rpgLookupAliases as Record<string, string> | undefined;
+        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original: this.writingReference(job), lookupAliases: aliases });
         const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
         const selected = original ? input.selection ? String(original.text).slice(input.selection.start, input.selection.end) : String(original.text) : undefined;
         const continuation = input.mode === 'rpg' ? job.payload.rpgContinuation as ModelToolContinuation | undefined : undefined;
@@ -782,9 +783,8 @@ export class StoryEngine {
         const prompt: ModelRequest = continuation ? { system: '', prompt: '', writingOutputMode: continuation.writingOutputMode } : this.taskPrompt('writing', {
           ...this.promptVariables(job, state), ...context.variables, context: context.text, mode: input.mode,
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
-          writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : `请写第 ${state.chapters.length + 1} 章。`,
+          writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : state.chapters.length ? '从 continuationAnchor 指定的最新正文结尾接着写下一章，直接推进结尾之后的事件，不按标题编号寻找或重写旧章节。' : '从作者设定开始写新的正文。',
         }, { rpg: state.rpg, illustrations: { portrait: illustrations.tools.some(tool => tool.name === 'generate_character_portrait'), cg: illustrations.tools.some(tool => tool.name === 'generate_scene_cg') }, chapterAnswer: job.payload.rpgChapterAnswer ? JSON.stringify(job.payload.rpgChapterAnswer) : undefined });
-        const aliases = job.payload.rpgLookupAliases as Record<string, string> | undefined;
         const retrievalTools = aliases ? context.tools.map(tool => ({ ...tool, execute: (args: Record<string, unknown>) => tool.execute({ ...args, ...(typeof args.id === 'string' ? { id: aliases[args.id] ?? args.id } : {}), ...(typeof args.chapterId === 'string' ? { chapterId: aliases[args.chapterId] ?? args.chapterId } : {}) }) })) : context.tools;
         const tools = [...retrievalTools, ...illustrations.tools, ...rpg.tools];
         if (continuation) {

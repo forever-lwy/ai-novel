@@ -1596,7 +1596,8 @@ test('最终提示词预览显示全部程序规则、四种协议和 RPG，且�
     for (const protocol of ['openai-chat', 'openai-responses', 'gemini', 'claude']) {
       await panel.getByLabel('预览接口协议', { exact: true }).selectOption(protocol);
       await expect(preview).toContainText('当前阶段只生成本章正文');
-      await expect(preview.locator('[data-role="system"]')).toHaveCount(['claude', 'gemini'].includes(protocol) ? 1 : 6);
+      await expect(preview.locator('[data-role="system"]')).toHaveCount(['claude', 'gemini'].includes(protocol) ? 1 : 7);
+      await expect(preview).toContainText('不要按编号推算进度');
       expect(await preview.locator('section:not([data-role="system"])').evaluateAll(elements => elements.map(element => element.getAttribute('data-role')))).toEqual(['user', 'assistant', 'user', 'assistant', 'user']);
     }
     await panel.locator('summary').filter({ hasText: '编辑示例变量' }).click();

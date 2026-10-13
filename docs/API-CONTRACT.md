@@ -4,9 +4,11 @@
 
 ## 原作参考与文本查询工具
 
+续写请求以 `continuationAnchor={chapterId,title,ending,instruction}` 标记最后保存的正文结尾，同时提供最近完整正文；自定义预设省略上下文块时，运行规则仍带入该起点。内部章节数量和索引不映射到章节编号变量；旧 `chapterNumber` 展开为“待写章节／当前章节”，新建章节缺省标题为“新章节”，EPUB 缺题名时为“未命名章节”。原文标题里的真实编号和原文段落／行号保留。
+
 - `StoryState.sourceReference?:{branchId,revisionId,sourceIds?:string[]}` 绑定同作品的原作故事线版本和已确认源文件。派生故事线保留当前起点状态，另存完整来源版本；嵌套分支继承该引用。新正文任务在排队时固定参考，包括“没有参考”的状态。旧派生线根据来源任务、父线及创建时的历史版本追溯，不读取原线后来的改动。阅读投影删除该字段，内部任务 payload 不经 HTTP 返回。
 - 写作的 `originalReference` 上下文单列原作完整剧情摘要、世界观／规则、人物与物品等轻量目录，完整档案和后续正文可通过只读工具获取。原作已有有效作者确认压缩摘要时，使用 `authorConfirmedSummary` 加未覆盖章节摘要；覆盖不属于参考版本或为空时退回逐章摘要。默认实体目录最多 100 项、别名 3 项，提供 `entityDirectoryTotal/entityDirectoryTruncated/aliasesTruncated`，工具仍检索完整档案及全部别名。原作里的未来是作者参考，不合并到当前 `state.entities`、当前摘要或玩家知识；提取仍仅处理当前正文。参考引用随版本保存，完整作品恢复时校验来源关联、映射版本／源文件 ID；缺失或跨作品关联不能静默恢复。
-- 原作文本来自固定参考版本的章节正文，以及已确认导入目录。目录中的未整理章节可读全文，但不存在的摘要／人物资料不会补造。虚拟路径为 `story/000001.txt`、`original/000001.txt`、`original/sources/0001/000001.txt`，章节顺序从 1 开始；路径不包含数据库 ID，恢复后可继续使用。只在本次捕获的语料中解析路径，不访问任意文件系统。
+- 原作文本来自固定参考版本的章节正文，以及已确认导入目录。目录中的未整理章节可读全文，但不存在的摘要／人物资料不会补造。虚拟路径分别位于 `story/`、`original/`、`original/sources/`；文件名由捕获版本中的章节或源文件标识生成不表示顺序的哈希，不向模型提供内部章节序号。必须使用工具返回的 path；旧 RPG 对话中的顺序路径仅在捕获版本内兼容解析，结果仍返回新路径。只在本次捕获的语料中解析路径，不访问任意文件系统。
 - `list_text_files({collection?:'story'|'original'|'all',query?,offset?,limit?})`：按路径、标题或源文件名筛选，返回 `files,total,offset,truncated,nextOffset?`。默认 20 项，`limit` 为 1–100；每个文件含路径、标题、总行数及 `collection/reference/source` 标记。
 - `search_text({keywords?:string[],query?,collection?,path?,offset?,limit?,contextLines?})`：文字关键词 OR 检索，支持完整短语，返回 `matches,total,offset,truncated,nextOffset?`。`path` 需为目录中的精确路径，不能在错误 collection 下读取。默认 20 个命中行，`limit` 为 1–100，附近行默认 2、可设 0–10；命中包含路径、行号、命中列、附近文字与裁剪偏移。分页 offset 按命中行计算，空结果正常返回；关键词空白或非法参数返回工具 error。
 - `read_text_file({path,startLine?,endLine?,startOffset?})`：起止行从 1 开始，保留空白行；`startOffset` 为起始行内从 0 开始的 UTF-16 字符偏移。返回 `lines[{line,text,startOffset,endOffset,truncated?}],totalLines,startLine,endLine,truncated,nextLine?,nextOffset?`。每次最多 200 行，结果约 20000 字符；长行分片时 `nextLine` 不变，继续传该行及 `nextOffset`。正文裁剪均有标记，不能把部分内容当成完整原文。
@@ -75,6 +77,14 @@
 - `GET /sources/:id/heading-candidates?q=&offset=0&limit=60 -> {candidates:[{line,title}],nextOffset:number|null}`：短行候选来自原始正文，可能包括短正文段落，由作者选择实际标题。q 最多 160 字符，使用不区分大小写的字面包含检索；limit 为 1–120，offset 为上页最后的原文行号（从 1 开始，空行仍计数），nextOffset 为 null 表示结束。行号基于去 BOM、统一换行、去首尾空白后的 TXT；EPUB 为按正文阅读顺序拼接的文本。
 - `POST /sources/:id/generate-rule {lines:number[],instruction?} -> GeneratedChapterRule`：选 2–20 个不同的有效行号，至少两个不同标题，补充要求最多 1000 字符。服务重新读取原文核对样本，只发送所选标题及要求，依次使用已保存的 extraction/writing/planning 模型和任务参数，完整请求及输出预留计入上下文。只请求模型一次，生成失败不自动重试，也不受资料提取的自动重试开关影响。成功返回 `{ok:true,rule,headingCount,chapterCount,examples,inputTokens,outputTokens,capture}`，验证全部样本匹配后再计算原文匹配数，examples 至多 8 项；不保存规则、不替换目录、不创建故事任务。模型／结果失败返回 `{ok:false,error,capture?}` 以保留诊断，非法样本和未配置模型在发送前返回 400。capture 包含脱敏后的实际请求／响应，在当前窗口可查看或下载，不作为作品资料保存。
 - 已确认原文的 split/heading-candidates/generate-rule 返回 409；预览计算或 AI 结束时再次检查原文仍存在且未确认，拒绝迟到结果。自定义表达式仅在独立工作线程执行，单次最多 4 秒、最多 4 个并发；超时终止线程，繁忙返回 429，不阻塞 HTTP 服务。AI 生成沿用模型操作限流（默认 20 次／分钟），客户端断开会取消模型请求。
+
+## 章节标题修复接口
+
+- `POST /branches/:id/chapter-titles/preview?view=author {baseRevisionId,chapterIds:string[],instruction?:string} -> ChapterTitlePreview`：选择1～20个不同章节，检查作者视图、当前版本及空闲任务状态；读取固定版本本章首4000／长章末1500字符，以及邻章各600字符。导入章节能在原文件中用本章开头唯一定位时，附带起点前800字符与匹配开头作为 sourceContext；查不到或重复时不猜测。返回前再次检查版本和任务。
+- `POST /sources/:id/chapter-titles/preview?view=author {chapters:ChapterTitleSample[],instruction?:string} -> ChapterTitlePreview`：仅未确认的原文件可用，支持当前窗口手动编辑／分章后的草稿样本，每次1～20条，不写入源文件、导入目录或故事版本；正文样本及相邻片段采用上述长度限制，原文件上下文由服务端定位补充。source 确认或删除后的迟到结果拒绝。
+- 两种预览都把客户端／数据库标识映射为临时 UUID，模型只见标题和文本，不见目录位置；结果按标识映射回原选择。优先提取模型，依次写作、压缩模型；配置及上下文预算在请求前检查，一次请求不自动重试。同一故事线或源文件同时最多一个标题预览。关闭连接取消请求；与已有模型操作共用限速。
+- `ChapterTitlePreview={ok,suggestions?:[{chapterId,originalTitle,title,reason,evidence,confidence:high|medium|low,multipleChapters:boolean}],error?,inputTokens?,outputTokens?,capture?}`。要求全部标识恰好返回一次，evidence 必须是该章已提供正文或原文件上下文的逐字摘录；high 改名须有依据。新编号必须已出现于原标题或本章材料，拒绝按目录位置猜号。失败返回 `ok:false` 及已收到的脱敏诊断，不应用标题。
+- `POST /branches/:id/chapter-titles/apply?view=author {baseRevisionId,changes:[{chapterId,originalTitle,title}]} -> BranchView`：一次应用1～20条作者选择的改名；作者可编辑建议。验证当前版本、原标题、归属、无重复且标题有实际变化，再事务提交。只改当前线章节引用中的 title，并同步受影响的章末快照；不可变正文、资料、摘要、原文件及其他线不改。可回退，完整备份保留。版本冲突或未结束任务返回409。
 
 ## 文字与作品接口
 

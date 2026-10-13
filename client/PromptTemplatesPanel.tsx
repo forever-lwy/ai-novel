@@ -21,7 +21,7 @@ function sampleValue(key: string) {
   const samples: Record<string, string> = {
     mode: 'original', title: '雾港来信', projectTitle: '雾港来信', premise: '一位年轻的信使在封港前收到一封寄给失踪船长的信。',
     instruction: '让信使在码头发现第一个线索，注意环境描写，暂时不要揭晓船长的去向。', maxWords: '1500',
-    chapterTitle: '雨夜码头', chapterNumber: '2', chapterIndex: '2', chapterCount: '1', chapterId: 'sample-chapter',
+    chapterTitle: '雨夜码头', chapterNumber: '待写章节', chapterIndex: '', chapterCount: '', chapterId: 'sample-chapter',
     text: '雨水浸透了信使的斗篷。他把盖着蓝色火漆的信藏进怀里，沿着码头寻找失踪船长。',
     paragraphs: '1. 雨水浸透了信使的斗篷。\n2. 他把盖着蓝色火漆的信藏进怀里，沿着码头寻找失踪船长。',
     summaries: '第一章：信使收到船长失踪前寄出的信，决定赶往码头。', summary: '信使在雨夜来到码头寻找失踪船长。',
@@ -34,7 +34,7 @@ function sampleValue(key: string) {
     worldRules: '[]', mainCharacters: '[{"name":"林舟","description":"没有超自然能力的年轻信使"}]', mainCharacterRelations: '[]',
     unrevealedForeshadows: '[]', plotSummaries: '第一章：林舟收到船长失踪前寄出的信，决定赶往码头。',
     recentChapters: '林舟拿着神秘来信，在城门关闭之前赶到了雾港。', currentChapterPlan: '{"chapter":2,"title":"雨夜码头","goal":"在码头发现船长留下的怀表"}',
-    writingTarget: '请写第 2 章，只写当前这一章。', sourceText: '雨水浸透了林舟的斗篷。他沿着码头寻找失踪船长。', originalReference: '',
+    writingTarget: '从最近保存的正文结尾接着写下一章，只写当前这一章。', sourceText: '雨水浸透了林舟的斗篷。他沿着码头寻找失踪船长。', originalReference: '',
   };
   return samples[key] ?? `示例${key}`;
 }

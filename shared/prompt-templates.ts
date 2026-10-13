@@ -96,9 +96,10 @@ const presetMode = (preset: PromptPreset, mode?: string) => mode === 'rpg' && !p
 export interface PromptVariable { key: string; label: string }
 const commonVariables: PromptVariable[] = [
   { key: 'projectTitle', label: '作品标题' }, { key: 'premise', label: '创作前提' },
-  { key: 'chapterNumber', label: '当前章节编号' }, { key: 'instruction', label: '本次要求' },
+  { key: 'chapterNumber', label: '章节位置说明（兼容旧变量，不提供序号）' }, { key: 'instruction', label: '本次要求' },
 ];
 const contextVariables: PromptVariable[] = [
+  { key: 'continuationAnchor', label: '最新正文结尾与续写起点' },
   { key: 'storyMaterials', label: '故事设定与摘要（不含最近全文）' },
   { key: 'context', label: '完整故事上下文' }, { key: 'worldview', label: '世界观' },
   { key: 'worldRules', label: '世界规则' }, { key: 'locked', label: '作者锁定设定' },
@@ -302,8 +303,9 @@ export function compilePrompt(config: PromptTemplateSettings | undefined, task: 
   const preset = activePromptPreset(settings, task);
   const general = settings.general!.presets.find(value => value.id === preset.generalPresetId) ?? activePromptPreset(settings, 'general');
   const expand = (value: PromptBlock, owner: PromptPreset): PromptMessage => {
-    const values: Record<string, string | number | undefined> = { ...owner.variables, ...variables, storyMaterials: variables.storyMaterials ?? variables.context };
-    return { role: value.role, content: value.feature === 'snow' ? value.content : value.content.replace(variablePattern, (_match, key: string) => Object.hasOwn(values, key.trim()) ? String(values[key.trim()] ?? '') : '') };
+    const values: Record<string, string | number | undefined> = { ...owner.variables, ...variables, storyMaterials: variables.storyMaterials ?? variables.context, chapterNumber: task === 'writing' ? '待写章节' : '当前章节', chapterIndex: '', chapterCount: '', endChapter: '' };
+    const content = value.content.replace(/第\s*\{\{\s*chapterNumber\s*\}\}\s*章/g, '{{chapterNumber}}');
+    return { role: value.role, content: value.feature === 'snow' ? value.content : content.replace(variablePattern, (_match, key: string) => Object.hasOwn(values, key.trim()) ? String(values[key.trim()] ?? '') : '') };
   };
   const nativeSubmission = task === 'writing' && preset.writingOutputMode === 'tool' || task === 'extraction' && ['structured', 'tool'].includes(runtime.extractionOutputMode ?? '');
   const applies = (value: PromptBlock) => value.enabled && (!value.tasks?.length || value.tasks.includes(task)) && (!value.feature?.startsWith('cot-') || task === 'writing') && (!value.feature?.startsWith('defense-') || !nativeSubmission);

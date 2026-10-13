@@ -8,6 +8,7 @@ import { SettingsStore } from '../server/security.js';
 import { StoryEngine, type TextModels } from '../server/engine.js';
 import { buildRequestSnapshot, estimateModelRequestInputTokens } from '../server/providers.js';
 import { defaultPromptTemplates } from '../shared/prompt-templates.js';
+import { buildWritingContext } from '../server/writing-context.js';
 import type { ModelRequest, ProviderConfig, ProviderProtocol, Settings } from '../shared/types.js';
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
@@ -72,6 +73,7 @@ it('uses the selected message blocks and story variables for writing and backgro
   const project = store.createProject({ title: '模板作品', premise: '古城长夜' });
   const saved = store.saveChapter(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, title: '已有开场', text: '旅人离开村庄。' });
   store.applyExtraction(project.mainBranchId, saved.branch.revisionId, saved.state.chapters[0].id, { summary: '旅人离开村庄。', entities: [], relations: [], foreshadows: [] }, true);
+  const anchor = buildWritingContext({ state: store.state(project.mainBranchId), chapterText: id => store.chapter(project.mainBranchId, id).text }).variables.continuationAnchor;
   const engine = new StoryEngine(store, () => settings, models); engines.push(engine); engine.start();
   const writing = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, instruction: '写旅人', mode: 'original' });
   expect((await terminal(engine, writing.id)).status).toBe('completed');
@@ -79,7 +81,7 @@ it('uses the selected message blocks and story variables for writing and backgro
   expect((await terminal(engine, extraction.id)).status).toBe('completed');
   for (const [index, task] of ['writing', 'extraction'].entries()) expect(calls[index].messages).toContainEqual({ role: 'system', content: `${task} 模板作品` });
   expect(calls[0].messages).toContainEqual({ role: 'system', content: expect.stringContaining('当前阶段只生成本章正文') });
-  expect(calls[0].messages!.filter(message => ['writing 模板作品', '预设示例', '古城长夜\n写旅人\n2'].includes(message.content))).toEqual([{ role: 'system', content: 'writing 模板作品' }, { role: 'user', content: '古城长夜\n写旅人\n2' }]);
+  expect(calls[0].messages!.filter(message => ['writing 模板作品', '预设示例', '古城长夜\n写旅人\n待写章节'].includes(message.content))).toEqual([{ role: 'system', content: 'writing 模板作品' }, { role: 'user', content: '古城长夜\n写旅人\n待写章节' }]);
   expect(calls[0].messages).toContainEqual({ role: 'assistant', content: expect.stringContaining('预设示例') });
   expect(calls[1].prompt).toContain('[1] 旅人来到桥边。');
   expect(calls[0].messages![0].role).toBe('user');
@@ -87,7 +89,7 @@ it('uses the selected message blocks and story variables for writing and backgro
   const chapter = store.state(project.mainBranchId).chapters.at(-1)!;
   for (const protocol of ['openai-chat', 'openai-responses', 'gemini', 'claude'] as ProviderProtocol[]) {
     for (const [index, task] of (['writing', 'extraction'] as const).entries()) {
-      const preview = engine.previewPrompt({ task, templates, protocol, runtime: {}, variables: { projectTitle: '模板作品', worldview: '古城长夜', instruction: '写旅人', chapterNumber: '2', chapterTitle: chapter.title, blockText: '[1] 旅人来到桥边。' } });
+      const preview = engine.previewPrompt({ task, templates, protocol, runtime: {}, variables: { projectTitle: '模板作品', worldview: '古城长夜', instruction: '写旅人', chapterNumber: '2', chapterTitle: chapter.title, blockText: '[1] 旅人来到桥边。', continuationAnchor: anchor } });
       const actual = JSON.parse(buildRequestSnapshot({ id: 'preview', name: '预览', protocol, baseUrl: 'https://preview.invalid', model: 'preview-model', maxOutputTokens: 4096, contextTokens: 2000000 }, { ...calls[index], maxOutputTokens: 4096, onTextDelta: undefined, onActivity: undefined }).body);
       expect(JSON.parse(preview.body)).toEqual(actual);
     }

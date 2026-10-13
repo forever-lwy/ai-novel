@@ -272,6 +272,6 @@ describe('author-only activity API and SSE', () => {
     expect(events.some(event => event.type === 'activity' && event.activity.kind === 'tool')).toBe(true);
     expect(events.some(event => event.type === 'delta')).toBe(true);
     expect(events.at(-1)).toMatchObject({ type: 'status', job: { status: 'completed' } });
-    expect(context.store.exportText(project.mainBranchId)).toBe('第 1 章\n\n旅人来到桥边。');
+    expect(context.store.exportText(project.mainBranchId)).toBe('新章节\n\n旅人来到桥边。');
   });
 });

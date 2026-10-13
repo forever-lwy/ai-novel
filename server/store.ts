@@ -376,6 +376,23 @@ export class Store {
   clearChapterExtraction(branchId: string, base: string, chapterId: string, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
     return this.changeChapterMaterials(branchId, base, chapterId, false, checkpoint);
   }
+  updateChapterTitles(branchId: string, base: string, changes: { chapterId: string; originalTitle: string; title: string }[]): BranchView {
+    this.assertVersion(branchId, base); const current = this.state(branchId);
+    if (!changes.length || new Set(changes.map(change => change.chapterId)).size !== changes.length) throw new HttpError('章节标题修改为空或包含重复章节。');
+    const replacements = new Map<string, string>(); let first = current.chapters.length;
+    for (const change of changes) {
+      const index = current.chapters.findIndex(chapter => chapter.id === change.chapterId);
+      if (index < 0) throw new HttpError('本故事线不包含这个章节', 404);
+      if (current.chapters[index].title !== change.originalTitle) throw new HttpError('章节标题已改变，请重新预览后再应用。', 409);
+      const title = change.title.trim();
+      if (!title || title.length > 500 || /[\r\n\u0000]/.test(title)) throw new HttpError('章节标题不能为空、超过500字符或含换行。');
+      if (title !== change.originalTitle) { replacements.set(change.chapterId, title); first = Math.min(first, index); }
+    }
+    if (!replacements.size) throw new HttpError('所选标题没有变化。');
+    const states = this.chapterTimeline(branchId, first + 1);
+    for (const state of states) for (const chapter of state.chapters) if (replacements.has(chapter.id)) chapter.title = replacements.get(chapter.id)!;
+    return this.commit(branchId, base, states.at(-1)!, '修复章节标题', undefined, states.slice(0, -1));
+  }
   deleteChapter(branchId: string, base: string, chapterId: string): BranchView {
     return this.changeChapterMaterials(branchId, base, chapterId, true);
   }

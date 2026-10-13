@@ -159,7 +159,7 @@ function parseEpub(bytes: Uint8Array): ImportedChapter[] {
     if (!page.text) continue;
     textLength += page.text.length;
     if (textLength > MAX_TEXT_LENGTH) throw new Error('小说正文超过 2000 万字，请拆分后导入。');
-    chapters.push({ title: page.title || `第 ${chapters.length + 1} 章`, text: page.text });
+    chapters.push({ title: page.title || '未命名章节', text: page.text });
   }
   if (!chapters.length) throw new Error('EPUB 没有可读取的小说正文。');
   return chapters;

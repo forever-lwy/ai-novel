@@ -15,6 +15,15 @@ if (!existsSync(join(staticDir, 'index.html'))) throw new Error('请先 npm run 
 const dataDir = mkdtempSync(join(tmpdir(), 'ai-novel-browser-'));
 
 function fixtureReply(system, prompt) {
+  if (system.includes('# 章节标题修复')) {
+    const input = JSON.parse(prompt);
+    return JSON.stringify({ chapters: input.chapters.map(chapter => {
+      const preceding = chapter.sourceContext?.split(chapter.beginning.trim().slice(0, 200))[0] || '';
+      const heading = chapter.beginning.match(/^第[0-9]+章[^\n]*/)?.[0] || [...preceding.matchAll(/第[0-9]+章[^\n]*/g)].at(-1)?.[0];
+      return { chapterId: chapter.chapterId, title: heading || '雨夜码头', reason: heading ? '原文标题与本章起点对应。' : '根据本章内容建议题名。', evidence: heading || chapter.beginning.slice(0, 80), confidence: heading ? 'high' : 'medium', multipleChapters: false };
+    }) });
+  }
+
   if (system.includes('# 分章规则生成')) return JSON.stringify({ name: 'AI 场景编号', pattern: '场景[0-9]+｜.+', flags: '', description: '按场景编号和竖线标题分章。' });
   if (system.includes('只压缩') && system.includes('剧情摘要')) return JSON.stringify({ text: '林舟调查白石城。' });
   if (system.includes('# 当前片段资料提取')) {

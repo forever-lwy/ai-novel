@@ -1,3 +1,4 @@
+import { buildWritingContext } from '../server/writing-context.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -76,7 +77,7 @@ describe('durable RPG story choices', () => {
     const replacement = engineFor(store, config); const copy = replacement.listJobs(restored.id).find(value => value.kind === 'generate')!;
     replacement.choose(copy.id, { choiceId: copy.pendingChoice!.id, optionId: 'bridge' });
     expect((await completed(replacement, copy.id)).status).toBe('completed'); expect(service.bodies).toHaveLength(2);
-    expect(store.exportText(copy.branchId)).toBe('第 1 章\n\n你站在岔路口。你沿着桥头继续前进。');
+    expect(store.exportText(copy.branchId)).toBe('新章节\n\n你站在岔路口。你沿着桥头继续前进。');
     expect(store.exportText(copy.branchId)).not.toContain('argumentsJson');
     expect(rawJob(store, copy.id).payload.rpgContinuation).toMatchObject({ writingOutputMode: 'tool' });
     expect(JSON.stringify(service.bodies[1])).toContain('toolResults'); expect(JSON.stringify(service.bodies[1])).toContain('前往桥头');
@@ -165,16 +166,19 @@ describe('durable RPG story choices', () => {
   });
 
   it('restores independent waiting jobs with opaque protocol history and aliases old retrieval IDs', async () => {
-    let oldEntityId = '';
+    let oldEntityId = ''; let oldTextPath = '';
     const service = await upstream((_body, reply, index) => {
       if (index === 0) response(reply, '你看见林舟。', [{ id: 'pick', name: 'ask_user', args: { question: '如何回应？', options } }]);
-      else if (index === 1) response(reply, '', [{ id: 'lookup', name: 'read_entity', args: { id: oldEntityId } }]);
+      else if (index === 1) response(reply, '', [{ id: 'lookup', name: 'read_entity', args: { id: oldEntityId } }, { id: 'file-lookup', name: 'read_text_file', args: { path: oldTextPath } }]);
       else response(reply, '林舟继续讲述城中的情况。');
     });
     const store = makeStore(), config = settings(service.url), engine = engineFor(store, config), project = store.createProject({ title: '备份体验' });
     const view = store.updateEntity(project.mainBranchId, store.getBranch(project.mainBranchId).revisionId, { id: '', kind: 'character', name: '林舟', aliases: [], description: '旅人', visibility: 'public', locked: true, facts: [] });
     oldEntityId = view.state.entities[0].id;
-    const queued = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: view.branch.revisionId, mode: 'rpg', instruction: '', rpg: { character: { kind: 'existing', entityId: oldEntityId, name: '', description: '' } } });
+    append(store, project.mainBranchId, '第16章 原作标题');
+    const context = buildWritingContext({ state: store.state(project.mainBranchId), chapterText: id => store.chapter(project.mainBranchId, id).text });
+    oldTextPath = (await context.tools.find(tool => tool.name === 'list_text_files')!.execute({}) as any).files[0].path;
+    const queued = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'rpg', instruction: '', rpg: { character: { kind: 'existing', entityId: oldEntityId, name: '', description: '' } } });
     const waiting = await paused(engine, queued.id); await engine.close();
     const restored = store.restoreProject(store.exportProject(project.id)); const replacement = engineFor(store, config);
     const copy = replacement.listJobs(restored.id).find(job_ => job_.kind === 'generate')!;
@@ -183,9 +187,9 @@ describe('durable RPG story choices', () => {
     expect(store.state(copy.branchId).rpg?.character.entityId).not.toBe(oldEntityId);
     replacement.choose(copy.id, { choiceId: copy.pendingChoice!.id, optionId: 'bridge' });
     expect((await completed(replacement, copy.id)).status).toBe('completed'); expect(service.bodies).toHaveLength(3);
-    const lookupResult = service.bodies[2].messages.filter((message: any) => message.role === 'tool').at(-1);
-    expect(JSON.stringify(lookupResult)).toContain('林舟'); expect(JSON.stringify(lookupResult)).not.toContain('没有此资料');
-    expect(job(replacement, waiting.id).status).toBe('paused'); expect(store.state(waiting.branchId).chapters).toHaveLength(0);
+    const lookupResult = service.bodies[2].messages.filter((message: any) => message.role === 'tool');
+    expect(JSON.stringify(lookupResult)).toContain('林舟'); expect(JSON.stringify(lookupResult)).toContain('第16章 原作标题'); expect(JSON.stringify(lookupResult)).not.toContain('该路径不在捕获语料'); expect(JSON.stringify(lookupResult)).not.toContain('没有此资料');
+    expect(job(replacement, waiting.id).status).toBe('paused'); expect(store.state(waiting.branchId).chapters).toHaveLength(1);
   });
 
   it('retains prose but fails a model that never asks the player for a choice', async () => {

@@ -63,6 +63,14 @@ async function call<T>(context: ReturnType<typeof buildWritingContext>, name: st
 }
 
 const pageText = (value: TextRead) => value.lines.map(line => line.text).join('\n');
+/** Resolve test handles from the advertised directory instead of assuming chapter-number paths. */
+function textPath(context: ReturnType<typeof buildWritingContext>, collection: Collection, chapter: number, source?: number): string {
+  const list = context.tools.find(tool => tool.name === 'list_text_files')!.execute({ collection, limit: 100 }) as FileList;
+  const sourceIds = [...new Set(list.files.filter(file => file.source).map(file => file.sourceId))];
+  const files = list.files.filter(file => source === undefined ? !file.source : file.source && file.sourceId === sourceIds[source - 1]);
+  return files[chapter - 1].path;
+}
+
 
 function longContext(text: string) {
   const state = emptyState();
@@ -88,9 +96,9 @@ it('bounds the default original dossier directory while keeping later entries an
 
 it('accepts captured snapshot paths in the legacy chapter reader while retaining collection isolation', async () => {
   const { context } = fixture();
-  expect(await call(context, 'read_chapter', { chapterId: 'original/000002.txt', collection: 'original', startLine: 1, endLine: 1 })).toMatchObject({ text: '夜祭司在后来登场。', path: 'original/000002.txt', reference: true });
-  expect(await call(context, 'read_chapter', { chapterId: 'story/000001.txt', startParagraph: 2, endParagraph: 2 })).toMatchObject({ text: '青霜举起 Compass。', reference: false });
-  expect(await context.tools.find(tool => tool.name === 'read_chapter')!.execute({ chapterId: 'original/000002.txt', collection: 'story' })).toMatchObject({ error: expect.any(String) });
+  expect(await call(context, 'read_chapter', { chapterId: textPath(context, 'original', 2), collection: 'original', startLine: 1, endLine: 1 })).toMatchObject({ text: '夜祭司在后来登场。', path: textPath(context, 'original', 2), reference: true });
+  expect(await call(context, 'read_chapter', { chapterId: textPath(context, 'story', 1), startParagraph: 2, endParagraph: 2 })).toMatchObject({ text: '青霜举起 Compass。', reference: false });
+  expect(await context.tools.find(tool => tool.name === 'read_chapter')!.execute({ chapterId: textPath(context, 'original', 2), collection: 'story' })).toMatchObject({ error: expect.any(String) });
 });
 
 describe('original reference separated from the active story', () => {
@@ -196,8 +204,8 @@ describe('original reference separated from the active story', () => {
     expect(await call(context, 'read_entity', { id: 'shared-person' })).toMatchObject({ entity: { description: '当前线林舟留守城门。' } });
     expect(await call(context, 'read_entity', { id: 'shared-person', collection: 'original' })).toMatchObject({ entity: { description: '原作林舟后来远赴北方。' } });
     expect(await call(context, 'read_chapter', { chapterId: 'shared-chapter' })).toMatchObject({ text: expect.stringContaining('当前林舟守在 West Gate') });
-    expect(pageText(await call<TextRead>(context, 'read_text_file', { path: 'original/000001.txt' }))).toContain('原作独有的归乡线索');
-    expect(pageText(await call<TextRead>(context, 'read_text_file', { path: 'original/sources/0001/000001.txt' }))).toContain('ＣＯＭＰＡＳＳ 仍在旧港');
+    expect(pageText(await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'original', 1) }))).toContain('原作独有的归乡线索');
+    expect(pageText(await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'original', 1, 1) }))).toContain('ＣＯＭＰＡＳＳ 仍在旧港');
     const files = await call<FileList>(context, 'list_text_files', { collection: 'all', offset: 0, limit: 20 });
     expect(files.total).toBe(8);
     expect(JSON.stringify(files)).not.toContain('稍后');
@@ -214,14 +222,14 @@ describe('original reference separated from the active story', () => {
     expect(result.entities).toEqual([]);
     expect(result.chapters).toHaveLength(1);
     expect(result.chapters).toMatchObject([{
-      chapterId: 'original/sources/0002/000001.txt', path: 'original/sources/0002/000001.txt',
+      chapterId: textPath(context, 'original', 1, 2), path: textPath(context, 'original', 1, 2),
       source: true, collection: 'original', reference: true, title: '附录终章', summary: '',
     }]);
     expect(await call(context, 'read_chapter', { chapterId: result.chapters[0].chapterId })).toMatchObject({ text: original.sources[1].chapters[0].text, source: true, collection: 'original', reference: true });
     expect(await call<StorySearch>(context, 'search_story', { query: '原始附录的未来秘密', collection: 'story' })).toMatchObject({ chapters: [] });
-    const rawLines = await call<{ text: string; source: boolean; startLine: number; endLine: number }>(context, 'read_chapter', { chapterId: 'original/sources/0001/000001.txt', collection: 'original', startLine: 2, endLine: 4 });
+    const rawLines = await call<{ text: string; source: boolean; startLine: number; endLine: number }>(context, 'read_chapter', { chapterId: textPath(context, 'original', 1, 1), collection: 'original', startLine: 2, endLine: 4 });
     expect(rawLines).toMatchObject({ text: '\nＣＯＭＰＡＳＳ 仍在旧港。\n末行。', source: true, startLine: 2, endLine: 4 });
-    expect(await call(context, 'read_chapter', { chapterId: 'original/sources/0001/000001.txt', startParagraph: 2, endParagraph: 2 })).toMatchObject({ text: 'ＣＯＭＰＡＳＳ 仍在旧港。', source: true, startParagraph: 2, endParagraph: 2 });
+    expect(await call(context, 'read_chapter', { chapterId: textPath(context, 'original', 1, 1), startParagraph: 2, endParagraph: 2 })).toMatchObject({ text: 'ＣＯＭＰＡＳＳ 仍在旧港。', source: true, startParagraph: 2, endParagraph: 2 });
   });
 
   it('keeps duplicate snapshot and source hits separate and marks source provenance', async () => {
@@ -232,9 +240,9 @@ describe('original reference separated from the active story', () => {
     const context = buildWritingContext({ state, chapterText: id => texts.get(id)!, original });
     const result = await call<StorySearch>(context, 'search_story', { query: '共有的检索细节', collection: 'original', scope: 'chapters' });
     expect(result.chapters).toHaveLength(2);
-    expect(result.chapters[0]).toMatchObject({ chapterId: 'shared-chapter', path: 'original/000001.txt', collection: 'original', reference: true });
+    expect(result.chapters[0]).toMatchObject({ chapterId: 'shared-chapter', path: textPath(context, 'original', 1), collection: 'original', reference: true });
     expect(result.chapters[0].source).not.toBe(true);
-    expect(result.chapters[1]).toMatchObject({ chapterId: 'original/sources/0001/000001.txt', path: 'original/sources/0001/000001.txt', collection: 'original', reference: true, source: true, summary: '' });
+    expect(result.chapters[1]).toMatchObject({ chapterId: textPath(context, 'original', 1, 1), path: textPath(context, 'original', 1, 1), collection: 'original', reference: true, source: true, summary: '' });
     expect(await call(context, 'read_chapter', { chapterId: result.chapters[0].chapterId, collection: 'original' })).toMatchObject({ text });
     expect(await call(context, 'read_chapter', { chapterId: result.chapters[1].chapterId })).toMatchObject({ text, source: true });
   });
@@ -246,9 +254,9 @@ describe('virtual text files and bounded reads', () => {
     const result = await call<FileList>(context, 'list_text_files', { collection: 'all', offset: 0, limit: 20 });
     expect(result).toMatchObject({ total: 8, offset: 0, truncated: false });
     expect(result.files.map(value => value.path)).toEqual([
-      'story/000001.txt', 'story/000002.txt',
-      'original/000001.txt', 'original/000002.txt', 'original/000003.txt',
-      'original/sources/0001/000001.txt', 'original/sources/0001/000002.txt', 'original/sources/0002/000001.txt',
+      textPath(context, 'story', 1), textPath(context, 'story', 2),
+      textPath(context, 'original', 1), textPath(context, 'original', 2), textPath(context, 'original', 3),
+      textPath(context, 'original', 1, 1), textPath(context, 'original', 2, 1), textPath(context, 'original', 1, 2),
     ]);
     expect(result.files[0]).toMatchObject({ collection: 'story', reference: false, source: false, chapterId: 'shared-chapter', title: 'West Gate', totalLines: 5 });
     expect(result.files[2]).toMatchObject({ collection: 'original', reference: true, source: false, chapterId: 'shared-chapter', title: '原作岔路' });
@@ -266,17 +274,17 @@ describe('virtual text files and bounded reads', () => {
     expect([...first.files, ...second.files, ...last.files].map(value => value.path)).toHaveLength(6);
     expect(new Set([...first.files, ...second.files, ...last.files].map(value => value.path)).size).toBe(6);
     const byFilename = await call<FileList>(context, 'list_text_files', { collection: 'all', query: '原始稿', offset: 0, limit: 10 });
-    expect(byFilename.files.map(value => value.path)).toEqual(['original/sources/0001/000001.txt', 'original/sources/0001/000002.txt']);
+    expect(byFilename.files.map(value => value.path)).toEqual([textPath(context, 'original', 1, 1), textPath(context, 'original', 2, 1)]);
     const byTitle = await call<FileList>(context, 'list_text_files', { collection: 'all', query: 'ｗｅｓｔ　ｇａｔｅ', offset: 0, limit: 10 });
-    expect(byTitle.files.map(value => value.path)).toEqual(['story/000001.txt']);
+    expect(byTitle.files.map(value => value.path)).toEqual([textPath(context, 'story', 1)]);
     const pastEnd = await call<FileList>(context, 'list_text_files', { collection: 'original', offset: 50, limit: 2 });
     expect(pastEnd).toMatchObject({ files: [], total: 6, offset: 50, truncated: false });
   });
 
   it('preserves whitespace and blank lines while numbering CRLF text from one', async () => {
     const { context } = fixture();
-    const result = await call<TextRead>(context, 'read_text_file', { path: 'story/000001.txt' });
-    expect(result).toMatchObject({ path: 'story/000001.txt', collection: 'story', reference: false, source: false, totalLines: 5, startLine: 1, endLine: 5, truncated: false });
+    const result = await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'story', 1) });
+    expect(result).toMatchObject({ path: textPath(context, 'story', 1), collection: 'story', reference: false, source: false, totalLines: 5, startLine: 1, endLine: 5, truncated: false });
     expect(result.lines.map(value => ({ line: value.line, text: value.text }))).toEqual([
       { line: 1, text: '  当前林舟守在 West Gate。' }, { line: 2, text: '' },
       { line: 3, text: '青霜举起 Compass。' }, { line: 4, text: '最后一行。' }, { line: 5, text: '' },
@@ -284,7 +292,7 @@ describe('virtual text files and bounded reads', () => {
     expect(pageText(result)).toBe('  当前林舟守在 West Gate。\n\n青霜举起 Compass。\n最后一行。\n');
     expect(result).not.toHaveProperty('text');
     expect(result.nextLine).toBeUndefined();
-    const source = await call<TextRead>(context, 'read_text_file', { path: 'original/sources/0001/000001.txt', startLine: 2, endLine: 4 });
+    const source = await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'original', 1, 1), startLine: 2, endLine: 4 });
     expect(source).toMatchObject({ collection: 'original', reference: true, source: true, totalLines: 5, startLine: 2, endLine: 4 });
     expect(source.lines.map(value => value.text)).toEqual(['', 'ＣＯＭＰＡＳＳ 仍在旧港。', '末行。']);
   });
@@ -292,10 +300,10 @@ describe('virtual text files and bounded reads', () => {
   it('limits default reads to two hundred lines and allows resuming at the next line', async () => {
     const text = Array.from({ length: 235 }, (_, index) => `第${index + 1}行`).join('\n');
     const context = longContext(text);
-    const first = await call<TextRead>(context, 'read_text_file', { path: 'story/000001.txt' });
+    const first = await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'story', 1) });
     expect(first).toMatchObject({ totalLines: 235, startLine: 1, endLine: 200, truncated: true, nextLine: 201 });
     expect(first.lines).toHaveLength(200);
-    const second = await call<TextRead>(context, 'read_text_file', { path: 'story/000001.txt', startLine: first.nextLine });
+    const second = await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'story', 1), startLine: first.nextLine });
     expect(second).toMatchObject({ totalLines: 235, startLine: 201, endLine: 235, truncated: false });
     expect(second.lines).toHaveLength(35);
     expect([...first.lines, ...second.lines].map(value => value.text).join('\n')).toBe(text);
@@ -304,14 +312,14 @@ describe('virtual text files and bounded reads', () => {
   it('returns explicit continuation offsets for a long line so no characters disappear between pages', async () => {
     const text = `${'甲'.repeat(25000)}长行终点`;
     const context = longContext(text);
-    const first = await call<TextRead>(context, 'read_text_file', { path: 'story/000001.txt' });
+    const first = await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'story', 1) });
     expect(first).toMatchObject({ totalLines: 1, startLine: 1, endLine: 1, truncated: true, nextLine: 1 });
     expect(pageText(first).length).toBeLessThanOrEqual(20000);
     expect(first.lines[0]).toMatchObject({ line: 1, startOffset: 0, truncated: true });
     expect(first.nextOffset).toBeGreaterThan(0);
     expect(first.lines[0].endOffset).toBe(first.nextOffset);
     expect(JSON.stringify(first).length).toBeLessThanOrEqual(20000);
-    const second = await call<TextRead>(context, 'read_text_file', { path: 'story/000001.txt', startLine: first.nextLine, startOffset: first.nextOffset });
+    const second = await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'story', 1), startLine: first.nextLine, startOffset: first.nextOffset });
     expect(second).toMatchObject({ totalLines: 1, startLine: 1, endLine: 1, truncated: false });
     expect(second.lines[0].startOffset).toBe(first.nextOffset);
     expect(pageText(first) + pageText(second)).toBe(text);
@@ -323,11 +331,11 @@ describe('virtual text files and bounded reads', () => {
   it('keeps the character budget across several lines and reports the remaining position', async () => {
     const text = `${'甲'.repeat(12000)}\n${'乙'.repeat(12000)}\n末行`;
     const context = longContext(text);
-    const first = await call<TextRead>(context, 'read_text_file', { path: 'story/000001.txt' });
+    const first = await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'story', 1) });
     expect(pageText(first).length).toBeLessThanOrEqual(20000);
     expect(first.truncated).toBe(true);
     expect(first.nextLine).toBeDefined();
-    const second = await call<TextRead>(context, 'read_text_file', { path: 'story/000001.txt', startLine: first.nextLine, ...(first.nextOffset === undefined ? {} : { startOffset: first.nextOffset }) });
+    const second = await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'story', 1), startLine: first.nextLine, ...(first.nextOffset === undefined ? {} : { startOffset: first.nextOffset }) });
     expect(pageText(second).length).toBeLessThanOrEqual(20000);
     const joined = pageText(first) + (first.nextOffset ? '' : '\n') + pageText(second);
     expect(joined).toBe(text);
@@ -354,7 +362,7 @@ describe('virtual text files and bounded reads', () => {
     const paragraphs = await call<{ text: string; startParagraph: number; endParagraph: number; truncated: boolean; nextParagraph: number }>(context, 'read_chapter', { chapterId: 'long-chapter', startParagraph: 1, endParagraph: 240 });
     expect(paragraphs).toMatchObject({ startParagraph: 1, endParagraph: 200, truncated: true, nextParagraph: 201 });
     expect(paragraphs.text.split('\n')).toHaveLength(200);
-    const file = await call<TextRead>(context, 'read_text_file', { path: 'story/000001.txt', startLine: 1, endLine: 479 });
+    const file = await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'story', 1), startLine: 1, endLine: 479 });
     expect(file).toMatchObject({ startLine: 1, endLine: 200, truncated: true, nextLine: 201 });
     expect(file.lines).toHaveLength(200);
   });
@@ -366,9 +374,9 @@ describe('virtual text files and bounded reads', () => {
     original.reference.sourceIds.push('source-one');
     const files = await call<FileList>(context, 'list_text_files', { collection: 'original', offset: 0, limit: 20 });
     expect(files.total).toBe(4);
-    expect(files.files.filter(value => value.source)).toMatchObject([{ path: 'original/sources/0001/000001.txt', sourceId: 'source-two', sourceFilename: '附录.txt' }]);
+    expect(files.files.filter(value => value.source)).toMatchObject([{ path: textPath(context, 'original', 1, 1), sourceId: 'source-two', sourceFilename: '附录.txt' }]);
     expect(await call<TextSearch>(context, 'search_text', { query: 'ＣＯＭＰＡＳＳ', collection: 'original' })).toMatchObject({ matches: [], total: 0 });
-    expect(pageText(await call<TextRead>(context, 'read_text_file', { path: 'original/sources/0001/000001.txt' }))).toBe('原始附录的未来秘密。');
+    expect(pageText(await call<TextRead>(context, 'read_text_file', { path: textPath(context, 'original', 1, 1) }))).toBe('原始附录的未来秘密。');
     expect(await context.tools.find(value => value.name === 'read_text_file')!.execute({ path: 'original/sources/0002/000001.txt' })).toMatchObject({ error: expect.any(String) });
   });
 
@@ -376,7 +384,7 @@ describe('virtual text files and bounded reads', () => {
     const longParagraph = String.fromCharCode(34, 92).repeat(16000) + '长段落尾部';
     const context = longContext(`首段\r\n\r\n  ${longParagraph}\r\n\r\n末段`);
     const first = await call<{ text: string; path: string; startParagraph: number; endParagraph: number; truncated: boolean; nextParagraph: number; nextLine: number; nextOffset: number; nextLineOffset: number }>(context, 'read_chapter', { chapterId: 'long-chapter', startParagraph: 2, endParagraph: 2 });
-    expect(first).toMatchObject({ path: 'story/000001.txt', startParagraph: 2, endParagraph: 2, truncated: true, nextParagraph: 2, nextLine: 3 });
+    expect(first).toMatchObject({ path: textPath(context, 'story', 1), startParagraph: 2, endParagraph: 2, truncated: true, nextParagraph: 2, nextLine: 3 });
     expect(first.text.startsWith('  ')).toBe(false);
     expect(first.nextOffset).toBe(first.text.length);
     expect(first.nextLineOffset).toBe(first.text.length + 2);
@@ -405,7 +413,7 @@ describe('virtual text files and bounded reads', () => {
     let offset = 0;
     for (let page = 0; page < 16; page++) {
       const result = await call<ParagraphPage>(context, 'read_chapter', { chapterId: 'long-chapter', startParagraph: paragraph, endParagraph: 2, startOffset: offset });
-      expect(result).toMatchObject({ path: 'story/000001.txt', startParagraph: 2, endParagraph: 2, totalParagraphs: 3 });
+      expect(result).toMatchObject({ path: textPath(context, 'story', 1), startParagraph: 2, endParagraph: 2, totalParagraphs: 3 });
       expect(result.text.length).toBeGreaterThan(0);
       expect(result.text).toBe(longParagraph.slice(offset, offset + result.text.length));
       expect(JSON.stringify(result).length).toBeLessThanOrEqual(20000);
@@ -434,10 +442,10 @@ describe('searching text with explicit files and pagination', () => {
     const result = await call<TextSearch>(context, 'search_text', { keywords: ['Ｃｏｍｐａｓｓ', '火焰', 'COMPASS'], collection: 'all', offset: 0, limit: 20, contextLines: 0 });
     expect(result.total).toBe(5);
     expect(result.matches.map(value => [value.path, value.line])).toEqual([
-      ['story/000001.txt', 3], ['story/000002.txt', 1], ['original/000002.txt', 2],
-      ['original/sources/0001/000001.txt', 3], ['original/sources/0001/000002.txt', 1],
+      [textPath(context, 'story', 1), 3], [textPath(context, 'story', 2), 1], [textPath(context, 'original', 2), 2],
+      [textPath(context, 'original', 1, 1), 3], [textPath(context, 'original', 2, 1), 1],
     ]);
-    expect(result.matches.find(value => value.path === 'original/000002.txt')).toMatchObject({ reference: true, source: false, collection: 'original' });
+    expect(result.matches.find(value => value.path === textPath(context, 'original', 2))).toMatchObject({ reference: true, source: false, collection: 'original' });
     expect(result.matches.find(value => value.path.includes('/sources/'))).toMatchObject({ reference: true, source: true, sourceFilename: '原始稿.txt' });
     expect(result.matches.filter(value => value.collection === 'story').every(value => !value.reference && !value.source)).toBe(true);
   });
@@ -459,11 +467,11 @@ describe('searching text with explicit files and pagination', () => {
   it('honors collection and exact path filters and never joins adjacent lines into invented matches', async () => {
     const { context } = fixture();
     const story = await call<TextSearch>(context, 'search_text', { query: '火焰', collection: 'story' });
-    expect(story.matches.map(value => value.path)).toEqual(['story/000002.txt']);
+    expect(story.matches.map(value => value.path)).toEqual([textPath(context, 'story', 2)]);
     const original = await call<TextSearch>(context, 'search_text', { query: '火焰', collection: 'original' });
-    expect(original.matches.map(value => value.path)).toEqual(['original/000002.txt', 'original/sources/0001/000002.txt']);
-    const source = await call<TextSearch>(context, 'search_text', { query: 'Compass', collection: 'original', path: 'original/sources/0001/000001.txt' });
-    expect(source.matches).toMatchObject([{ path: 'original/sources/0001/000001.txt', line: 3 }]);
+    expect(original.matches.map(value => value.path)).toEqual([textPath(context, 'original', 2), textPath(context, 'original', 2, 1)]);
+    const source = await call<TextSearch>(context, 'search_text', { query: 'Compass', collection: 'original', path: textPath(context, 'original', 1, 1) });
+    expect(source.matches).toMatchObject([{ path: textPath(context, 'original', 1, 1), line: 3 }]);
     const lines = longContext('字段尾甲\n乙从下一行开头');
     expect(await call<TextSearch>(lines, 'search_text', { keywords: ['甲乙'], collection: 'story' })).toMatchObject({ matches: [], total: 0, truncated: false });
   });
@@ -471,7 +479,7 @@ describe('searching text with explicit files and pagination', () => {
   it('keeps a known multiword title whole for legacy query rather than matching each word separately', async () => {
     const { context } = fixture();
     const result = await call<TextSearch>(context, 'search_text', { query: ' Ｗｅｓｔ　Ｇａｔｅ ', collection: 'all' });
-    expect(result.matches.map(value => [value.path, value.line])).toEqual([['story/000001.txt', 1]]);
+    expect(result.matches.map(value => [value.path, value.line])).toEqual([[textPath(context, 'story', 1), 1]]);
     const entitySearch = await call<StorySearch>(context, 'search_story', { query: ' Ｏｌｄ　Ｎｏｒｔｈ　Ｐｏｒｔ ', collection: 'all', scope: 'entities' });
     expect(entitySearch.entities).toMatchObject([{ id: 'shared-person', collection: 'original', reference: true }]);
   });
@@ -482,14 +490,14 @@ describe('searching text with explicit files and pagination', () => {
     original.sources[0].chapters[1] = { title: 'Ancient Beacon', text: 'Ancient Beacon 映照海面。' };
     const context = buildWritingContext({ state, chapterText: id => texts.get(id)!, original });
     const result = await call<TextSearch>(context, 'search_text', { query: ' Ａｎｃｉｅｎｔ　Ｂｅａｃｏｎ ', collection: 'all' });
-    expect(result.matches.map(value => [value.path, value.line])).toEqual([['original/sources/0001/000002.txt', 1]]);
+    expect(result.matches.map(value => [value.path, value.line])).toEqual([[textPath(context, 'original', 2, 1), 1]]);
   });
 
   it('marks long matching lines as truncated while keeping them available for offset reads', async () => {
     const context = longContext(`Compass ${'甲'.repeat(25000)} 尾声`);
     const result = await call<TextSearch>(context, 'search_text', { query: 'Compass', collection: 'story', contextLines: 0 });
     expect(result.matches).toHaveLength(1);
-    expect(result.matches[0]).toMatchObject({ path: 'story/000001.txt', line: 1, truncated: true });
+    expect(result.matches[0]).toMatchObject({ path: textPath(context, 'story', 1), line: 1, truncated: true });
     expect(result.matches[0].text.length).toBeLessThanOrEqual(20000);
     expect(result.matches[0].context.every(value => value.text.length <= 20000)).toBe(true);
     expect(pageText(await call<TextRead>(context, 'read_text_file', { path: result.matches[0].path, startLine: result.matches[0].line, startOffset: 24000 }))).toContain('尾声');
@@ -501,7 +509,7 @@ describe('searching text with explicit files and pagination', () => {
     const result = await call<TextSearch>(context, 'search_text', { keywords: ['Compass'], collection: 'story', contextLines: 0 });
     expect(result.matches).toHaveLength(1);
     const match = result.matches[0];
-    expect(match).toMatchObject({ path: 'story/000001.txt', line: 1, hitColumn: text.indexOf('ＣＯＭＰＡＳＳ') + 1, truncated: true });
+    expect(match).toMatchObject({ path: textPath(context, 'story', 1), line: 1, hitColumn: text.indexOf('ＣＯＭＰＡＳＳ') + 1, truncated: true });
     expect(match.startOffset).toBeGreaterThan(0);
     expect(match.endOffset).toBeGreaterThan(match.startOffset);
     expect(match.text).toBe(text.slice(match.startOffset, match.endOffset));
@@ -542,10 +550,10 @@ describe('strict text-tool input boundaries', () => {
       ['search_text', { query: 'Compass', limit: 0 }], ['search_text', { query: 'Compass', limit: 101 }], ['search_text', { query: 'Compass', contextLines: -1 }],
       ['search_text', { query: 'Compass', contextLines: 11 }],
       ['search_text', { query: 'Compass', contextLines: 0.5 }], ['search_text', { query: 'Compass', unexpected: true }],
-      ['read_text_file', {}], ['read_text_file', { path: 3 }], ['read_text_file', { path: 'story/000001.txt', startLine: 0 }],
-      ['read_text_file', { path: 'story/000001.txt', startLine: '1' }], ['read_text_file', { path: 'story/000001.txt', endLine: 0.5 }],
-      ['read_text_file', { path: 'story/000001.txt', startLine: 3, endLine: 2 }], ['read_text_file', { path: 'story/000001.txt', startOffset: -1 }],
-      ['read_text_file', { path: 'story/000001.txt', startOffset: 1.5 }], ['read_text_file', { path: 'story/000001.txt', unexpected: true }],
+      ['read_text_file', {}], ['read_text_file', { path: 3 }], ['read_text_file', { path: textPath(context, 'story', 1), startLine: 0 }],
+      ['read_text_file', { path: textPath(context, 'story', 1), startLine: '1' }], ['read_text_file', { path: textPath(context, 'story', 1), endLine: 0.5 }],
+      ['read_text_file', { path: textPath(context, 'story', 1), startLine: 3, endLine: 2 }], ['read_text_file', { path: textPath(context, 'story', 1), startOffset: -1 }],
+      ['read_text_file', { path: textPath(context, 'story', 1), startOffset: 1.5 }], ['read_text_file', { path: textPath(context, 'story', 1), unexpected: true }],
       ['read_chapter', { chapterId: 'shared-chapter', startLine: 1, startParagraph: 1 }],
       ['read_chapter', { chapterId: 'shared-chapter', startParagraph: 3, endParagraph: 2 }],
       ['read_chapter', { chapterId: 'shared-chapter', startParagraph: 0 }],
@@ -568,7 +576,7 @@ describe('strict text-tool input boundaries', () => {
       expect(await context.tools.find(value => value.name === 'search_text')!.execute({ query: 'Compass', collection: 'all', path }), path).toMatchObject({ error: expect.any(String) });
       expect(await context.tools.find(value => value.name === 'read_chapter')!.execute({ chapterId: path }), path).toMatchObject({ error: expect.any(String) });
     }
-    expect(await context.tools.find(value => value.name === 'search_text')!.execute({ query: 'Compass', collection: 'story', path: 'original/000001.txt' })).toMatchObject({ error: expect.any(String) });
-    expect(await context.tools.find(value => value.name === 'read_chapter')!.execute({ chapterId: 'original/sources/0001/000001.txt', collection: 'story' })).toMatchObject({ error: expect.any(String) });
+    expect(await context.tools.find(value => value.name === 'search_text')!.execute({ query: 'Compass', collection: 'story', path: textPath(context, 'original', 1) })).toMatchObject({ error: expect.any(String) });
+    expect(await context.tools.find(value => value.name === 'read_chapter')!.execute({ chapterId: textPath(context, 'original', 1, 1), collection: 'story' })).toMatchObject({ error: expect.any(String) });
   });
 });

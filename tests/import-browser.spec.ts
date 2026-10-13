@@ -4,7 +4,15 @@ test.describe.configure({ mode: 'serial' });
 const password = 'browser-test-password-123';
 const source = '场景01｜入城\n\n原文正文 SENTINEL_IMPORT_BODY。\n\n场景02｜夜谈\n\n第二段正文。\n\n场景03｜远行\n尾段正文。';
 const mockUrl = `http://127.0.0.1:${process.env.E2E_MODEL_PORT || '4329'}/v1`;
-test.beforeEach(async ({ page }) => { expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy(); });
+let titleSettings: any;
+test.beforeEach(async ({ page }, testInfo) => {
+  expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();
+  if (testInfo.title.startsWith('标题修复：')) {
+    titleSettings = await (await page.request.get('/api/settings')).json();
+    expect((await page.request.put('/api/settings', { data: { ...titleSettings, providers: [...titleSettings.providers, { id: 'e2e-title-repair', name: '标题修复本地模型', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: 'fake-title-repair' }], extractionProviderId: 'e2e-title-repair', extractionModel: 'e2e-title-repair' } })).ok()).toBeTruthy();
+  }
+});
+test.afterEach(async ({ page }, testInfo) => { if (testInfo.title.startsWith('标题修复：') && titleSettings) { await page.request.put('/api/settings', { data: titleSettings }); titleSettings = undefined; } });
 async function openImport(page: Page, title: string, text = source) {
   const project = await (await page.request.post('/api/projects', { data: { title } })).json();
   await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${title}`, exact: true }).click();
@@ -16,6 +24,64 @@ async function openImport(page: Page, title: string, text = source) {
   await expect(modal.getByTestId('import-rules')).toBeVisible();
   return { project, modal, rules: modal.getByTestId('import-rules') };
 }
+
+test('标题修复：手机导入预览核对原始标题，编辑建议后只应用标题', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const text = '第16章 雨夜\n\n林舟来到码头寻找刚刚失踪的守城人。';
+  const { modal } = await openImport(page, '手机标题修复预览', text);
+  const original = await modal.getByLabel('章节正文', { exact: true }).inputValue();
+  await modal.getByLabel('章节名称', { exact: true }).fill('第12章 错题');
+  await modal.locator('.import-title-repair > summary').click();
+  const repair = modal.getByTestId('chapter-title-repair');
+  await repair.getByRole('button', { name: '生成标题修复建议', exact: true }).click();
+  const suggestion = repair.getByLabel('建议标题：第12章 错题', { exact: true });
+  await expect(suggestion).toHaveValue('第16章 雨夜');
+  await expect(modal.getByLabel('章节名称', { exact: true })).toHaveValue('第12章 错题');
+  await suggestion.fill('第16章 作者确认题名');
+  expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('title-repair-import-mobile.png'), animations: 'disabled' });
+  await repair.getByRole('button', { name: '应用到导入预览（1）', exact: true }).click();
+  await expect(modal.getByLabel('章节名称', { exact: true })).toHaveValue('第16章 作者确认题名');
+  await expect(modal.getByLabel('章节正文', { exact: true })).toHaveValue(original);
+  await expect(modal.getByRole('button', { name: '确认目录并整理', exact: true })).toBeEnabled();
+});
+
+test('标题修复：已保存章节可预览、选择应用和回退，版本冲突保留作者修改', async ({ page }, testInfo) => {
+  const title = '已保存标题修复';
+  const project = await (await page.request.post('/api/projects', { data: { title } })).json();
+  let view = await (await page.request.get(`/api/branches/${project.mainBranchId}?view=author`)).json();
+  const saved = await (await page.request.post(`/api/branches/${project.mainBranchId}/chapters?view=author`, { data: { baseRevisionId: view.branch.revisionId, title: '第12章 错题', text: '第16章 雨夜\n\n林舟来到码头寻找刚刚失踪的守城人。' } })).json();
+  const chapterId = saved.state.chapters[0].id;
+  await expect.poll(async () => (await (await page.request.get(`/api/branches/${project.mainBranchId}?view=author`)).json()).state.chapters[0].status).toBe('ready');
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${title}`, exact: true }).click(); await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await page.locator('.chapter-item').first().click(); await page.locator('.chapter-actions > summary').click(); await page.getByRole('button', { name: 'AI 修复章节标题', exact: true }).click();
+  const repair = page.getByTestId('chapter-title-repair');
+  await repair.getByRole('button', { name: '生成标题修复建议', exact: true }).click();
+  await expect(repair.getByLabel('建议标题：第12章 错题', { exact: true })).toHaveValue('第16章 雨夜');
+  await expect(page.locator('.chapter-item-content strong')).toHaveText('第12章 错题');
+  view = await (await page.request.get(`/api/branches/${project.mainBranchId}?view=author`)).json();
+  const original = await (await page.request.get(`/api/branches/${project.mainBranchId}/chapters/${chapterId}`)).json();
+  await page.request.post(`/api/branches/${project.mainBranchId}/chapters?view=author`, { data: { baseRevisionId: view.branch.revisionId, chapterId, title: '作者刚改的标题', text: original.text } });
+  await repair.getByRole('button', { name: '应用所选标题（1）', exact: true }).click();
+  await expect(repair).toContainText('故事线已有新版本');
+  expect((await (await page.request.get(`/api/branches/${project.mainBranchId}/chapters/${chapterId}`)).json()).title).toBe('作者刚改的标题');
+  await page.getByRole('button', { name: '关闭对话框', exact: true }).click();
+  await page.reload(); await page.getByRole('button', { name: `打开作品 ${title}`, exact: true }).click(); await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await page.locator('.chapter-item').first().click();
+  await page.locator('.chapter-actions > summary').click(); await page.getByRole('button', { name: 'AI 修复章节标题', exact: true }).click();
+  await repair.getByRole('button', { name: '生成标题修复建议', exact: true }).click();
+  await expect(repair.getByLabel('建议标题：作者刚改的标题', { exact: true })).toHaveValue('第16章 雨夜');
+  await repair.getByRole('checkbox', { name: '应用标题：作者刚改的标题', exact: true }).uncheck();
+  await expect(repair.getByRole('button', { name: '应用所选标题（0）', exact: true })).toBeDisabled();
+  await repair.getByRole('checkbox', { name: '应用标题：作者刚改的标题', exact: true }).check();
+  await page.screenshot({ path: testInfo.outputPath('title-repair-existing-desktop.png'), animations: 'disabled' });
+  const before = (await (await page.request.get(`/api/branches/${project.mainBranchId}?view=author`)).json()).branch.revisionId;
+  await repair.getByRole('button', { name: '应用所选标题（1）', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0); await expect(page.locator('.chapter-item-content strong')).toHaveText('第16章 雨夜');
+  const after = await (await page.request.get(`/api/branches/${project.mainBranchId}?view=author`)).json();
+  expect((await (await page.request.get(`/api/branches/${project.mainBranchId}/chapters/${chapterId}`)).json()).text).toBe(original.text);
+  expect((await page.request.post(`/api/branches/${project.mainBranchId}/rollback`, { data: { baseRevisionId: after.branch.revisionId, revisionId: before } })).ok()).toBe(true);
+  expect((await (await page.request.get(`/api/branches/${project.mainBranchId}/chapters/${chapterId}`)).json()).title).toBe('作者刚改的标题');
+});
 
 test('分章规则：选择内置规则，保存和修改自定义规则，重开复用且可撤销手动调整', async ({ page }, testInfo) => {
   const { modal, rules } = await openImport(page, '浏览器自定义分章规则');

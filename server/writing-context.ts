@@ -1,4 +1,5 @@
 import type { Entity, ModelTool, StoryState, OriginalReferenceData } from '../shared/types.js';
+import { createHash } from 'node:crypto';
 
 export interface WritingContextInput {
   state: StoryState;
@@ -7,6 +8,7 @@ export interface WritingContextInput {
   recentChapterCount?: number;
   planningEnabled?: boolean;
   original?: OriginalReferenceData;
+  lookupAliases?: Record<string, string>;
 }
 
 const mainRole = /(?:^|[，。；：:\s]|是|为|担任)(?:本书|故事|本作|作品)?(?:的)?(?:男主角|女主角|主人公|主角|男主|女主)(?=$|[，。；：:\s])/;
@@ -28,6 +30,8 @@ const collectionParameter = { type: 'string', enum: ['story', 'original', 'all']
 const keywordParameters = { query: { type: 'string', description: '单词或分隔词；已知名称、别名、标题保留完整短语。' }, keywords: { type: 'array', items: { type: 'string' }, description: '命中任一项（OR），每项可为完整短语。' } };
 const rangeParameters = { startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 }, startOffset: { type: 'integer', minimum: 0, description: '首行内从 0 开始的 UTF-16 字符偏移；长行可按 nextLine/nextOffset 继续。' } };
 const fileInfo = (file: TextFile) => ({ path: file.path, collection: file.collection, reference: file.reference, source: file.source, title: file.title.slice(0, 500), ...(file.chapterId ? { chapterId: file.chapterId } : {}), ...(file.sourceId ? { sourceId: file.sourceId, sourceFilename: file.sourceFilename?.slice(0, 500) } : {}), totalLines: file.lines.length });
+const textKey = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 24);
+const withoutDueChapter = ({ dueChapter: _dueChapter, ...clue }: StoryState['foreshadows'][number]) => clue;
 
 function keywordsOf(args: Record<string, unknown>, names: Set<string>): string[] | null {
   if (!stringArg(args, 'query') || (args.keywords !== undefined && (!Array.isArray(args.keywords) || args.keywords.length > 50 || args.keywords.some(keyword => typeof keyword !== 'string' || keyword.length > 500 || !searchText(keyword))))) return null;
@@ -83,11 +87,23 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
   const original = input.original ? structuredClone(input.original) : undefined;
   const corpora: Corpus[] = [{ collection: 'story', state, texts: chapterTexts, entities: activeEntities }];
   if (original) corpora.push({ collection: 'original', state: original.state, texts: new Map(original.chapters.map(chapter => [chapter.id, chapter.text])), entities: original.state.entities.filter(entity => !entity.mergedInto) });
-  const files: TextFile[] = corpora.flatMap(corpus => corpus.state.chapters.map((chapter, index) => ({ path: `${corpus.collection}/${String(index + 1).padStart(6, '0')}.txt`, collection: corpus.collection, reference: corpus.collection === 'original', source: false, title: chapter.title, chapterId: chapter.id, text: corpus.texts.get(chapter.id) ?? '', lines: linesOf(corpus.texts.get(chapter.id) ?? '') })));
+  const previousIds = new Map<string, string[]>();
+  for (const [oldId, newId] of Object.entries(input.lookupAliases ?? {})) previousIds.set(newId, [...(previousIds.get(newId) ?? []), oldId]);
+  const legacyPaths = new Map<string, TextFile>();
+  const files: TextFile[] = corpora.flatMap(corpus => corpus.state.chapters.map((chapter, index) => {
+    const file: TextFile = { path: `${corpus.collection}/${textKey(chapter.id)}.txt`, collection: corpus.collection, reference: corpus.collection === 'original', source: false, title: chapter.title, chapterId: chapter.id, text: corpus.texts.get(chapter.id) ?? '', lines: linesOf(corpus.texts.get(chapter.id) ?? '') };
+    legacyPaths.set(`${corpus.collection}/${String(index + 1).padStart(6, '0')}.txt`, file); return file;
+  }));
   for (const [sourceIndex, source] of (original?.sources.filter(source => !original.reference.sourceIds || original.reference.sourceIds.includes(source.sourceId)) ?? []).entries()) {
-    for (const [index, chapter] of source.chapters.entries()) files.push({ path: `original/sources/${String(sourceIndex + 1).padStart(4, '0')}/${String(index + 1).padStart(6, '0')}.txt`, collection: 'original', reference: true, source: true, title: chapter.title, sourceId: source.sourceId, sourceFilename: source.filename, text: chapter.text, lines: linesOf(chapter.text) });
+    for (const [index, chapter] of source.chapters.entries()) {
+      const file: TextFile = { path: `original/sources/${textKey(source.sourceId)}/${textKey(`${source.sourceId}:${index}`)}.txt`, collection: 'original', reference: true, source: true, title: chapter.title, sourceId: source.sourceId, sourceFilename: source.filename, text: chapter.text, lines: linesOf(chapter.text) };
+      legacyPaths.set(`original/sources/${String(sourceIndex + 1).padStart(4, '0')}/${String(index + 1).padStart(6, '0')}.txt`, file); files.push(file);
+      for (const oldId of previousIds.get(source.sourceId) ?? []) legacyPaths.set(`original/sources/${textKey(oldId)}/${textKey(`${oldId}:${index}`)}.txt`, file);
+    }
   }
+  for (const file of files) for (const oldId of previousIds.get(file.chapterId ?? '') ?? []) legacyPaths.set(`${file.collection}/${textKey(oldId)}.txt`, file);
   const filesByPath = new Map(files.map(file => [file.path, file]));
+  const fileByPath = (path: string) => filesByPath.get(path) ?? legacyPaths.get(path);
   const searchNames = new Set([...corpora.flatMap(corpus => corpus.entities.flatMap(entity => [entity.name, ...entity.aliases])), ...files.map(file => file.title)].map(searchText));
   const selectCorpora = (collection: unknown) => corpora.filter(corpus => collection === 'all' || collection === undefined || corpus.collection === collection);
   const selectedFiles = (collection: unknown) => files.filter(file => collection === undefined || collection === 'all' || file.collection === collection);
@@ -119,7 +135,7 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
     entityDirectory: original.state.entities.filter(entity => !entity.mergedInto).slice(0, 100).map(entity => ({ id: entity.id, name: entity.name, kind: entity.kind, aliases: entity.aliases.slice(0, 3), ...(entity.aliases.length > 3 ? { aliasesTruncated: true } : {}) })),
     entityDirectoryTotal: original.state.entities.filter(entity => !entity.mergedInto).length,
     entityDirectoryTruncated: original.state.entities.filter(entity => !entity.mergedInto).length > 100,
-    foreshadows: original.state.foreshadows,
+    foreshadows: original.state.foreshadows.map(withoutDueChapter),
   } : undefined;
   const requiredEntities = activeEntities.filter(isMainCharacter).map(entity => ({ ...entity, facts: entity.facts.filter(fact => fact.temporal !== 'future' && (fact.temporal === 'current' || fact.locked || isMajorEvent(fact.attribute))) }));
   const requiredIds = new Set(requiredEntities.map(entity => entity.id));
@@ -131,14 +147,15 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
   const summaries = state.chapters.filter(chapter => !covered.has(chapter.id)).map(chapter => ({ chapterId: chapter.id, title: chapter.title, summary: chapter.summary || '本章资料尚在整理，请以最近章节原文为准。' }));
   const recentCount = input.recentChapterCount ?? 3;
   const recent = state.chapters.slice(-Math.max(1, recentCount)).map(chapter => ({ chapterId: chapter.id, title: chapter.title, text: chapterTexts.get(chapter.id) ?? '' }));
-  const nextChapter = state.chapters.length + 1;
+  const latest = recent.at(-1);
   const context = {
+    continuationAnchor: latest ? { chapterId: latest.chapterId, title: latest.title, ending: latest.text.slice(-1500), instruction: '从这段已保存正文的结尾之后继续，不按章节编号寻找起点或重写旧情节。' } : null,
     worldview: state.outline.worldview || input.premise || '',
     worldRules: activeEntities.filter(entity => entity.kind === 'rule').map(entity => ({ ...entity, facts: entity.facts.filter(fact => fact.temporal !== 'future') })),
     locked: state.outline.locked,
     mainCharacters: requiredEntities,
     mainCharacterRelations: state.relations.filter(relation => requiredIds.has(relation.fromId) && requiredIds.has(relation.toId)),
-    unrevealedForeshadows: state.foreshadows.filter(item => ['planned', 'planted'].includes(item.status)),
+    unrevealedForeshadows: state.foreshadows.filter(item => ['planned', 'planted'].includes(item.status)).map(withoutDueChapter),
     ...(compressionApplies ? { authorConfirmedSummary: { text: compression!.text, chapterIds: compression!.chapterIds } } : {}),
     completePlotSummaries: summaries,
     recentCompleteChapters: recent,
@@ -185,7 +202,7 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
           const chapter = corpus.state.chapters.find(value => value.id === args.chapterId); if (!chapter) continue;
           return readCapturedChapter(files.find(file => file.collection === corpus.collection && file.chapterId === chapter.id)!, chapter.id, args);
         }
-        const file = filesByPath.get(args.chapterId);
+        const file = fileByPath(args.chapterId);
         if (file && (args.collection === undefined || args.collection === 'all' || args.collection === file.collection)) return readCapturedChapter(file, file.chapterId ?? file.path, args);
         return { error: '本次写作捕获的资料中没有此章节。' };
       },
@@ -210,9 +227,10 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
         if (!recordArgs(args, ['keywords', 'query', 'collection', 'path', 'offset', 'limit', 'contextLines']) || !validCollection(args.collection) || !stringArg(args, 'path') || !integerArg(args, 'offset', 0) || !integerArg(args, 'limit', 1, 100) || !integerArg(args, 'contextLines', 0, 10)) return { error: '参数不正确：path 必须是完整虚拟路径；offset 非负，limit 1至100，contextLines 0至10，均为整数。' };
         const keywords = keywordsOf(args, namesFor(args.collection)); if (!keywords) return { error: '请提供至少一个非空 query 或 keywords 字符串数组，数组最多50项。' };
         if (args.collection === 'original' && !original) return { error: '本次写作没有捕获原作参考。' };
-        const selected = selectedFiles(args.collection); if (args.path !== undefined && !selected.some(file => file.path === args.path)) return { error: '该虚拟路径不在指定语料中，只能使用 list_text_files 返回的 path。' };
+        const selected = selectedFiles(args.collection); const target = typeof args.path === 'string' ? fileByPath(args.path) : undefined;
+        if (args.path !== undefined && (!target || !selected.includes(target))) return { error: '该虚拟路径不在指定语料中，只能使用 list_text_files 返回的 path。' };
         const matches: { file: TextFile; line: number; hit: number }[] = [];
-        for (const file of selected.filter(file => args.path === undefined || file.path === args.path)) for (const [index, line] of file.lines.entries()) { const hit = hitPosition(line, keywords); if (hit >= 0) matches.push({ file, line: index + 1, hit }); }
+        for (const file of selected.filter(file => args.path === undefined || file === target)) for (const [index, line] of file.lines.entries()) { const hit = hitPosition(line, keywords); if (hit >= 0) matches.push({ file, line: index + 1, hit }); }
         const offset = Number(args.offset ?? 0); const limit = Number(args.limit ?? 20); const surrounding = Number(args.contextLines ?? 2); const result: Record<string, unknown>[] = [];
         for (const match of matches.slice(offset, offset + limit)) {
           const snippet = lineSnippet(match.file.lines[match.line - 1], match.hit);
@@ -233,7 +251,7 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
       parameters: { type: 'object', properties: { path: { type: 'string' }, ...rangeParameters }, required: ['path'], additionalProperties: false },
       execute: args => {
         if (!recordArgs(args, ['path', 'startLine', 'endLine', 'startOffset']) || typeof args.path !== 'string' || !['startLine', 'endLine'].every(key => integerArg(args, key, 1)) || !integerArg(args, 'startOffset', 0)) return { error: '请提供完整虚拟 path，行号从1开始且必须为整数，startOffset 为非负整数。' };
-        const file = filesByPath.get(args.path); if (!file) return { error: '该路径不在捕获语料中，只能使用 list_text_files 返回的完整虚拟 path。' };
+        const file = fileByPath(args.path); if (!file) return { error: '该路径不在捕获语料中，只能使用 list_text_files 返回的完整虚拟 path。' };
         const start = Number(args.startLine ?? 1); const end = Number(args.endLine ?? file.lines.length); const offset = Number(args.startOffset ?? 0);
         if (start > file.lines.length || end < start || offset > file.lines[start - 1].length) return { error: '指定范围超出文件或结束位置在起点之前，请检查行号及偏移。' };
         return readLines(file, start, end, offset);
@@ -242,6 +260,7 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
   ];
   const { recentCompleteChapters, ...storyMaterials } = context;
   return { text: `本次写作的必要资料（完整保留）：\n${JSON.stringify(context)}`, tools, variables: {
+    continuationAnchor: JSON.stringify(context.continuationAnchor),
     storyMaterials: JSON.stringify(storyMaterials),
     worldview: context.worldview, locked: context.locked,
     worldRules: JSON.stringify(context.worldRules), mainCharacters: JSON.stringify(context.mainCharacters),
