@@ -1,16 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { Plus, Sparkles, Search, Save, Trash2 } from 'lucide-react';
 import type { Source } from '../shared/types';
-import { builtInChapterRules, type ChapterRule, type ChapterRuleInput, type ChapterRulePreview, type GeneratedChapterRule, type HeadingCandidate, type HeadingCandidates } from '../shared/chapter-rules';
+import { builtInChapterRules, DEFAULT_WORDS_PER_CHAPTER, MAX_WORDS_PER_CHAPTER, MIN_WORDS_PER_CHAPTER, type ChapterRule, type ChapterRuleInput, type ChapterRulePreview, type GeneratedChapterRule, type HeadingCandidate, type HeadingCandidates } from '../shared/chapter-rules';
 import { api } from './api';
 import { Notice } from './ui';
 import { RequestDiagnostics } from './RequestDiagnostics';
 
-const ruleInput = (rule: ChapterRuleInput): ChapterRuleInput => ({ name: rule.name, pattern: rule.pattern, flags: rule.flags, description: rule.description });
+const ruleInput = (rule: ChapterRuleInput): ChapterRuleInput => rule.type === 'length'
+  ? { type: 'length', name: rule.name, wordsPerChapter: rule.wordsPerChapter, description: rule.description }
+  : { type: rule.type, name: rule.name, pattern: rule.pattern, flags: rule.flags, description: rule.description };
+const validWords = (value: number) => Number.isInteger(value) && value >= MIN_WORDS_PER_CHAPTER && value <= MAX_WORDS_PER_CHAPTER;
 
 export function ImportRulesPanel({ source, busy, onBusy, onApply }: { source: Source; busy: boolean; onBusy: (value: boolean) => void; onApply: (value: ChapterRulePreview) => void }) {
   const [rules, setRules] = useState<ChapterRule[]>([...builtInChapterRules]);
   const [selectedId, setSelectedId] = useState(source.format === 'epub' ? 'native' : 'auto');
+  const [wordsPerChapter, setWordsPerChapter] = useState(DEFAULT_WORDS_PER_CHAPTER);
   const [editor, setEditor] = useState<ChapterRuleInput | null>(null); const [editingId, setEditingId] = useState('');
   const [error, setError] = useState(''); const [note, setNote] = useState('');
   const [query, setQuery] = useState(''); const [searchedQuery, setSearchedQuery] = useState('');
@@ -35,14 +39,16 @@ export function ImportRulesPanel({ source, busy, onBusy, onApply }: { source: So
   }
   function edit(copy = false) {
     const rule = rules.find(value => value.id === selectedId) ?? builtInChapterRules[1];
-    setEditor(ruleInput({ ...rule, name: copy || rule.builtIn ? `${rule.name}（自定义）` : rule.name }));
+    setEditor(ruleInput({ ...rule, ...(rule.type === 'length' ? { wordsPerChapter } : {}), name: copy || rule.builtIn ? `${rule.name}（自定义）` : rule.name }));
     setEditingId(copy || rule.builtIn ? '' : rule.id); setError('');
   }
   async function apply(rule?: ChapterRuleInput) {
     await run(async signal => {
-      const value = await send<ChapterRulePreview>(`/sources/${source.id}/split?view=author`, rule ? { rule } : selectedId === 'native' ? { native: true } : { ruleId: selectedId }, signal);
+      const selected = rules.find(value => value.id === selectedId);
+      const previewRule = rule ?? (selected?.type === 'length' ? ruleInput({ ...selected, wordsPerChapter }) : undefined);
+      const value = await send<ChapterRulePreview>(`/sources/${source.id}/split?view=author`, previewRule ? { rule: previewRule } : selectedId === 'native' ? { native: true } : { ruleId: selectedId }, signal);
       if (!alive.current) return; onApply(value);
-      setNote(value.headingCount === undefined ? `已恢复原始分章，共 ${value.chapters.length} 章。` : value.headingCount === 0 ? '没有匹配到标题，全文保留为一章。可换规则，或勾选标题让 AI 生成规则。' : `匹配 ${value.headingCount} 个标题，分成 ${value.chapters.length} 章。请核对目录和正文。`);
+      setNote(value.wordsPerChapter !== undefined ? `已按每章 ${value.wordsPerChapter} 字分成 ${value.chapters.length} 章。请核对目录和正文，章节名称可自行修改。` : value.headingCount === undefined ? `已恢复原始分章，共 ${value.chapters.length} 章。` : value.headingCount === 0 ? '没有匹配到标题，全文保留为一章。可换规则、按字数分章，或勾选标题让 AI 生成规则。' : `匹配 ${value.headingCount} 个标题，分成 ${value.chapters.length} 章。请核对目录和正文。`);
     });
   }
   async function save(copy = false) {
@@ -52,6 +58,7 @@ export function ImportRulesPanel({ source, busy, onBusy, onApply }: { source: So
       const value = await send<ChapterRule>(id ? `/chapter-rules/${id}?view=author` : '/chapter-rules?view=author', editor, signal, id ? 'PUT' : 'POST');
       const library = await api<{ rules: ChapterRule[] }>('/chapter-rules?view=author', { signal });
       if (!alive.current) return; setRules(library.rules); setSelectedId(value.id); setEditingId(value.id); setEditor(ruleInput(value)); setNote('规则已保存，可在以后导入时选择；点击预览后才会改变当前分章。');
+      if (value.type === 'length') setWordsPerChapter(value.wordsPerChapter);
     });
   }
   async function remove() {
@@ -83,26 +90,32 @@ export function ImportRulesPanel({ source, busy, onBusy, onApply }: { source: So
     });
   }
   const selected = rules.find(value => value.id === selectedId);
-  const validEditor = editor && editor.name.trim() && editor.pattern.trim();
+  const validEditor = editor && editor.name.trim() && (editor.type === 'length' ? validWords(editor.wordsPerChapter) : editor.pattern.trim());
   return <section className="import-rules" aria-label="分章规则" data-testid="import-rules">
     <div className="import-rule-toolbar">
-      <label>分章规则<select value={selectedId} disabled={busy} onChange={e => { setSelectedId(e.target.value); setEditor(null); setEditingId(''); setNote(''); }}>
+      <label>分章规则<select value={selectedId} disabled={busy} onChange={e => { setSelectedId(e.target.value); const rule = rules.find(value => value.id === e.target.value); if (rule?.type === 'length') setWordsPerChapter(rule.wordsPerChapter); setEditor(null); setEditingId(''); setNote(''); }}>
         {source.format === 'epub' && <option value="native">EPUB 原有阅读顺序（默认）</option>}
         <optgroup label="内置规则">{rules.filter(rule => rule.builtIn).map(rule => <option key={rule.id} value={rule.id}>{rule.name}</option>)}</optgroup>
         {rules.some(rule => !rule.builtIn) && <optgroup label="我的规则">{rules.filter(rule => !rule.builtIn).map(rule => <option key={rule.id} value={rule.id}>{rule.name}</option>)}</optgroup>}
       </select></label>
-      <button className="button secondary small" disabled={busy} onClick={() => void apply()}>按所选规则重新分章</button>
+      {selected?.type === 'length' && <label>每章字数<input type="number" min={MIN_WORDS_PER_CHAPTER} max={MAX_WORDS_PER_CHAPTER} step={100} disabled={busy} value={wordsPerChapter || ''} onChange={e => setWordsPerChapter(Number(e.target.value))} /></label>}
+      <button className="button secondary small" disabled={busy || selected?.type === 'length' && !validWords(wordsPerChapter)} onClick={() => void apply()}>按所选规则重新分章</button>
       <button className="text-button" disabled={busy} onClick={() => edit(true)}><Plus size={14} />添加规则</button>
       {selected && !selected.builtIn && <><button className="text-button" disabled={busy} onClick={() => edit()}>编辑规则</button><button className="text-button danger" disabled={busy} onClick={() => void remove()}><Trash2 size={14} />删除规则</button></>}
     </div>
-    <p className="hint">{selectedId === 'native' ? '按 EPUB 自带的正文顺序分章；也可选择其他规则重新识别正文标题。' : selected?.description} 重新分章使用原文件，当前手动调整可撤销恢复。</p>
+    <p className="hint">{selectedId === 'native' ? '按 EPUB 自带的正文顺序分章；也可选择其他规则重新分章。' : selected?.description} 重新分章使用原文件，当前手动调整可撤销恢复。</p>
+    {selected?.type === 'length' && <p className="hint">每章字数为 {MIN_WORDS_PER_CHAPTER}～{MAX_WORDS_PER_CHAPTER.toLocaleString('zh-CN')} 的整数。空格和换行不计字数，标点计入；优先在目标字数的 80%～100% 范围内找段落末尾，没有合适换行时按字数切开，末章可较短。</p>}
     {error && <Notice error={error} onClose={() => setError('')} />}{note && <p className="import-rule-note" role="status">{note}</p>}
     {editor && <div className="import-rule-editor form-stack" aria-label="自定义分章规则">
       <div className="row between wrap"><strong>{editingId ? '编辑我的规则' : '新规则'}</strong><button className="text-button" disabled={busy} onClick={() => setEditor(null)}>收起编辑</button></div>
       <label>规则名称<input maxLength={80} disabled={busy} value={editor.name} onChange={e => setEditor({ ...editor, name: e.target.value })} /></label>
-      <label>标题匹配表达式<textarea aria-label="标题匹配表达式" className="import-rule-pattern" rows={3} maxLength={1000} disabled={busy} value={editor.pattern} onChange={e => setEditor({ ...editor, pattern: e.target.value })} spellCheck={false} /></label>
-      <p className="hint">表达式匹配整行标题，不用写 / 分隔符。例如「第[0-9]+章.*」匹配第1章、第2章等；「【.+】」匹配括号标题。每行最多 160 字符。</p>
-      <div className="form-grid"><label>匹配方式<select disabled={busy} value={editor.flags} onChange={e => setEditor({ ...editor, flags: e.target.value })}><option value="i">不区分大小写</option><option value="">区分大小写</option><option value="iu">Unicode · 不区分大小写</option><option value="u">Unicode · 区分大小写</option></select></label><label>规则说明<input maxLength={500} disabled={busy} value={editor.description} onChange={e => setEditor({ ...editor, description: e.target.value })} /></label></div>
+      <label>分章方式<select aria-label="分章方式" disabled={busy} value={editor.type === 'length' ? 'length' : 'regex'} onChange={e => setEditor(e.target.value === 'length' ? { type: 'length', name: editor.name, description: editor.description, wordsPerChapter } : { name: editor.name, description: editor.description, pattern: '第[0-9]+章.*', flags: 'i' })}><option value="regex">按章节标题</option><option value="length">按字数分章</option></select></label>
+      {editor.type === 'length' ? <><label>每章目标字数<input type="number" min={MIN_WORDS_PER_CHAPTER} max={MAX_WORDS_PER_CHAPTER} step={100} disabled={busy} value={editor.wordsPerChapter || ''} onChange={e => setEditor({ ...editor, wordsPerChapter: Number(e.target.value) })} /></label><p className="hint">按正文去除空白后的字符数拆分，优先在接近目标的段落末尾切开；无换行的长段落按字数切开。保存后可在其他小说导入时复用。</p></> : <>
+        <label>标题匹配表达式<textarea aria-label="标题匹配表达式" className="import-rule-pattern" rows={3} maxLength={1000} disabled={busy} value={editor.pattern} onChange={e => setEditor({ ...editor, pattern: e.target.value })} spellCheck={false} /></label>
+        <p className="hint">表达式匹配整行标题，不用写 / 分隔符。例如「第[0-9]+章.*」匹配第1章、第2章等；「【.+】」匹配括号标题。每行最多 160 字符。</p>
+        <label>匹配方式<select disabled={busy} value={editor.flags} onChange={e => setEditor({ ...editor, flags: e.target.value })}><option value="i">不区分大小写</option><option value="">区分大小写</option><option value="iu">Unicode · 不区分大小写</option><option value="u">Unicode · 区分大小写</option></select></label>
+      </>}
+      <label>规则说明<input maxLength={500} disabled={busy} value={editor.description} onChange={e => setEditor({ ...editor, description: e.target.value })} /></label>
       <div className="row wrap"><button className="button secondary small" disabled={busy || !validEditor} onClick={() => void apply(editor)}>预览这条规则</button><button className="button primary small" disabled={busy || !validEditor} onClick={() => void save()}><Save size={14} />{editingId ? '保存修改' : '保存新规则'}</button>{editingId && <button className="text-button" disabled={busy || !validEditor} onClick={() => void save(true)}>另存为新规则</button>}</div>
     </div>}
     <details className="import-ai-rules" onToggle={e => { if (e.currentTarget.open && !candidates && !busy) void loadCandidates(); }}>

@@ -1,5 +1,5 @@
 import { Worker } from 'node:worker_threads';
-import type { ChapterRuleInput } from '../shared/chapter-rules.js';
+import type { RegexChapterRuleInput } from '../shared/chapter-rules.js';
 import { MAX_CHAPTER_HEADINGS, MAX_HEADING_LENGTH } from '../shared/chapter-rules.js';
 import type { ChapterHeading } from './importer.js';
 import { HttpError } from './store.js';
@@ -30,7 +30,7 @@ try {
 `;
 
 let activeWorkers = 0;
-export async function matchChapterHeadings(text: string, rule: Pick<ChapterRuleInput, 'pattern' | 'flags'>, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ChapterHeading[]> {
+export async function matchChapterHeadings(text: string, rule: Pick<RegexChapterRuleInput, 'pattern' | 'flags'>, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ChapterHeading[]> {
   if (options.signal?.aborted) throw new HttpError('分章操作已取消。', 409);
   if (activeWorkers >= 4) throw new HttpError('正在处理其他分章规则，请稍后重试。', 429);
   activeWorkers++;

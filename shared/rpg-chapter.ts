@@ -5,7 +5,11 @@ export function normalizeChapterWords(value?: number): number {
 }
 
 export function countProseWords(text: string): number {
-  return [...text.replace(/\s/gu, '')].length;
+  // Import previews can contain a whole unchaptered novel; avoid a character array.
+  const whitespace = /\s/u;
+  let words = 0;
+  for (const character of text) if (!whitespace.test(character)) words++;
+  return words;
 }
 
 export function chapterBudgetReached(text: string, targetWords: number): boolean {

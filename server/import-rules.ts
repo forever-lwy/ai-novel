@@ -1,19 +1,26 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { builtInChapterRules, MAX_HEADING_LENGTH, type ChapterRule, type ChapterRuleInput, type ChapterRulePreview, type GeneratedChapterRule } from '../shared/chapter-rules.js';
+import { builtInChapterRules, MAX_HEADING_LENGTH, MAX_WORDS_PER_CHAPTER, MIN_WORDS_PER_CHAPTER, type ChapterRule, type ChapterRuleInput, type RegexChapterRuleInput, type ChapterRulePreview, type GeneratedChapterRule } from '../shared/chapter-rules.js';
 import type { CapturedModelResponse, ModelRequestSnapshot, Source } from '../shared/types.js';
 import { resolveModelConfig } from '../shared/model-settings.js';
 import { matchChapterHeadings } from './chapter-rule-matcher.js';
-import { chaptersFromHeadings, novelLines, novelText, parseNovel } from './importer.js';
+import { chaptersFromHeadings, novelLines, novelText, parseNovel, splitTextByLength } from './importer.js';
 import { estimateModelRequestInputTokens, generateStructured, redactModelPayload, structuredRequest } from './providers.js';
 import type { SettingsStore } from './security.js';
 import { HttpError } from './store.js';
 
-const ruleSchema = z.object({
+const regexRuleSchema = z.object({
+  type: z.literal('regex').optional(),
   name: z.string().trim().min(1).max(80), pattern: z.string().trim().min(1).max(1000),
   flags: z.enum(['', 'i', 'u', 'iu']).default('i'), description: z.string().trim().max(500).default(''),
 }).strict();
+const lengthRuleSchema = z.object({
+  type: z.literal('length'), name: z.string().trim().min(1).max(80),
+  wordsPerChapter: z.number().int().min(MIN_WORDS_PER_CHAPTER).max(MAX_WORDS_PER_CHAPTER),
+  description: z.string().trim().max(500).default(''),
+}).strict();
+const ruleSchema = z.union([regexRuleSchema, lengthRuleSchema]);
 const ruleId = z.string().min(1).max(100);
 const META_KEY = 'chapter-rules';
 type OriginalSource = { id: string; filename: string; format: 'txt' | 'epub'; confirmed: number };
@@ -25,11 +32,15 @@ interface Dependencies {
 function author(request: FastifyRequest) {
   if ((request.query as { view?: string })?.view !== 'author') throw new HttpError('请在作者视图设置分章规则。', 403);
 }
-function parseRule(value: unknown): ChapterRuleInput {
-  const rule = ruleSchema.parse(value);
+function parseRegexRule(value: unknown): RegexChapterRuleInput {
+  const rule = regexRuleSchema.parse(value);
   try { new RegExp(`^(?:${rule.pattern})$`, rule.flags); }
   catch { throw new HttpError('分章表达式格式无效，请检查括号和转义。'); }
   return rule;
+}
+function parseRule(value: unknown): ChapterRuleInput {
+  const rule = ruleSchema.parse(value);
+  return rule.type === 'length' ? rule : parseRegexRule(rule);
 }
 
 export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencies) {
@@ -46,6 +57,7 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
   };
   const preview = async (source: OriginalSource, rule: ChapterRuleInput): Promise<ChapterRulePreview> => {
     const text = novelText(source.filename, deps.bytes(source));
+    if (rule.type === 'length') return { source: deps.sourcePublic(source), chapters: splitTextByLength(text, rule.wordsPerChapter), wordsPerChapter: rule.wordsPerChapter };
     const headings = await matchChapterHeadings(text, rule);
     const chapters = chaptersFromHeadings(text, headings);
     writableSource(source.id); // Confirmation/deletion may have happened during the worker.
@@ -55,7 +67,7 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
   app.get('/api/chapter-rules', async request => { author(request); return { rules: all() }; });
   app.post('/api/chapter-rules', async request => {
     author(request); const rule = parseRule(request.body);
-    await matchChapterHeadings('', rule);
+    if (rule.type !== 'length') await matchChapterHeadings('', rule);
     ensureUniqueName(rule);
     const rules = custom();
     if (rules.length >= 100) throw new HttpError('最多保存 100 条自定义分章规则，请先删除不再使用的规则。');
@@ -65,7 +77,8 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
   app.put('/api/chapter-rules/:id', async request => {
     author(request); const id = param(request); const rule = parseRule(request.body);
     if (!custom().some(value => value.id === id)) throw new HttpError('找不到可编辑的自定义规则；内置规则可另存为新规则。', 404);
-    await matchChapterHeadings('', rule); ensureUniqueName(rule, id);
+    if (rule.type !== 'length') await matchChapterHeadings('', rule);
+    ensureUniqueName(rule, id);
     const rules = custom();
     if (!rules.some(value => value.id === id)) throw new HttpError('这条规则已被删除，请另存为新规则。', 409);
     const saved = { ...rule, id };
@@ -126,7 +139,7 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
     });
     try {
       if (estimateModelRequestInputTokens(provider, modelRequest) + provider.maxOutputTokens > provider.contextTokens) throw new HttpError('标题样本与输出预留超过模型上下文，请减少样本或调整模型参数。');
-      const generated = await generateStructured(provider, modelRequest, parseRule);
+      const generated = await generateStructured(provider, modelRequest, parseRegexRule);
       const sampleMatches = await matchChapterHeadings(titles.join('\n'), generated.value, { signal: controller.signal });
       if (sampleMatches.length !== titles.length) throw new HttpError('AI 规则未能匹配全部选中标题，请调整样本后手动重试。');
       const headings = await matchChapterHeadings(text, generated.value, { signal: controller.signal });

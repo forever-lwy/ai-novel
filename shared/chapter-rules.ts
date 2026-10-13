@@ -1,14 +1,20 @@
 import type { CapturedModelResponse, SourcePreview } from './types.js';
 
-export interface ChapterRuleInput { name: string; pattern: string; flags: string; description: string }
-export interface ChapterRule extends ChapterRuleInput { id: string; builtIn?: boolean }
+export interface RegexChapterRuleInput { type?: 'regex'; name: string; pattern: string; flags: string; description: string }
+export interface LengthChapterRuleInput { type: 'length'; name: string; wordsPerChapter: number; description: string }
+export type ChapterRuleInput = RegexChapterRuleInput | LengthChapterRuleInput;
+export type ChapterRule = ChapterRuleInput & { id: string; builtIn?: boolean };
 export interface HeadingCandidate { line: number; title: string }
 export interface HeadingCandidates { candidates: HeadingCandidate[]; nextOffset: number | null }
-export interface ChapterRulePreview extends SourcePreview { headingCount?: number }
+export interface ChapterRulePreview extends SourcePreview { headingCount?: number; wordsPerChapter?: number }
 export interface GeneratedChapterRule {
-  ok: boolean; rule?: ChapterRuleInput; error?: string; headingCount?: number; chapterCount?: number;
+  ok: boolean; rule?: RegexChapterRuleInput; error?: string; headingCount?: number; chapterCount?: number;
   examples?: string[]; inputTokens?: number; outputTokens?: number; capture?: CapturedModelResponse;
 }
+
+export const DEFAULT_WORDS_PER_CHAPTER = 3000;
+export const MIN_WORDS_PER_CHAPTER = 100;
+export const MAX_WORDS_PER_CHAPTER = 100_000;
 
 // Patterns describe one trimmed line. The importer supplies full-line anchors.
 const number = '[零〇一二三四五六七八九十百千万亿两0-9０-９]{1,24}';
@@ -20,7 +26,7 @@ const numbered = `(?:[0-9０-９]{1,6}[.．、:：)）]|[（(]${number}[)）]|[�
 const bracketed = `[【\\[](?:${chinese}|${volume}|${english}|${special})[】\\]][^\\n]{0,60}`;
 const markdown = '#{1,6}[ \\t]+[^\\n#][^\\n]{0,100}';
 
-export const builtInChapterRules: readonly ChapterRule[] = [
+const headingRules = [
   { id: 'auto', name: '综合识别（推荐）', pattern: `(?:${chinese}|${volume}|${english}|${special}|${numbered}|${bracketed}|${markdown})`, description: '兼容常见中文、英文、编号、括号和 Markdown 标题。' },
   { id: 'chinese', name: '中文章回', pattern: `(?:${chinese}|${special})`, description: '第一章、第 2 章、第三回，以及序章、番外等。' },
   { id: 'volume', name: '按卷／部分章', pattern: `(?:${volume}|${special})`, description: '第一卷、第二部；卷内章节保留在正文中。' },
@@ -31,6 +37,11 @@ export const builtInChapterRules: readonly ChapterRule[] = [
   { id: 'special', name: '序章／番外等独立标题', pattern: special, description: '只按序章、楔子、尾声、番外等分章。' },
   { id: 'none', name: '不自动分章', pattern: '\\b\\B', description: '全文作为一章，可再手动分章。' },
 ].map(rule => ({ ...rule, flags: 'i', builtIn: true }));
+
+export const builtInChapterRules: readonly ChapterRule[] = [
+  ...headingRules,
+  { id: 'length', type: 'length', name: '按字数分章', wordsPerChapter: DEFAULT_WORDS_PER_CHAPTER, description: '适合没有章节标题的小说。按设定字数拆分，优先在接近目标的段落末尾切开。', builtIn: true },
+];
 
 export const MAX_HEADING_LENGTH = 160;
 export const MAX_CHAPTER_HEADINGS = 10_000;

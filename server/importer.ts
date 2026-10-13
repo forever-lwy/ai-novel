@@ -3,7 +3,7 @@ import { unzipSync } from 'fflate';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import iconv from 'iconv-lite';
 import { decodeHTML } from 'entities';
-import { builtInChapterRules, MAX_CHAPTER_HEADINGS, MAX_HEADING_LENGTH } from '../shared/chapter-rules.js';
+import { builtInChapterRules, DEFAULT_WORDS_PER_CHAPTER, MAX_WORDS_PER_CHAPTER, MIN_WORDS_PER_CHAPTER, MAX_CHAPTER_HEADINGS, MAX_HEADING_LENGTH } from '../shared/chapter-rules.js';
 
 export interface ImportedChapter { title: string; text: string }
 const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
@@ -63,11 +63,42 @@ export function chaptersFromHeadings(normalized: string, headings: ChapterHeadin
   return chapters;
 }
 
+/** Count Unicode characters without whitespace; keep paragraph endings near the target. */
+export function splitTextByLength(text: string, wordsPerChapter = DEFAULT_WORDS_PER_CHAPTER): ImportedChapter[] {
+  if (!Number.isInteger(wordsPerChapter) || wordsPerChapter < MIN_WORDS_PER_CHAPTER || wordsPerChapter > MAX_WORDS_PER_CHAPTER) throw new Error(`每章字数须为 ${MIN_WORDS_PER_CHAPTER}～${MAX_WORDS_PER_CHAPTER} 的整数。`);
+  const normalized = normalizeNovelText(text);
+  if (!normalized) throw new Error('文件没有可读取的小说正文。');
+  const chapters: ImportedChapter[] = [];
+  const paragraphThreshold = Math.ceil(wordsPerChapter * 0.8);
+  let start = 0;
+  while (start < normalized.length) {
+    let end = start; let words = 0; let paragraphEnd = 0;
+    while (end < normalized.length) {
+      const size = normalized.codePointAt(end)! > 0xffff ? 2 : 1;
+      const character = normalized.slice(end, end + size); const whitespace = /\s/u.test(character);
+      if (!whitespace && words === wordsPerChapter) break;
+      end += size;
+      if (!whitespace) words++;
+      if (character === '\n' && words >= paragraphThreshold) paragraphEnd = end;
+    }
+    // The final remainder stays intact, even if an earlier paragraph break was found.
+    const cut = end === normalized.length ? end : paragraphEnd || end;
+    const body = normalized.slice(start, cut).trim();
+    if (body) {
+      chapters.push({ title: `第${chapters.length + 1}章`, text: body });
+      if (chapters.length > MAX_CHAPTER_HEADINGS) throw new Error('章节数量超过 10000，请增大每章字数后导入。');
+    }
+    start = cut;
+  }
+  return chapters;
+}
+
 /** Default patterns are fixed; user-supplied patterns run only in a bounded worker. */
 export function splitText(text: string, ruleId = 'auto'): ImportedChapter[] {
-  const normalized = normalizeNovelText(text);
   const rule = builtInChapterRules.find(value => value.id === ruleId);
   if (!rule) throw new Error('分章规则不存在。');
+  if (rule.type === 'length') return splitTextByLength(text, rule.wordsPerChapter);
+  const normalized = normalizeNovelText(text);
   const pattern = new RegExp(`^(?:${rule.pattern})$`, rule.flags);
   const headings: ChapterHeading[] = [];
   for (const line of novelLines(normalized)) if (line.title && line.title.length <= MAX_HEADING_LENGTH && pattern.test(line.title)) {

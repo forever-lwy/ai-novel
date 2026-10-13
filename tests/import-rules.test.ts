@@ -49,14 +49,14 @@ describe('import rule library and original-based previews', () => {
   });
   it('saves, edits and deletes named reusable rules without changing model settings', async () => {
     const { ctx, request } = await setup(); const before = ctx.settings.public();
-    const initial = (await request('GET', '/api/chapter-rules?view=author')).json(); expect(initial.rules).toHaveLength(9);
+    const initial = (await request('GET', '/api/chapter-rules?view=author')).json(); expect(initial.rules).toHaveLength(10);
     const saved = (await request('POST', '/api/chapter-rules?view=author', rule)).json(); expect(saved).toMatchObject(rule);
     expect((await request('POST', '/api/chapter-rules?view=author', rule)).statusCode).toBe(400);
     expect((await request('PUT', `/api/chapter-rules/${saved.id}?view=author`, { ...rule, name: '场景新规则' })).json()).toMatchObject({ id: saved.id, name: '场景新规则' });
     expect((await request('PUT', '/api/chapter-rules/auto?view=author', rule)).statusCode).toBe(404);
     expect((await request('DELETE', '/api/chapter-rules/auto?view=author')).statusCode).toBe(404);
     expect((await request('DELETE', `/api/chapter-rules/${saved.id}?view=author`)).statusCode).toBe(200);
-    expect((await request('GET', '/api/chapter-rules?view=author')).json().rules).toHaveLength(9); expect(ctx.settings.public()).toEqual(before);
+    expect((await request('GET', '/api/chapter-rules?view=author')).json().rules).toHaveLength(10); expect(ctx.settings.public()).toEqual(before);
   });
   it('preserves the rule library across service restarts', async () => {
     const { ctx, request, dataDir } = await setup(); await request('POST', '/api/chapter-rules?view=author', rule); await ctx.app.close(); apps.splice(apps.indexOf(ctx), 1);
@@ -91,6 +91,66 @@ describe('import rule library and original-based previews', () => {
     const archive = zipSync({ 'META-INF/container.xml': strToU8('<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>'), 'book.opf': strToU8('<package><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/></spine></package>'), 'one.xhtml': strToU8('<html><head><title>原有一章</title></head><body><p>场景01｜入城</p><p>正文一。</p><p>场景02｜夜谈</p><p>正文二。</p></body></html>') });
     const uploaded = await upload('', 'original.epub', Buffer.from(archive)); expect(uploaded.chapters).toHaveLength(1);
     expect((await request('POST', `/api/sources/${uploaded.source.id}/split?view=author`, { rule })).json().chapters).toHaveLength(2);
+    expect((await request('POST', `/api/sources/${uploaded.source.id}/split?view=author`, { native: true })).json().chapters).toEqual(uploaded.chapters);
+    expect((await request('GET', `/api/sources/${uploaded.source.id}/file`)).rawPayload).toEqual(Buffer.from(archive));
+  });
+});
+
+describe('length rules in the import library and preview/confirmation flow', () => {
+  const lengthRule = { type: 'length', name: '每章一百字', wordsPerChapter: 100, description: '用于无标题小说' };
+  it('previews the built-in and adjusted length rule from original bytes, then confirms the chosen chapters', async () => {
+    const { ctx, project, request, upload } = await setup();
+    const text = '甲'.repeat(85) + '\r\n\r\n' + '乙'.repeat(85) + '\r\n' + '丙'.repeat(40);
+    const uploaded = await upload(text); const revision = ctx.store.getBranch(project.mainBranchId).revisionId;
+    const path = `/api/sources/${uploaded.source.id}/split?view=author`;
+    expect((await request('POST', path, { ruleId: 'length' })).json()).toMatchObject({ wordsPerChapter: 3000, chapters: [{ title: '第1章', text: text.replace(/\r\n/g, '\n') }] });
+    const split = await request('POST', path, { rule: lengthRule }); expect(split.statusCode).toBe(200);
+    const preview = split.json(); expect(preview.wordsPerChapter).toBe(100); expect(preview.headingCount).toBeUndefined();
+    expect(preview.chapters.map((chapter: any) => chapter.text)).toEqual(['甲'.repeat(85), '乙'.repeat(85), '丙'.repeat(40)]);
+    expect((await request('GET', `/api/sources/${uploaded.source.id}/preview`)).json()).toEqual(uploaded);
+    expect(ctx.store.getBranch(project.mainBranchId).revisionId).toBe(revision);
+    expect(ctx.settings.meta('chapter-rules')).toBeUndefined();
+    expect((await request('GET', `/api/sources/${uploaded.source.id}/file`)).rawPayload).toEqual(Buffer.from(text));
+    expect((await request('POST', path, { native: true })).json().chapters).toEqual(uploaded.chapters);
+    preview.chapters[0].title = '作者命名';
+    expect((await request('POST', `/api/sources/${uploaded.source.id}/confirm`, { branchId: project.mainBranchId, baseRevisionId: revision, chapters: preview.chapters })).statusCode).toBe(200);
+    expect((await request('GET', `/api/sources/${uploaded.source.id}/preview`)).json().chapters).toEqual(preview.chapters);
+    expect((await request('POST', path, { ruleId: 'length' })).statusCode).toBe(409);
+  });
+  it('saves, edits, reuses and deletes length rules alongside legacy regex rules across a restart', async () => {
+    const { ctx, request, upload, dataDir } = await setup(); const uploaded = await upload('甲'.repeat(250));
+    const saved = (await request('POST', '/api/chapter-rules?view=author', lengthRule)).json(); expect(saved).toMatchObject(lengthRule);
+    expect((await request('POST', `/api/sources/${uploaded.source.id}/split?view=author`, { ruleId: saved.id })).json().chapters).toHaveLength(3);
+    const updated = { ...lengthRule, wordsPerChapter: 200 };
+    expect((await request('PUT', `/api/chapter-rules/${saved.id}?view=author`, updated)).json()).toMatchObject(updated);
+    expect((await request('POST', `/api/sources/${uploaded.source.id}/split?view=author`, { ruleId: saved.id })).json().chapters).toHaveLength(2);
+    await request('POST', '/api/chapter-rules?view=author', rule);
+    await ctx.app.close(); apps.splice(apps.indexOf(ctx), 1);
+    const reopened = await buildApp({ dataDir, startEngine: false }); apps.push(reopened);
+    const library = JSON.parse(reopened.settings.meta('chapter-rules')!);
+    expect(library).toEqual([expect.objectContaining({ ...updated, id: saved.id }), expect.objectContaining(rule)]);
+    const login = await reopened.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'import-rules-password-123' } });
+    const cookies = { session: login.cookies[0].value };
+    const split = await reopened.app.inject({ method: 'POST', url: `/api/sources/${uploaded.source.id}/split?view=author`, cookies, payload: { ruleId: saved.id } });
+    expect(split.json().chapters).toHaveLength(2);
+    expect((await reopened.app.inject({ method: 'DELETE', url: `/api/chapter-rules/${saved.id}?view=author`, cookies })).statusCode).toBe(200);
+    expect(JSON.parse(reopened.settings.meta('chapter-rules')!)).toEqual([expect.objectContaining(rule)]);
+  });
+  it.each([{}, { wordsPerChapter: 99 }, { wordsPerChapter: 100001 }, { wordsPerChapter: 100.5 }, { wordsPerChapter: '100' }, { wordsPerChapter: null }, { wordsPerChapter: 100, pattern: '.+' }, { wordsPerChapter: 100, unexpected: true }])('rejects invalid length-rule parameters without changing the preview or library: %j', async fields => {
+    const { ctx, request, upload } = await setup(); const uploaded = await upload();
+    const invalid = { type: 'length', name: '无效规则', ...fields };
+    expect((await request('POST', '/api/chapter-rules?view=author', invalid)).statusCode).toBe(400);
+    expect((await request('POST', `/api/sources/${uploaded.source.id}/split?view=author`, { rule: invalid })).statusCode).toBe(400);
+    expect(ctx.settings.meta('chapter-rules')).toBeUndefined();
+    expect((await request('GET', `/api/sources/${uploaded.source.id}/preview`)).json()).toEqual(uploaded);
+  });
+  it('splits EPUB body in reading order without changing its original bytes or native chapter order', async () => {
+    const { request, upload } = await setup();
+    const archive = zipSync({ 'META-INF/container.xml': strToU8('<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>'), 'book.opf': strToU8('<package><manifest><item id="one" href="one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="two.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="two"/><itemref idref="one"/></spine></package>'), 'one.xhtml': strToU8(`<html><head><title>后半</title></head><body><p>${'乙'.repeat(130)}</p></body></html>`), 'two.xhtml': strToU8(`<html><head><title>前半</title></head><body><p>${'甲'.repeat(120)}</p></body></html>`) });
+    const uploaded = await upload('', 'length.epub', Buffer.from(archive));
+    const preview = (await request('POST', `/api/sources/${uploaded.source.id}/split?view=author`, { rule: lengthRule })).json();
+    expect(preview.wordsPerChapter).toBe(100);
+    expect(preview.chapters.map((chapter: any) => chapter.text).join('').replace(/\s/gu, '')).toBe('甲'.repeat(120) + '乙'.repeat(130));
     expect((await request('POST', `/api/sources/${uploaded.source.id}/split?view=author`, { native: true })).json().chapters).toEqual(uploaded.chapters);
     expect((await request('GET', `/api/sources/${uploaded.source.id}/file`)).rawPayload).toEqual(Buffer.from(archive));
   });
