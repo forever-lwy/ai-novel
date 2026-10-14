@@ -4,6 +4,8 @@ import { listenLocalServer } from './local-server.mjs';
 import type { ModelActivityEvent, ModelRequest, ModelToolContinuation, ProviderConfig, ProviderProtocol } from '../shared/types.js';
 import { buildRequestSnapshot, generateStructured, generateText, ModelInteractionPause } from '../server/providers.js';
 import { partialWritingProse, unpackWritingResponse, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
+import { compileTaskPrompt, defaultPromptTemplates } from '../shared/prompt-templates.js';
+import { V08_PRESET_ID } from '../shared/v08-prompts.js';
 
 const protocols: ProviderProtocol[] = ['openai-chat', 'openai-responses', 'gemini', 'claude'];
 const servers: Server[] = [];
@@ -44,6 +46,31 @@ function streamEnd(protocol: ProviderProtocol, tail: string, full: unknown) {
 }
 
 describe('layered writing tool transport', () => {
+  describe.each(protocols)('%s v0.8 general output transport', protocol => {
+    it.each(['extraction', 'compression'] as const)('unwraps %s JSON through the real HTTP adapter with no confirmation request', async task => {
+      const expected = task === 'extraction' ? { summary: '到达石桥。', entities: [], relations: [], foreshadows: [] } : { text: '到达石桥。' };
+      const service = await upstream((_index, _body, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(response(protocol, payload(JSON.stringify(expected))))); });
+      const templates = defaultPromptTemplates(); templates.general!.selected = V08_PRESET_ID;
+      const compiled = compileTaskPrompt(templates, task, { blockText: '[1] 到达石桥。', summaryText: '到达石桥。', context: '', chapterTitle: '石桥' });
+      const result = await generateStructured(config(protocol, service.baseUrl), compiled, value => value);
+      expect(result.value).toEqual(expected); expect(service.bodies).toHaveLength(1);
+      expect(service.bodies[0]).toEqual(JSON.parse(buildRequestSnapshot(config(protocol, service.baseUrl), compiled).body));
+    });
+    it('streams v0.8 auxiliary content into author activities while executing a real inner tool', async () => {
+      const service = await upstream((index, _body, res) => {
+        const value = payload(index ? '后文。' : '<draft>任务已就绪。</draft>前文。', index ? '' : 'read_entity');
+        const raw = JSON.stringify(value); const split = protocol === 'gemini' ? raw.length : raw.indexOf('绪');
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.end(streamStart(protocol, raw.slice(0, split)) + streamEnd(protocol, raw.slice(split), value));
+      });
+      const templates = defaultPromptTemplates(); templates.general!.selected = V08_PRESET_ID;
+      const compiled = compileTaskPrompt(templates, 'writing', { mode: 'original', instruction: '继续', context: '资料', maxWords: 1000 });
+      const execute = vi.fn(() => ({ name: '林舟' })); const events: ModelActivityEvent[] = []; let prose = '';
+      const result = await generateText(config(protocol, service.baseUrl), { ...request(execute), ...compiled, onTextDelta: text => { prose += text; }, onActivity: event => events.push(event) });
+      expect(result.text).toBe('前文。后文。'); expect(prose).toBe(result.text); expect(service.bodies).toHaveLength(2);
+      expect(execute).toHaveBeenCalledExactlyOnceWith({ id: 'person' });
+      expect(events.filter(event => event.type === 'thinking' && event.thinkingSource === 'preset').map(event => event.text).join('')).toBe('任务已就绪。');
+    });
+  });
   it.each(protocols)('%s exposes streamed preset thoughts and executed inner search/image tools in prose order', async protocol => {
     const first = { prose: '前文。<thinking>先核对人物资料。</thinking>中段。', toolCalls: [
       { name: 'read_entity', argumentsJson: '{"id":"person"}' },

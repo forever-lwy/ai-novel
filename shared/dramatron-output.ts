@@ -6,14 +6,15 @@ export interface DramatronOutputEvents {
   onThinking?: (event: { id: string; text: string } | { id: string; done: true }) => void;
 }
 
-export function createDramatronTextFilter(events: DramatronOutputEvents = {}) {
+export function createDramatronTextFilter(events: DramatronOutputEvents = {}, profile: 'dramatron' | 'v08' = 'dramatron') {
   let pending = '';
   const hidden: string[] = [];
   let thinking: { id: string; depth: number; hasText: boolean } | undefined;
   let thinkingIndex = 0;
-  const thinkingTags = new Set(['think', 'thinking']);
-  const auxiliary = new Set(['think', 'thinking', 'disclaimer', 'reference_example']);
-  const tags = [...auxiliary, 'interleaving'];
+  const thinkingTags = new Set(['think', 'thinking', ...(profile === 'v08' ? ['draft'] : [])]);
+  const auxiliary = new Set([...thinkingTags, ...(profile === 'dramatron' ? ['disclaimer', 'reference_example'] : [])]);
+  const wrappers = new Set(profile === 'dramatron' ? ['interleaving'] : []);
+  const tags = [...auxiliary, ...wrappers];
   let format: 'json' | 'text' | undefined;
   let quoted = false; let escaped = false;
   function visible(text: string): string {
@@ -69,7 +70,7 @@ export function createDramatronTextFilter(events: DramatronOutputEvents = {}) {
           if (!hidden.length && thinkingTags.has(tag)) thinking = { id: `preset:${thinkingIndex++}`, depth: 1, hasText: false };
           hidden.push(tag);
         }
-      } else if (tag !== 'interleaving') append(raw);
+      } else if (!wrappers.has(tag)) append(raw);
       pending = pending.slice(end + 1);
     }
     return output;
@@ -77,7 +78,7 @@ export function createDramatronTextFilter(events: DramatronOutputEvents = {}) {
   return { feed: (text: string) => { pending += text; return drain(false); }, finish: () => drain(true) };
 }
 
-export function cleanDramatronText(text: string): string {
-  const filter = createDramatronTextFilter();
+export function cleanDramatronText(text: string, profile: 'dramatron' | 'v08' = 'dramatron'): string {
+  const filter = createDramatronTextFilter({}, profile);
   return filter.feed(text) + filter.finish();
 }

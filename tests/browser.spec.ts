@@ -2,6 +2,7 @@ import { chooseBranch, currentBranchId } from './branch-browser-helpers';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { defaultPromptTemplates } from '../shared/prompt-templates';
+import { V08_PRESET_ID } from '../shared/v08-prompts';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1714,6 +1715,49 @@ test('非原生思考与资料查询、生图工具在作者视角显示，刷�
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath('preset-thought-tools-mobile.png'), animations: 'disabled' });
     await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await expect(page.getByRole('region', { name: '生成过程', exact: true })).toHaveCount(0);
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('v0.8 通用预设可预览、覆盖通道、恢复自身默认、保存与删除', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  try {
+    await page.request.put('/api/settings', { data: { ...previous, promptTemplates: defaultPromptTemplates() } });
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settings = page.getByTestId('settings-page'); await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    const panel = settings.getByTestId('prompt-templates-panel'); const preview = panel.getByLabel('提示词编译预览', { exact: true });
+    await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
+    await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue('default-general');
+    await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(V08_PRESET_ID);
+    await expect(panel.getByLabel('工具防截断', { exact: true })).toBeChecked();
+    await expect(panel.getByLabel('辅助标签处理', { exact: true })).toHaveValue('v08');
+    await expect(preview).toContainText('emit_writing_response'); await expect(preview).toContainText('FICTIONAL_TEXT_COMPLETION');
+    await expect(preview).not.toContainText('LATEST_USER_INPUT'); await expect(preview).not.toContainText('特图');
+    await panel.getByRole('tab', { name: '正文写作', exact: true }).click();
+    await expect(panel.getByLabel('正文输出通道', { exact: true })).toHaveValue('follow');
+    await panel.getByLabel('正文输出通道', { exact: true }).selectOption('text'); await expect(preview).not.toContainText('emit_writing_response');
+    await panel.getByLabel('正文输出通道', { exact: true }).selectOption('follow'); await expect(preview).toContainText('emit_writing_response');
+    await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
+    await panel.getByLabel('工具防截断', { exact: true }).uncheck(); await expect(preview).not.toContainText('emit_writing_response');
+    await expect(panel.getByLabel('恢复默认框架', { exact: true })).toHaveValue(V08_PRESET_ID);
+    await panel.getByRole('button', { name: '恢复默认提示词', exact: true }).click();
+    await expect(panel.getByLabel('工具防截断', { exact: true })).toBeChecked(); await expect(preview).toContainText('FICTIONAL_TEXT_COMPLETION');
+    await panel.getByLabel('辅助标签处理', { exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('v08-preset-desktop.png'), animations: 'disabled' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: testInfo.outputPath('v08-preset-mobile.png'), animations: 'disabled' });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(settings.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
+    let saved = await (await page.request.get('/api/settings')).json();
+    expect(saved.promptTemplates.general.selected).toBe(V08_PRESET_ID); expect(saved.promptTemplates.general.catalogVersion).toBe(1);
+    await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click();
+    await settings.getByRole('button', { name: '提示词编排', exact: true }).click(); await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
+    await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(V08_PRESET_ID);
+    await panel.getByRole('button', { name: '删除当前提示词预设', exact: true }).click();
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(settings.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
+    saved = await (await page.request.get('/api/settings')).json();
+    expect(saved.promptTemplates.general.presets.some((value: any) => value.id === V08_PRESET_ID)).toBe(false);
+    expect(saved.promptTemplates.general.selected).toBe('default-general');
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 

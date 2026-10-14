@@ -32,7 +32,7 @@ describe('Dramatron anti-truncation and empty-response structure', () => {
     expect(normalizePromptTemplates(original).general).toEqual(defaultPromptTemplates().general); expect(normalizePromptTemplates(original).presets.writing).toEqual(defaultPromptTemplates().presets.writing); expect(original).toEqual(before);
     original.general!.presets[0].blocks[0].content += '\n自定义通用规则';
     original.presets.writing[0].blocks[0].content += '\n自定义写作规则';
-    expect(normalizePromptTemplates(original).general).toEqual(original.general); expect(normalizePromptTemplates(original).presets.writing).toEqual(original.presets.writing);
+    expect(normalizePromptTemplates(original).general!.presets[0]).toEqual(original.general!.presets[0]); expect(normalizePromptTemplates(original).presets.writing).toEqual(original.presets.writing);
     const settings = defaultPromptTemplates(); settings.general!.presets[0].blocks[0].content = '自定义填充 {{not_a_variable}}';
     expect(compileTaskPrompt(settings, 'writing', variables).messages[0].content).toBe('自定义填充 {{not_a_variable}}');
     expect(normalizePromptTemplates(normalizePromptTemplates(settings))).toEqual(settings);

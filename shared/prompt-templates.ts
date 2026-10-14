@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Mode, PromptBlock, PromptMessage, PromptPreset, PromptScope, PromptTask, PromptTemplateSettings } from './types.js';
+import type { Mode, PromptBlock, PromptMessage, PromptPreset, PromptScope, PromptTask, PromptTemplateSettings, PromptTextFilter, WritingOutputMode } from './types.js';
 import { legacyPromptTemplates } from './legacy-prompt-templates.js';
 import { previousPromptTemplates } from './previous-prompt-templates.js';
 import { previousGeneralPromptTemplates } from './previous-general-prompt-templates.js';
@@ -7,6 +7,7 @@ import { previousDramatronPromptTemplates } from './previous-dramatron-prompt-te
 import { dramatronGeneralBlocks, dramatronTailBlocks } from './dramatron-prompts.js';
 import { runtimePromptBlocks, type PromptRuntime } from './prompt-runtime.js';
 import { extractionOutputFormat } from './extraction-output.js';
+import { v08GeneralPreset, V08_PRESET_ID } from './v08-prompts.js';
 
 export const ENTITY_RESOLUTION_INSTRUCTION = '同一个人物或地点只输出一个实体。先对照已有名称与别名，姓名、本名、旧名以及原文明确指向同一人的描述性称呼应统一到同一实体，优先用本名作为 name，其他称呼写入 aliases；比如原文确认“戴兜帽的旅人”名叫“林舟”，应以“林舟”为 name，把“戴兜帽的旅人”写入 aliases。描述性称呼在后续片段获得本名时，也要保留之前的称呼以便归并。只有原文足以确认同一身份时才建立别名，不凭外貌、职业相似或名字包含关系合并；“他”“少女”“队长”等无法唯一指向的泛称不要作为别名。别名对照仅辅助统一身份，不是事实证据，也不能据此提前揭晓身份秘密。';
 export const CHARACTER_PROFILE_INSTRUCTION = '人物资料要回答“这个人是谁、有什么特点和能力、目前处于什么状态”，不能写成逐段行动流水账。正文明确披露的姓名、性别、种族、血统、年龄、外貌、身份、所属势力、能力、性格、目标、弱点、当前状态与所在地分别使用稳定属性 name、gender、race、bloodline、age、appearance、identity、affiliation、ability、personality、goal、weakness、status、location；缺失资料不补造，也不按称呼、外貌推测性别、种族或血统。可并存的能力、性格等使用稳定子属性，例如 ability:archery、ability:fire_magic、personality:courage，同一项后续变化继续使用相同子属性。只有改变身份、能力、关系、命运或后续剧情的重大/关键经历才写为 attribute=major_event 的 past 事实；吃饭、走路、递物、普通对话等日常经过只保存在 summary，不放入人物 facts 或 description。description 是已明确资料的简洁介绍，不能塞进普通经历或尚未发生的规划。nameStatus=placeholder 表示正文未披露姓名、暂用唯一称呼定位；得知明确本名后使用本名作为 name、nameStatus=confirmed，并在 aliases 中保留正文明确对应的旧称呼，不能把本名仅写进 aliases。isMain 仅在作者指定或正文明确呈现持续核心视角/主线地位时设为 true；仅出现一次、参与一段对话或与主角相识不等于主要角色；不能确定时省略该字段。每条资料仍必须引用当前正文的精确证据，已有名称索引只辅助身份对照。';
@@ -120,12 +121,12 @@ const extractionAcknowledgment = '已收到索引。新资料只依据接下来�
 /** Each call returns independent objects so editing or reset cannot mutate shared defaults. */
 export function defaultPromptTemplates(): PromptTemplateSettings {
   return {
-    general: { selected: 'default-general', presets: [{ id: 'default-general', name: 'Dramatron 防截断与防空回', textFilter: 'dramatron', blocks: [
+    general: { selected: 'default-general', catalogVersion: 1, presets: [{ id: 'default-general', name: 'Dramatron 防截断与防空回', textFilter: 'dramatron', blocks: [
       ...dramatronGeneralBlocks().slice(0, 2),
       block('snow-ack', '前置文本结束', 'assistant', '前置填充文本已结束，以下按新任务的资料与要求执行。'),
       { ...block('task-slot', '插入当前任务提示词', 'system', ''), slot: 'task' },
       ...dramatronTailBlocks(),
-    ] }] },
+    ] }, v08GeneralPreset()] },
     presets: {
       writing: [{ id: 'default-writing', name: '默认正文写作', blocks: [
         block('writing-rules', '文笔、逻辑与文风', 'system', WRITING_SYSTEM),
@@ -154,20 +155,20 @@ const promptBlockSchema = z.object({
   content: z.string().max(100000, '单个提示词块最多 100000 字符'),
   modes: z.array(z.enum(writingModes)).max(5).refine(values => new Set(values).size === values.length, '创作模式不能重复').optional(),
   tasks: z.array(z.enum(['writing', 'extraction', 'compression', 'planning'])).min(1).max(4).refine(values => new Set(values).size === values.length, '适用任务不能重复').optional(),
-  feature: z.enum(['snow', 'cot-three', 'cot-single', 'defense-normal', 'defense-laoda']).optional(),
+  feature: z.enum(['snow', 'literal', 'cot-three', 'cot-single', 'defense-normal', 'defense-laoda', 'defense-v08']).optional(),
   slot: z.literal('task').optional(),
 }).strict();
 const promptPresetSchema = z.object({
   id: identifier, name: nonEmptyName, blocks: z.array(promptBlockSchema).min(1).max(80, '每个预设最多 80 个提示词块'),
   variables: z.record(z.string().max(100).regex(/^[a-zA-Z][a-zA-Z0-9_]*$/, '变量名须以字母开头，仅包含字母、数字或下划线'), z.string().max(100000)).optional(),
   useGeneral: z.boolean().optional(), generalPresetId: identifier.optional(), writingOutputMode: z.enum(['text', 'tool']).optional(),
-  textFilter: z.literal('dramatron').optional(),
+  toolTransport: z.boolean().optional(), textFilter: z.enum(['dramatron', 'v08']).optional(),
 }).strict();
 const presetList = z.array(promptPresetSchema).min(1, '每个任务至少保留一个预设').max(20, '每个任务最多 20 个预设');
 const templateShape = z.object({
   presets: z.object({ writing: presetList, planning: presetList.optional(), extraction: presetList, compression: presetList }).strict(),
   selected: z.object({ writing: identifier, planning: identifier.optional(), extraction: identifier, compression: identifier }).strict(),
-  general: z.object({ presets: presetList, selected: identifier }).strict().optional(),
+  general: z.object({ presets: presetList, selected: identifier, catalogVersion: z.number().int().min(0).max(1).optional() }).strict().optional(),
 }).strict();
 const builtInKeys = new Set([...promptTasks.flatMap(task => promptVariables[task].map(variable => variable.key)), 'currentChapterPlan']);
 const variablePattern = /\{\{([^{}]*)\}\}/g;
@@ -195,6 +196,7 @@ export const promptTemplateSchema = templateShape.superRefine((settings, context
       }
       const validVariables = new Set([...promptVariables[task].map(variable => variable.key), ...Object.keys(customVariables), ...(task === 'writing' ? ['currentChapterPlan'] : [])]);
       if (task !== 'writing' && preset.writingOutputMode) addIssue([...path, 'writingOutputMode'], '正文输出通道只适用于正文写作');
+      if (task !== 'general' && preset.toolTransport !== undefined) addIssue([...path, 'toolTransport'], '通用工具防截断开关只适用于通用预设');
       if (task === 'general' && preset.useGeneral !== undefined) addIssue([...path, 'useGeneral'], '通用预设不能再次嵌套通用预设');
       if (preset.generalPresetId && (task === 'general' || !settings.general?.presets.some(value => value.id === preset.generalPresetId))) addIssue([...path, 'generalPresetId'], '引用的通用预设不存在');
       const blockIds = new Set<string>();
@@ -205,7 +207,7 @@ export const promptTemplateSchema = templateShape.superRefine((settings, context
         if (task !== 'writing' && value.modes?.length) addIssue([...blockPath, 'modes'], '创作模式条件只适用于正文写作任务');
         if (task !== 'general' && value.tasks?.length) addIssue([...blockPath, 'tasks'], '适用任务条件只适用于通用预设');
         if (value.slot && (task !== 'general' || value.content.trim())) addIssue([...blockPath, 'slot'], '任务插槽只能位于通用预设，且不能包含文本');
-        for (const match of value.feature === 'snow' ? [] : value.content.matchAll(variablePattern)) {
+        for (const match of ['snow', 'literal'].includes(value.feature ?? '') ? [] : value.content.matchAll(variablePattern)) {
           const key = match[1].trim();
           if (!validVariables.has(key)) addIssue([...blockPath, 'content'], `此任务没有变量 {{${key}}}`);
         }
@@ -267,6 +269,15 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
     updated.blocks.forEach(block => { const prior = preset.blocks.find(value => value.id === block.id); if (prior) block.enabled = prior.enabled; });
     return { ...updated, textFilter: old.textFilter === undefined ? updated.textFilter : preset.textFilter };
   });
+  // Add the new built-in once, without selecting it or replacing author edits.
+  // Keep a full catalog intact and retry when the author frees a slot.
+  if (!settings.general!.catalogVersion) {
+    if (!settings.general!.presets.some(preset => preset.id === V08_PRESET_ID) && settings.general!.presets.length < 20) {
+      const candidate = { ...settings, general: { ...settings.general!, presets: [...settings.general!.presets, v08GeneralPreset()] } };
+      if (promptTemplateSchema.safeParse(candidate).success) settings.general = candidate.general;
+    }
+    if (settings.general!.presets.some(preset => preset.id === V08_PRESET_ID)) settings.general!.catalogVersion = 1;
+  }
   const oldExtraction = previousPromptTemplates.presets.extraction[0];
   const acknowledged: PromptPreset = { ...oldExtraction, blocks: [...oldExtraction.blocks.slice(0, 2), block('context-ack', '证据边界确认', 'assistant', extractionAcknowledgment), ...oldExtraction.blocks.slice(2)] };
   for (const task of promptTasks) settings.presets[task] = settings.presets[task].map(preset => {
@@ -297,17 +308,21 @@ export function promptPresetVariables(task: PromptScope, preset?: PromptPreset):
 }
 
 /** Replacement is one pass: braces inside story data or custom values remain literal. */
-export function compilePrompt(config: PromptTemplateSettings | undefined, task: PromptTask, variables: Record<string, string | number | undefined>, runtime: PromptRuntime = {}): { system: string; prompt: string; messages: PromptMessage[]; textFilter?: 'dramatron' } {
+export function compilePrompt(config: PromptTemplateSettings | undefined, task: PromptTask, variables: Record<string, string | number | undefined>, runtime: PromptRuntime = {}): { system: string; prompt: string; messages: PromptMessage[]; textFilter?: PromptTextFilter; writingOutputMode?: WritingOutputMode } {
   if (!promptTasks.includes(task)) throw new Error('剧情规划提示词已移除。');
   const settings = normalizePromptTemplates(config);
   const preset = activePromptPreset(settings, task);
   const general = settings.general!.presets.find(value => value.id === preset.generalPresetId) ?? activePromptPreset(settings, 'general');
+  const structured = task === 'extraction' && ['structured', 'tool'].includes(runtime.extractionOutputMode ?? '');
+  const inheritedTransport = preset.useGeneral !== false && general.toolTransport === true;
+  const writingOutputMode = task === 'writing' ? preset.writingOutputMode ?? (inheritedTransport ? 'tool' : 'text') : inheritedTransport && !structured ? 'tool' : undefined;
+  const textFilter = preset.textFilter ?? (preset.useGeneral === false ? undefined : general.textFilter);
   const expand = (value: PromptBlock, owner: PromptPreset): PromptMessage => {
     const values: Record<string, string | number | undefined> = { ...owner.variables, ...variables, storyMaterials: variables.storyMaterials ?? variables.context, chapterNumber: task === 'writing' ? '待写章节' : '当前章节', chapterIndex: '', chapterCount: '', endChapter: '' };
     const content = value.content.replace(/第\s*\{\{\s*chapterNumber\s*\}\}\s*章/g, '{{chapterNumber}}');
-    return { role: value.role, content: value.feature === 'snow' ? value.content : content.replace(variablePattern, (_match, key: string) => Object.hasOwn(values, key.trim()) ? String(values[key.trim()] ?? '') : '') };
+    return { role: value.role, content: ['snow', 'literal'].includes(value.feature ?? '') ? value.content : content.replace(variablePattern, (_match, key: string) => Object.hasOwn(values, key.trim()) ? String(values[key.trim()] ?? '') : '') };
   };
-  const nativeSubmission = task === 'writing' && preset.writingOutputMode === 'tool' || task === 'extraction' && ['structured', 'tool'].includes(runtime.extractionOutputMode ?? '');
+  const nativeSubmission = writingOutputMode === 'tool' || structured;
   const applies = (value: PromptBlock) => value.enabled && (!value.tasks?.length || value.tasks.includes(task)) && (!value.feature?.startsWith('cot-') || task === 'writing') && (!value.feature?.startsWith('defense-') || !nativeSubmission);
   const taskMessages = preset.blocks.filter(value => applies(value) && (task !== 'writing' || appliesToMode(value, presetMode(preset, String(variables.mode ?? 'original')))))
     .map(value => expand(value, preset));
@@ -319,14 +334,14 @@ export function compilePrompt(config: PromptTemplateSettings | undefined, task: 
     system: messages.filter(message => message.role === 'system').map(message => message.content).join('\n'),
     prompt: messages.filter(message => message.role === 'user').map(message => message.content).join('\n'),
     messages,
-    ...(preset.textFilter ?? (preset.useGeneral === false ? undefined : general.textFilter) ? { textFilter: 'dramatron' as const } : {}),
+    ...(textFilter ? { textFilter } : {}), ...(writingOutputMode ? { writingOutputMode } : {}),
   };
 }
 
 /** Shared template/runtime assembly; the wire preview also includes provider-side chapter reminders. */
 export function compileTaskPrompt(config: PromptTemplateSettings | undefined, task: PromptTask, variables: Record<string, string | number | undefined>, runtime: PromptRuntime = {}) {
   const compiled = compilePrompt(config, task, variables, runtime);
-  const writingOutputMode = task === 'writing' ? activePromptPreset(normalizePromptTemplates(config), task).writingOutputMode ?? 'text' : undefined;
+  const writingOutputMode = compiled.writingOutputMode;
   const runtimeBlocks = runtimePromptBlocks(task, variables, { ...runtime, writingOutputMode });
   const messages: PromptMessage[] = [];
   for (const message of [...compiled.messages, ...runtimeBlocks.filter(block => block.role === 'system'), ...runtimeBlocks.filter(block => block.role !== 'system')]) {

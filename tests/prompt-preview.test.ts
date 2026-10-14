@@ -8,6 +8,7 @@ import { normalizeExtraction, splitExtractionBlocks } from '../server/extraction
 import { structuredRequest } from '../server/providers.js';
 import { STRUCTURED_OUTPUT_INSTRUCTION, type PromptPreviewInput, type PromptPreviewResult } from '../shared/prompt-runtime.js';
 import type { PromptTask, ProviderProtocol } from '../shared/types.js';
+import { V08_PRESET_ID } from '../shared/v08-prompts.js';
 
 let ctx: Awaited<ReturnType<typeof buildApp>>;
 let cookies: { session: string };
@@ -21,6 +22,16 @@ const variables = { context: '示例故事资料', mode: 'original', instruction
 const input = (task: PromptTask, protocol: ProviderProtocol): PromptPreviewInput => ({ task, protocol, templates: defaultPromptTemplates(), variables, runtime: {} });
 
 describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s final prompt preview', protocol => {
+  it.each<PromptTask>(['writing', 'extraction', 'compression'])('previews the v0.8 framework and its actual output transport for %s without saving', async task => {
+    const draft = input(task, protocol); draft.templates.general!.selected = V08_PRESET_ID;
+    const before = (await ctx.app.inject({ url: '/api/settings', cookies })).body;
+    const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: draft });
+    expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
+    expect(preview.tools).toHaveLength(1); expect(preview.tools[0].name).toBe('emit_writing_response');
+    expect(preview.body).toContain('FICTIONAL_TEXT_COMPLETION'); expect(preview.body).not.toContain('LATEST_USER_INPUT');
+    expect(preview.runtimeBlocks.some(block => block.name === (task === 'writing' ? '正文工具通道规则' : '通用工具通道规则'))).toBe(true);
+    expect((await ctx.app.inject({ url: '/api/settings', cookies })).body).toBe(before);
+  });
   it.each<PromptTask>(['writing', 'extraction', 'compression'])('shows all messages and native payload for %s, with no provider-added JSON instruction', async task => {
     const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: input(task, protocol) });
     expect(response.statusCode).toBe(200);

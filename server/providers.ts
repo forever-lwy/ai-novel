@@ -403,20 +403,20 @@ function inspectBody(config: ProviderConfig, response: Response | undefined, bod
 
 /** A single billable request. Failures never trigger automatic retries. */
 async function sendModelRequest(config: ProviderConfig, request: ModelRequest, wire: ReturnType<typeof requestBody>): Promise<{ data: JsonObject; result: ModelResult }> {
-  const clean = (text: string) => request.textFilter === 'dramatron' ? cleanDramatronText(text) : text;
+  const clean = (text: string) => request.textFilter ? cleanDramatronText(text, request.textFilter) : text;
   let outputCallbackFailed = false;
   const publishOutput = (publish: () => void) => {
     if (outputCallbackFailed || request.signal?.aborted) return;
     try { publish(); } catch (error) { outputCallbackFailed = true; throw error; }
   };
-  const textFilter = request.textFilter === 'dramatron' ? createDramatronTextFilter({
+  const textFilter = request.textFilter ? createDramatronTextFilter({
     // Flush each prose segment before the following auxiliary thought so its
     // author-side position is correct even when both arrive in one frame.
     onText: text => publishOutput(() => request.onTextDelta?.(text)),
     onThinking: event => publishOutput(() => {
       request.onActivity?.('text' in event ? { type: 'thinking', id: event.id, text: event.text, thinkingSource: 'preset' } : { type: 'thinking_done', id: event.id });
     }),
-  }) : undefined;
+  }, request.textFilter) : undefined;
   const emitText = request.onTextDelta || textFilter && request.onActivity ? (text: string) => {
     if (textFilter) textFilter.feed(text); else request.onTextDelta?.(text);
   } : undefined;
