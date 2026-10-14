@@ -491,10 +491,10 @@
 .chapter-end-actions { display: flex; justify-content: center; margin-top: 24px; }
 .branch-selector > .row.wrap { gap: 10px 15px; }
 
-.branch-selector > .row.between { margin: 0 0 10px; gap: 8px; }
-.branch-current-name { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 12px; color: #36583f; font-size: 12px; }
-.branch-current-name svg { flex: none; margin-top: 2px; }
-.branch-current-name strong { min-width: 0; overflow-wrap: anywhere; line-height: 1.6; }
+.branch-selector { flex-shrink: 0; }
+.branch-current-name { display: flex; align-items: center; gap: 7px; color: #36583f; font-size: 12px; }
+.branch-current-name svg { flex: none; }
+.branch-current-name strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.6; }
 .branch-tree { width: 100%; min-width: 0; }
 .branch-tree ul { list-style: none; padding: 0; margin: 0; }
 .branch-tree .branch-tree-children { margin: 0 0 0 22px; padding: 10px 0 0 16px; border-left: 2px solid #c5d5be; }

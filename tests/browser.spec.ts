@@ -801,7 +801,7 @@ test('早章编辑保留后续章节，章末创建分支，确认删除后返�
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', branchId);
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
-  await expect(page.locator('.branch-selector .branch-tree-node:not(.is-deleted)')).toHaveCount(1);
+  await expect(page.getByLabel('当前故事线', { exact: true })).toContainText(edited.branch.name);
   const after = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json(); expect(after.state).toEqual(edited.state);
   expect((await page.request.get(`/api/branches/${forkId}?view=author`)).status()).toBe(404);
   await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 章节分支维护', exact: true }).click();
