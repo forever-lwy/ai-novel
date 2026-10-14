@@ -48,6 +48,39 @@ describe('story line names and lineage', () => {
     expect(store.listBranches(project.id, true).find(branch => branch.id === child.branch.id)?.name).toBe('已删除路线');
   });
 
+  it('attaches repeated regeneration to the shared source while preserving genuine forks and source history', () => {
+    const { store, project, branchId } = context(); const source = store.state(branchId); const original = store.getBranch(branchId);
+    const a = store.forkForGeneration(branchId, original.revisionId, source.chapters[2].id, '第三章 A');
+    const add = (id: string, title: string) => {
+      const saved = store.saveChapter(id, { baseRevisionId: store.getBranch(id).revisionId, title, text: `${title}的正文。` });
+      return store.applyExtraction(id, saved.branch.revisionId, saved.state.chapters.at(-1)!.id, { summary: title, entities: [], relations: [], foreshadows: [] }, true);
+    };
+    const aThird = add(a.branch.id, '第三章 A');
+    const b = store.forkForGeneration(a.branch.id, aThird.branch.revisionId, aThird.state.chapters[2].id, '第三章 B');
+    expect(b.branch.parentBranchId).toBe(branchId); expect(b.branch.forkChapterId).toBe(source.chapters[1].id);
+    const bThird = add(b.branch.id, '第三章 B');
+    const c = store.forkForGeneration(b.branch.id, bThird.branch.revisionId, bThird.state.chapters[2].id, '第三章 C');
+    expect(c.branch.parentBranchId).toBe(branchId);
+    const aFourth = add(a.branch.id, '第四章 A');
+    const later = store.forkForGeneration(a.branch.id, aFourth.branch.revisionId, aFourth.state.chapters[3].id, '第四章另一版');
+    expect(later.branch.parentBranchId).toBe(a.branch.id); expect(later.branch.forkChapterId).toBe(aThird.state.chapters[2].id);
+    const earlier = store.forkForGeneration(a.branch.id, aFourth.branch.revisionId, source.chapters[0].id, '第一章另一版');
+    expect(earlier.branch.parentBranchId).toBe(branchId); expect(earlier.state.chapters).toEqual([]);
+    expect(store.state(branchId)).toEqual(source); expect(store.getBranch(branchId)).toEqual(original);
+    const restored = store.restoreProject(store.exportProject(project.id));
+    expect(store.listBranches(restored.id).filter(branch => ['第三章 A', '第三章 B', '第三章 C'].includes(branch.name)).every(branch => branch.parentBranchId === restored.mainBranchId)).toBe(true);
+    expect(store.history(b.branch.id).some(revision => revision.branchId === a.branch.id)).toBe(true);
+  });
+
+  it('retains a branch as the generation source after an inherited chapter is edited on that branch', () => {
+    const { store, branchId } = context(); const current = store.state(branchId);
+    const fork = store.fork(branchId, { baseRevisionId: store.getBranch(branchId).revisionId, chapterId: current.chapters[1].id, name: '手动编辑线' });
+    const edited = store.saveChapter(fork.branch.id, { baseRevisionId: fork.branch.revisionId, chapterId: fork.state.chapters[0].id, title: '修改开篇', text: '本线独有的开篇。' });
+    const alternate = store.forkForGeneration(fork.branch.id, edited.branch.revisionId, edited.state.chapters[1].id, '接续新开篇');
+    expect(alternate.branch.parentBranchId).toBe(fork.branch.id);
+    expect(alternate.state.chapters[0].id).toBe(edited.state.chapters[0].id);
+  });
+
   it('keeps only deleted ancestors needed by living children, records the actual fork boundary, and reads old titles without writes', () => {
     const { store, project, branchId, first } = context(); const root = store.getBranch(branchId);
     const parent = store.fork(branchId, { baseRevisionId: root.revisionId, chapterId: first.state.chapters[0].id, name: '父线' });
@@ -114,6 +147,8 @@ describe('branch naming HTTP contracts', () => {
     expect(detail.statusCode).toBe(200); expect(detail.json().branches.map((branch: { id: string }) => branch.id)).toEqual([branchId, child.branch.id]);
     expect(detail.json().branchTree.map((branch: { id: string }) => branch.id)).toEqual([branchId, parent.branch.id, child.branch.id]);
     expect(detail.json().project.premise).toBe(''); expect(detail.json().branchTree[1]).not.toHaveProperty('state');
+    for (const branch of detail.json().branchTree) for (const chapter of branch.chapters) expect(Object.keys(chapter).sort()).toEqual(['id', 'title']);
+    expect(detail.json().branchTree[0].chapters.map((chapter: { id: string }) => chapter.id)).toEqual(store.state(branchId).chapters.map(chapter => chapter.id));
     expect((await app.inject({ url: `/api/branches/${parent.branch.id}`, cookies: { session } })).statusCode).toBe(404);
     expect((await app.inject({ method: 'PUT', url: `/api/branches/${parent.branch.id}/name?view=author`, cookies: { session }, payload: { baseRevisionId: parent.branch.revisionId, name: '不会恢复' } })).statusCode).toBe(404);
   });

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowLeft, BookOpen, ChevronDown, ChevronRight, Download, Eye, EyeOff, GitBranch, History, List, MapPin, Menu, Pencil, Plus, Save, Search, Settings, Sparkles, Upload, Users, X, Clock3, FileText, RefreshCw, CheckCircle2, ScrollText, Bookmark, ArrowUpRight, Images, ImagePlus, Trash2 } from 'lucide-react';
-import type { Branch, BranchView, Chapter, Citation, Entity, GenerateInput, Job, Mode, Project, Source, WritingActivity, WritingEvent, StoryImage, RpgSetup, RpgCharacter, RpgChoice } from '../shared/types';
+import type { Branch, BranchTreeEntry, BranchView, Chapter, Citation, Entity, GenerateInput, Job, Mode, Project, Source, WritingActivity, WritingEvent, StoryImage, RpgSetup, RpgCharacter, RpgChoice } from '../shared/types';
 import { emptyState } from '../shared/types';
 import { countProseWords } from '../shared/rpg-chapter';
 import { api, ApiError, countText, dateText, modeNames, post, put, streamJob } from './api';
@@ -19,7 +19,7 @@ import { BranchTree } from './BranchTree';
 import { ChapterTitleRepairPanel } from './ChapterTitleRepairPanel';
 import type { ChapterTitlePreview } from '../shared/chapter-titles';
 
-type ProjectDetail = { project: Project; branches: Branch[]; branchTree?: Branch[]; sources: Source[] };
+type ProjectDetail = { project: Project; branches: Branch[]; branchTree: BranchTreeEntry[]; sources: Source[] };
 type Tab = 'text' | 'world' | 'map' | 'planning' | 'images' | 'jobs';
 type Dialog = 'import' | 'generate' | 'regenerate-background' | 'fork' | 'history' | 'search' | 'branches' | null;
 type Generation = { job: Job; text: string; title: string; snapshotLoaded: boolean; chapterId?: string; instruction?: string; connectionError?: string };
@@ -225,9 +225,11 @@ export function Workspace({ projectId, onBack, onSettings, active = true }: { pr
     if (selectLast) { clearWritingProcess(); setGeneration(null); setChapterId(null); const last = next.state.chapters.at(-1); setEditing(false); setDirty(false); if (last) await fetchChapter(last.id, next.branch.id, next.branch.revisionId); else { setChapter(null); setChapterId(null); setDraftTitle(''); setDraftText(''); } }
     return next;
   }
-  async function changeBranch(id: string) {
-    if (id === branchId || !canLeave()) return; clearWritingProcess(); setGeneration(null); setDialog(null); setOutputJob(null); setOutputDirty(false); ++chapterSequence.current; ++searchSequence.current; ++viewSequence.current; current.current = { branchId: id, author, chapterId: null }; setChapterLoading(false); setSearchBusy(false); setSearchResult(null); setDirty(false); setPlanningDirty(false); setEditing(false); setChapter(null); setChapterId(null); setView(null); setBranchId(id); setSidebar(false); setError('');
-    await operate(async () => { const value = await refreshView(id, author); const last = value.state.chapters.at(-1); if (last) await fetchChapter(last.id, id, value.branch.revisionId); });
+  async function changeBranch(id: string, targetChapterId?: string) {
+    if (id === branchId) { if (targetChapterId) { if (await openChapter(targetChapterId)) setDialog(null); } else setDialog(null); return; }
+    if (!canLeave()) return; clearWritingProcess(); setGeneration(null); setDialog(null); setOutputJob(null); setOutputDirty(false); ++chapterSequence.current; ++searchSequence.current; ++viewSequence.current; current.current = { branchId: id, author, chapterId: null }; setChapterLoading(false); setSearchBusy(false); setSearchResult(null); setDirty(false); setPlanningDirty(false); setEditing(false); setChapter(null); setChapterId(null); setView(null); setBranchId(id); setSidebar(false); setError('');
+    if (targetChapterId) setTab('text');
+    await operate(async () => { const value = await refreshView(id, author); const target = value.state.chapters.find(chapter => chapter.id === targetChapterId) || value.state.chapters.at(-1); if (target) await fetchChapter(target.id, id, value.branch.revisionId); });
   }
   async function changeAuthor() {
     if (!canLeave() || !view) return; clearWritingProcess(); setGeneration(null); setDialog(null); setOutputJob(null); setOutputDirty(false); const next = !author; ++searchSequence.current; current.current = { branchId, author: next, chapterId }; jobFingerprint.current = ''; setJobs([]); setSearchResult(null); setSearchBusy(false); setAuthor(next); setDirty(false); setPlanningDirty(false); setEditing(false); if (!next) { setDetail(value => value && ({ ...value, project: { ...value.project, premise: '' } })); if (tab === 'planning') setTab('text'); } setView(null); await operate(async () => { const value = await refreshView(branchId, next); await refreshMetadata(); return value; });
@@ -237,6 +239,7 @@ export function Workspace({ projectId, onBack, onSettings, active = true }: { pr
     if (!view || !canLeave()) return; ++searchSequence.current; setSearchResult(null); setSearchBusy(false); clearWritingProcess(); setGeneration(null); setDirty(false); setPlanningDirty(false); setEditing(false); setTab('text'); setSidebar(false); setHighlight(citation?.paragraph ?? null);
     const text = await fetchChapter(id, branchId, view.branch.revisionId);
     if (text && imageSelection) setHighlight(Math.max(1, proseParagraphs(text.text).filter(part => part.start <= imageSelection.start).length));
+    return text;
   }
   function newChapter() { if (!view || !canLeave()) return; clearWritingProcess(); setGeneration(null); ++chapterSequence.current; setChapterLoading(false); setChapter(null); setChapterId(null); setDraftTitle('新章节'); setDraftText(''); setDraftRevision(view.branch.revisionId); setEditing(true); setDirty(false); setTab('text'); setSidebar(false); setHighlight(null); }
   async function saveChapter() {
@@ -486,7 +489,7 @@ export function Workspace({ projectId, onBack, onSettings, active = true }: { pr
       </main>
     </div>
     {imageError && !imageRequest && !imageDeletion && <div className="workspace-notice"><Notice error={imageError} onClose={() => setImageError('')} /></div>}
-    {dialog === 'branches' && detail && <Modal title="选择故事线 · 分支树" wide closeDisabled={busy} onClose={() => { if (!busy) setDialog(null); }}><div className="form-stack"><p className="hint">沿着连线查看故事的分叉，点击一条故事线即可切换。当前所在分支已标出；已删除的来源只保留连接关系。</p><BranchTree branches={detail.branchTree || detail.branches} mainBranchId={detail.project.mainBranchId} currentBranchId={branchId} disabled={busy} onSelect={id => { if (id === branchId) setDialog(null); else void changeBranch(id); }} /></div></Modal>}
+    {dialog === 'branches' && detail && <Modal title="选择故事线 · 分支树" wide closeDisabled={busy} onClose={() => { if (!busy) setDialog(null); }}><div className="form-stack"><p className="hint">每个节点是一章，共用章节沿同一条线显示。故事线名称在末章下方，点击名称切换故事线，点击章节打开正文；可上下、左右滚动查看。</p><BranchTree branches={detail.branchTree} mainBranchId={detail.project.mainBranchId} currentBranchId={branchId} currentChapterId={chapterId} disabled={busy} onSelect={(id, chapterId) => void changeBranch(id, chapterId)} /></div></Modal>}
     {author && branchRename?.branchId === branchId && <Modal title="重命名故事线" closeDisabled={busy} onClose={() => { if (!busy) setBranchRename(null); }}><form className="form-stack" onSubmit={submitBranchRename}><label>故事线名称<input aria-label="故事线名称" autoFocus required maxLength={200} value={branchRename.name} onChange={event => setBranchRename(value => value && ({ ...value, name: event.target.value }))} /></label><p className="hint">名称用于识别故事线，正文、资料和正在进行的任务继续保留。</p>{error && <Notice error={error} />}<div className="row end wrap"><button type="button" className="button secondary" disabled={busy} onClick={() => setBranchRename(null)}>取消</button><button className="button primary" type="submit" disabled={busy || !branchRename.name.trim()}>保存名称</button></div></form></Modal>}
     {author && branchDeletion?.branchId === branchId && <Modal title="删除分支" closeDisabled={busy} onClose={() => { if (!busy) setBranchDeletion(null); }}><div className="form-stack"><p>删除故事线「{branchDeletion.name}」？</p><p className="hint">删除后从故事线列表移除，并返回主线。主线和其他分支保留；其他故事线依赖的历史、原作参考和图片继续保存。此操作不能通过版本回退恢复，完整备份会保留删除状态。</p>{error && <Notice error={error} />}<div className="row end wrap"><button className="button secondary" disabled={busy} onClick={() => setBranchDeletion(null)}>取消</button><button className="button danger" disabled={busy} onClick={() => void submitBranchDeletion()}>{busy ? '正在删除…' : '确认删除分支'}</button></div></div></Modal>}
     {author && imageRequest?.branchId === branchId && <ImageRequestDialog key={imageRequest.id} target={imageRequest.target} title={imageRequest.title} excerpt={imageRequest.excerpt} reference={images.find(image => image.id === imageRequest.target.referenceImageId)} busy={imageBusy} error={imageError} onClose={() => { setImageRequest(null); setImageError(''); }} onSubmit={submitImage} />}

@@ -123,6 +123,26 @@ describe('streaming prose, detached extraction and regeneration', () => {
     expect(request.prompt).not.toContain('第二章内容'); expect(request.prompt).not.toContain('第一章内容');
   });
 
+  it('generates three alternative sixteenth chapters as siblings without modifying their shared fifteen chapters', async () => {
+    const models = mockModels(); const ctx = harness(models);
+    for (let index = 1; index <= 15; index++) readyChapter(ctx.store, ctx.project.mainBranchId, `第${index}章既有正文。`);
+    const prefix = ctx.store.state(ctx.project.mainBranchId).chapters;
+    const first = start(ctx); expect((await terminal(ctx.engine, first.id)).status).toBe('completed');
+    const firstState = ctx.store.state(first.branchId);
+    const second = start(ctx, { chapterId: firstState.chapters[15].id, regenerate: true, branchName: '第十六章第二版' });
+    expect((await terminal(ctx.engine, second.id)).status).toBe('completed');
+    const secondState = ctx.store.state(second.branchId);
+    const third = ctx.engine.enqueue(second.branchId, 'generate', { baseRevisionId: ctx.store.getBranch(second.branchId).revisionId, mode: 'original', instruction: '再次重新生成', chapterId: secondState.chapters[15].id, regenerate: true, branchName: '第十六章第三版' });
+    expect((await terminal(ctx.engine, third.id)).status).toBe('completed');
+    expect(ctx.store.getBranch(second.branchId).parentBranchId).toBe(ctx.project.mainBranchId);
+    expect(ctx.store.getBranch(third.branchId).parentBranchId).toBe(ctx.project.mainBranchId);
+    const states = [first, second, third].map(job => ctx.store.state(job.branchId));
+    expect(states.every(state => state.chapters.length === 16 && state.chapters.slice(0, 15).every((chapter, index) => chapter.id === prefix[index].id))).toBe(true);
+    expect(new Set(states.map(state => state.chapters[15].id)).size).toBe(3);
+    expect(ctx.store.state(first.branchId)).toEqual(firstState); expect(ctx.store.state(second.branchId)).toEqual(secondState);
+    expect(models.generateText).toHaveBeenCalledTimes(3);
+  });
+
   it('publishes the complete rewritten chapter and shifts fragment activity without post-planning', async () => {
     const prefix = '原文开头🙂\n'; const old = '旧片段'; const suffix = '\n原文结尾。'; const replacement = '新的片段。'; const expected = prefix + replacement + suffix;
     const events: WritingEvent[] = []; let writingId = ''; const config = settings(); config.taskSettings = { extraction: { autoRetry: false, maxRetries: 0, retryDelayMs: 0 }, planning: { enabled: true, mode: 'tool' } };

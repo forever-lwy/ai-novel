@@ -10,7 +10,7 @@ import { rebuildCharacterProfileDescription, normalizeProfileAttribute } from '.
 import { repairLegacyExtractionVisibility } from './legacy-extraction-visibility.js';
 import { clearChapterMaterials, removeEntities } from './chapter-maintenance.js';
 import { ImageStore, imageBackupSchema, imageEntity, imageReferences, validateImageContent } from './image-store.js';
-import { emptyState, type Branch, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState, type WritingActivity, type ModelActivityEvent, type RpgSetup, type StoryReference, type OriginalReferenceData } from '../shared/types.js';
+import { emptyState, type Branch, type BranchTreeEntry, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState, type WritingActivity, type ModelActivityEvent, type RpgSetup, type StoryReference, type OriginalReferenceData } from '../shared/types.js';
 
 export class HttpError extends Error { constructor(message: string, public statusCode = 400) { super(message); } }
 export class OutputValidationError extends HttpError { constructor(public issues: OutputIssue[], message = '模型输出未通过校验，请在作者输出记录中查看具体位置并修正') { super(message, 422); } }
@@ -206,7 +206,7 @@ export class Store {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   listBranches(projectId: string, includeDeleted = false): Branch[] { this.getProject(projectId); return this.db.prepare('SELECT data FROM branches WHERE project_id=? ORDER BY rowid').all(projectId).map(r => parse<Branch>(r.data)).filter(branch => includeDeleted || !branch.deletedAt); }
-  listBranchTree(projectId: string): Branch[] {
+  listBranchTree(projectId: string): BranchTreeEntry[] {
     const branches = this.listBranches(projectId, true); const byId = new Map(branches.map(branch => [branch.id, branch]));
     const included = new Set<string>();
     for (const branch of branches.filter(branch => !branch.deletedAt)) {
@@ -214,9 +214,9 @@ export class Store {
       while (next && !included.has(next.id)) { included.add(next.id); next = next.parentBranchId ? byId.get(next.parentBranchId) : undefined; }
     }
     return branches.filter(branch => included.has(branch.id)).map(branch => {
-      if (branch.forkChapterTitle || !branch.forkChapterId) return branch;
-      const chapter = this.db.prepare('SELECT data FROM chapter_texts WHERE id=?').get(branch.forkChapterId);
-      return { ...branch, forkChapterTitle: chapter ? parse<ChapterRef>(chapter.data).title : undefined };
+      const chapters = this.revisionState(branch.revisionId).chapters.map(({ id, title }) => ({ id, title }));
+      const chapter = !branch.forkChapterTitle && branch.forkChapterId ? this.db.prepare('SELECT data FROM chapter_texts WHERE id=?').get(branch.forkChapterId) : undefined;
+      return { ...branch, forkChapterTitle: branch.forkChapterTitle || (chapter ? parse<ChapterRef>(chapter.data).title : undefined), chapters };
     });
   }
   renameBranch(branchId: string, base: string, name: string): Branch {
@@ -509,7 +509,22 @@ export class Store {
       const authored = current.entities.find(item => item.id === entity.id);
       if (authored?.isMainSource === 'author') { entity.isMain = authored.isMain; entity.isMainSource = 'author'; }
     }
-    return this.createFork(original, state, name ?? `重新生成 · ${current.chapters[index].title}`.slice(0, 200), current.chapters[index - 1]?.id);
+    return this.createFork(original, state, name ?? `重新生成 · ${current.chapters[index].title}`.slice(0, 200), current.chapters[index - 1]?.id, this.generationParent(original, state));
+  }
+  /** Regenerating inherited prose branches from its source, not from a rejected replacement. */
+  private generationParent(original: Branch, state: StoryState): string {
+    let parent = original; const visited = new Set<string>();
+    while (parent.parentBranchId && !visited.has(parent.id)) {
+      visited.add(parent.id);
+      const creation = this.history(parent.id, true).filter(revision => revision.branchId === parent.id).at(-1);
+      if (!creation) break;
+      const inherited = this.revisionState(creation.id).chapters;
+      if (state.chapters.length > inherited.length || !state.chapters.every((chapter, index) => chapter.id === inherited[index]?.id)) break;
+      const source = this.getBranch(parent.parentBranchId, true);
+      if (source.projectId !== original.projectId || visited.has(source.id)) break;
+      parent = source;
+    }
+    return parent.id;
   }
   private cleanBoundary(state: StoryState): StoryState {
     const included = new Set(state.chapters.map(c => c.id));
@@ -545,13 +560,13 @@ export class Store {
     state.outline.fine = [];
     return this.createFork(original, state, name ?? `RPG · ${setup.character.name}`.slice(0, 200), setup.entryChapterId ?? state.chapters.at(-1)?.id);
   }
-  private createFork(original: Branch, state: StoryState, name: string, forkChapterId?: string): BranchView {
+  private createFork(original: Branch, state: StoryState, name: string, forkChapterId?: string, parentBranchId = original.id): BranchView {
     state.sourceReference ??= clone(this.state(original.id).sourceReference ?? this.captureSourceReference(original));
     const trimmed = name.trim(); if (!trimmed || trimmed.length > 200) throw new HttpError('故事线名称须为 1 至 200 个字符');
     const forkChapterTitle = forkChapterId ? this.state(original.id).chapters.find(chapter => chapter.id === forkChapterId)?.title : '故事开头';
-    const branch: Branch = { id: id(), projectId: original.projectId, name: trimmed, revisionId: '', parentBranchId: original.id, forkChapterId, forkChapterTitle, createdAt: now() };
+    const branch: Branch = { id: id(), projectId: original.projectId, name: trimmed, revisionId: '', parentBranchId, forkChapterId, forkChapterTitle, createdAt: now() };
     // Link to the actual boundary revision so historical edits on a fork can find older snapshots.
-    const boundary = this.history(original.id).find(r => r.chapterCount === state.chapters.length && (!state.chapters.length || this.revisionState(r.id).chapters.at(-1)?.id === state.chapters.at(-1)?.id));
+    const boundary = this.history(original.id).find(r => r.chapterCount === state.chapters.length && this.revisionState(r.id).chapters.every((chapter, index) => chapter.id === state.chapters[index]?.id));
     branch.revisionId = this.insertRevision(branch, state, `创建故事线：${branch.name}`, boundary?.id).id;
     this.db.prepare('INSERT INTO branches VALUES(?,?,?)').run(branch.id, branch.projectId, JSON.stringify(branch)); return this.view(branch.id, true);
   }

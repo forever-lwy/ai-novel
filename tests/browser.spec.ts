@@ -1510,8 +1510,11 @@ test('故事线创建命名、后续重命名和分支树在桌面与手机可�
   await page.getByRole('button', { name: '选择故事线', exact: true }).click();
   modal = page.getByRole('dialog', { name: '选择故事线 · 分支树', exact: true });
   const parent = modal.getByRole('button', { name: '切换到故事线 河岸路线', exact: true });
-  await expect(parent.locator('..').locator('.branch-tree-children').getByRole('button', { name: '切换到故事线 绕行路线·后续改名', exact: true })).toBeVisible();
-  await expect(parent).toContainText(root.state.chapters[0].title); await expect(parent).toContainText('来源：原作路线');
+  await expect(parent.locator('..').getByRole('button', { name: '切换到故事线 绕行路线·后续改名', exact: true })).toBeVisible();
+  await expect(modal.locator('.branch-tree-chapter')).toHaveCount(2);
+  await expect(modal.locator(`.branch-tree-chapter[data-chapter-id="${root.state.chapters[0].id}"]`)).toHaveCount(1);
+  const chapterBox = await modal.locator(`.branch-tree-chapter[data-chapter-id="${root.state.chapters[0].id}"]`).boundingBox();
+  const nameBox = await parent.boundingBox(); expect(nameBox!.y).toBeGreaterThan(chapterBox!.y + chapterBox!.height);
   await expect(modal.locator(`button[data-branch-id="${rootId}"]`)).toHaveAttribute('aria-pressed', 'true');
   await page.screenshot({ path: testInfo.outputPath('branch-tree-desktop.png'), fullPage: true, animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1531,6 +1534,88 @@ test('故事线创建命名、后续重命名和分支树在桌面与手机可�
   await expect(modal.getByRole('button', { name: '切换到故事线 绕行路线·后续改名', exact: true })).toBeEnabled();
   await modal.locator(`button[data-branch-id="${rootId}"]`).click();
   await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', rootId);
+});
+
+test('第十六章反复生成保持同级，章节节点和叶端名称在桌面与手机可选择', async ({ page }, testInfo) => {
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-chapter-tree-browser-'))); let backup: Buffer;
+  try {
+    const project = store.createProject({ title: 'E2E 章节节点分支树' });
+    for (let index = 1; index <= 16; index++) {
+      const saved = store.saveChapter(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, title: `第${index}章`, text: `林舟在白石城记录第${index}段中性经历。` });
+      store.applyExtraction(project.mainBranchId, saved.branch.revisionId, saved.state.chapters.at(-1)!.id, { summary: '记录已有经历。', entities: [], relations: [], foreshadows: [] }, true);
+    }
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: store.exportProject(project.id), sources: [] }));
+  } finally { store.close(); }
+  const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'chapter-tree.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(restored.ok(), await restored.text()).toBeTruthy(); const project = await restored.json(); const mainId = project.mainBranchId;
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  const versions: { branchId: string; chapterId: string }[] = [];
+  const original = await (await page.request.get(`/api/branches/${mainId}?view=author`)).json();
+  versions.push({ branchId: mainId, chapterId: original.state.chapters[15].id });
+  const names = ['第十六章第二版', `第十六章第三版${'长名称'.repeat(40)}`];
+  for (const [index, name] of names.entries()) {
+    await page.getByRole('button', { name: '重新生成', exact: true }).click();
+    const modal = page.getByRole('dialog'); await modal.getByLabel('新故事线名称', { exact: true }).fill(name);
+    await modal.getByLabel('这一次，你想写什么？', { exact: true }).fill('让林舟继续调查白石城。');
+    await modal.getByRole('button', { name: '开始生成', exact: true }).click();
+    await completedJobs(page, (index + 1) * 2); await tab(page, '正文');
+    await page.locator('.chapter-list .chapter-item').last().click();
+    const branchId = await currentBranchId(page); const current = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    expect(current.branch.parentBranchId).toBe(mainId); expect(current.state.chapters).toHaveLength(16);
+    expect(current.state.chapters.slice(0, 15).map((chapter: { id: string }) => chapter.id)).toEqual(original.state.chapters.slice(0, 15).map((chapter: { id: string }) => chapter.id));
+    versions.push({ branchId, chapterId: current.state.chapters[15].id });
+  }
+  await page.getByRole('button', { name: '选择故事线', exact: true }).click();
+  let modal = page.getByRole('dialog', { name: '选择故事线 · 分支树', exact: true });
+  await expect(modal.locator('.branch-tree-chapter')).toHaveCount(18);
+  const currentName = modal.locator(`button[data-branch-id="${versions[2].branchId}"]`);
+  await expect(currentName).toHaveAttribute('title', names[1]);
+  await expect.poll(async () => {
+    const treeBox = await modal.locator('.branch-tree').boundingBox(); const currentBox = await currentName.boundingBox();
+    return !!treeBox && !!currentBox && currentBox.y >= treeBox.y && currentBox.y + currentBox.height <= treeBox.y + treeBox.height;
+  }).toBe(true);
+  const previous = modal.locator(`.branch-tree-chapter[data-chapter-id="${original.state.chapters[14].id}"]`);
+  const parentNode = await previous.getAttribute('data-tree-node-id'); const chapterBoxes = [];
+  for (const version of versions) {
+    const node = modal.locator(`.branch-tree-chapter[data-chapter-id="${version.chapterId}"]`);
+    await expect(node).toHaveAttribute('data-parent-node-id', parentNode!);
+    const box = await node.boundingBox(); const labelBox = await modal.locator(`button[data-branch-id="${version.branchId}"]`).boundingBox();
+    expect(labelBox!.y).toBeGreaterThan(box!.y + box!.height); expect(labelBox!.width).toBeLessThanOrEqual(box!.width); chapterBoxes.push(box!);
+  }
+  expect(new Set(chapterBoxes.map(box => box.y)).size).toBe(1);
+  await page.screenshot({ path: testInfo.outputPath('chapter-tree-desktop.png'), fullPage: true, animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await modal.locator(`button[data-branch-id="${versions[2].branchId}"]`).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('chapter-tree-mobile.png'), fullPage: true, animations: 'disabled' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+  expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+  expect(await modal.locator('.branch-tree').evaluate(element => element.scrollWidth > element.clientWidth)).toBeTruthy();
+  await modal.locator(`.branch-tree-chapter[data-chapter-id="${versions[0].chapterId}"]`).click();
+  await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', mainId);
+  await expect(page.locator('.manuscript h1')).toHaveText('第16章');
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  const draft = '尚未保存的中性章节草稿。'; await page.getByLabel('章节正文', { exact: true }).fill(draft);
+  await page.getByRole('button', { name: '选择故事线', exact: true }).click();
+  modal = page.getByRole('dialog', { name: '选择故事线 · 分支树', exact: true });
+  let confirmations = 0;
+  const rejectLeave = async (dialog: import('@playwright/test').Dialog) => { confirmations++; await dialog.dismiss(); };
+  page.on('dialog', rejectLeave);
+  await modal.locator(`.branch-tree-chapter[data-chapter-id="${original.state.chapters[14].id}"]`).click();
+  await expect(page.getByLabel('章节正文', { exact: true })).toHaveValue(draft); await expect(modal).toBeVisible();
+  page.off('dialog', rejectLeave); expect(confirmations).toBe(1);
+  const acceptLeave = async (dialog: import('@playwright/test').Dialog) => { confirmations++; await dialog.accept(); };
+  page.on('dialog', acceptLeave);
+  await modal.locator(`.branch-tree-chapter[data-chapter-id="${original.state.chapters[14].id}"]`).click();
+  await expect(modal).toHaveCount(0); await expect(page.locator('.manuscript h1')).toHaveText('第15章');
+  page.off('dialog', acceptLeave); expect(confirmations).toBe(2);
+  await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
+  await page.getByRole('button', { name: '选择故事线', exact: true }).click();
+  modal = page.getByRole('dialog', { name: '选择故事线 · 分支树', exact: true });
+  await modal.locator(`.branch-tree-chapter[data-chapter-id="${original.state.chapters[14].id}"]`).click();
+  await expect(page.locator('.manuscript h1')).toHaveText('第15章');
+  await expect(page.locator('.context-note')).toHaveText('截至《第15章》的资料');
+  await chooseBranch(page, versions[2].branchId); await expect(page.locator('.manuscript h1')).toHaveText('第16章');
 });
 
 test('预设和提示词块创建复制前可命名、可取消、后续改名及保存恢复', async ({ page }, testInfo) => {

@@ -22,6 +22,8 @@ export interface StoryState { chapters: ChapterRef[]; entities: Entity[]; relati
 export interface OriginalReferenceData { reference: StoryReference; state: StoryState; chapters: Chapter[]; sources: { sourceId: string; filename: string; chapters: { title: string; text: string }[] }[] }
 export interface Project { id: string; title: string; premise: string; mode: Mode; createdAt: string; updatedAt: string; mainBranchId: string }
 export interface Branch { id: string; projectId: string; name: string; revisionId: string; parentBranchId?: string; forkChapterId?: string; forkChapterTitle?: string; createdAt: string; deletedAt?: string }
+/** Tree projection contains chapter headings only, never story materials or prose. */
+export interface BranchTreeEntry extends Branch { chapters: Pick<ChapterRef, 'id' | 'title'>[] }
 export interface Revision { id: string; branchId: string; parentId?: string; label: string; createdAt: string; chapterCount: number }
 export interface BranchView { branch: Branch; state: StoryState; revisions: Revision[]; /** Reader materials are scoped to this chapter; the chapter directory remains complete. */ readingChapterId?: string }
 export interface Source { id: string; projectId: string; filename: string; format: 'txt' | 'epub'; chapterCount: number; createdAt: string; confirmed: boolean }
