@@ -55,6 +55,26 @@ function TaskNumber({ label, value, max, step = 1, disabled, onChange }: { label
   return <label>{label}<input aria-label={label} type="number" required min={0} max={max} step={step} disabled={disabled} value={text} onChange={event => { setText(event.target.value); if (event.target.value !== '' && event.target.validity.valid) onChange(Number(event.target.value)); }} /></label>;
 }
 
+function UpstreamModelSelect({ label, model, list, onChange }: { label: string; model: string; list?: ModelList; onChange: (model: string) => void }) {
+  const [search, setSearch] = useState('');
+  const query = search.trim().toLowerCase();
+  const models = list?.models || [];
+  const matches = query ? models.filter(value => value.id.toLowerCase().includes(query) || value.name?.toLowerCase().includes(query)) : models;
+  const selected = models.find(value => value.id === model);
+  const selectedOutsideSearch = selected && !matches.some(value => value.id === model);
+  const displayName = (value: ProviderModel) => value.name && value.name !== value.id ? `${value.name} · ${value.id}` : value.id;
+  const feedbackId = `${label}-model-search-results`;
+  return <>
+    <label>搜索上游模型<input type="search" aria-label={`${label}搜索模型`} aria-describedby={feedbackId} value={search} disabled={list?.loading || !models.length} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') event.preventDefault(); }} placeholder="输入模型名称或 ID，不区分大小写" /></label>
+    <label>上游模型<select aria-label={`${label}上游模型`} aria-describedby={feedbackId} value={selected ? model : ''} disabled={list?.loading || !matches.length} onChange={event => onChange(event.target.value)}>
+      <option value="">{list?.loading ? '正在获取模型…' : matches.length ? '选择上游模型' : models.length ? '没有匹配的模型' : '暂无可选模型'}</option>
+      {selectedOutsideSearch && <option value={selected.id} disabled>当前选择：{displayName(selected)}（未匹配搜索）</option>}
+      {matches.map(value => <option key={value.id} value={value.id}>{displayName(value)}</option>)}
+    </select></label>
+    <p id={feedbackId} className="hint" aria-live="polite" hidden={!query || !models.length}>{matches.length ? `匹配 ${matches.length} / ${models.length} 个模型。` : '没有匹配的模型，请更换关键词或清空搜索；也可以直接填写模型名称。'}</p>
+  </>;
+}
+
 export function SettingsPage({ onBack }: { onBack: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null); const [error, setError] = useState(''); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false);
   const [section, setSection] = useState<SettingsSection>('providers');
@@ -249,7 +269,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
         {role.role === 'planning' && <p className="hint">生成已发生剧情的压缩摘要候选，也用于未单独配置模型时的生图提示词优化。</p>}
         <label>供应商<select aria-label={`${role.label}供应商`} value={settings[role.providerKey]} onChange={e => updateRole(role, e.target.value)}><option value="">暂不设置</option>{settings.providers.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
         {provider && <>
-          <label>上游模型<select aria-label={`${role.label}上游模型`} value={list?.models.some(value => value.id === model) ? model : ''} disabled={list?.loading || !list?.models.length} onChange={e => updateModel(role, e.target.value)}><option value="">{list?.loading ? '正在获取模型…' : list?.models.length ? '选择上游模型' : '暂无可选模型'}</option>{list?.models.map(value => <option key={value.id} value={value.id}>{value.name && value.name !== value.id ? `${value.name} · ${value.id}` : value.id}</option>)}</select></label>
+          <UpstreamModelSelect key={connectionSignature(provider)} label={role.label} model={model} list={list} onChange={value => updateModel(role, value)} />
           <label>模型名称（可自定义）<input aria-label={`${role.label}模型名称`} value={model} onChange={e => updateModel(role, e.target.value)} placeholder="选择上方模型，或输入服务商提供的模型 ID" /></label>
           <div className="model-list-feedback"><span className="hint">{list?.loading ? '正在从供应商获取模型列表…' : list?.models.length ? `已获取 ${list.models.length} 个模型；也可以直接填写自定义模型名称。` : '可直接填写自定义模型名称。'}</span><button type="button" className="text-button" aria-label={`${role.label}刷新模型列表`} disabled={busy || list?.loading} onClick={() => loadModels(provider, true)}><RefreshCw size={13} />刷新列表</button></div>
           {list?.error && <p className="notice error model-list-error">获取模型列表失败：{list.error}</p>}

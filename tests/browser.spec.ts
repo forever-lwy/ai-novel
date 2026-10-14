@@ -114,6 +114,90 @@ test('初始账号登录，一个供应商自动获取模型，三个任务各�
   await modal.getByRole('button', { name: '返回作品', exact: true }).click();
 });
 
+test('上游模型搜索按名称或 ID 筛选，保留已选与自定义模型，三个任务独立且手机可用', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  const providerId = 'e2e-model-search'; const otherId = 'e2e-model-search-other';
+  const catalog = [
+    { id: 'gpt-pro', name: '中文显示名称' }, { id: 'gpt-mini', name: 'GPT Mini' },
+    { id: 'claude-fast', name: 'Claude Fast' }, { id: 'gemini-pro', name: 'Gemini Pro' },
+  ];
+  let listRequests = 0; let saveRequests = 0;
+  const route = '**/api/settings/models';
+  await page.route(route, intercepted => {
+    listRequests++;
+    const models = intercepted.request().postDataJSON().provider.id === providerId ? catalog : [{ id: 'other-model' }];
+    return intercepted.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ models }) });
+  });
+  page.on('request', request => { if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/settings') saveRequests++; });
+  try {
+    expect((await page.request.put('/api/settings', { data: {
+      providers: [providerId, otherId].map((id, index) => ({ id, name: index ? '另一目录' : '搜索目录', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' })),
+      writingProviderId: providerId, writingModel: 'gpt-pro', planningProviderId: providerId, planningModel: 'gpt-mini', extractionProviderId: providerId, extractionModel: 'private-custom',
+    } })).ok()).toBeTruthy();
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settings = page.getByTestId('settings-page');
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    const search = settings.getByRole('searchbox', { name: '正文写作搜索模型', exact: true });
+    const models = settings.getByRole('combobox', { name: '正文写作上游模型', exact: true });
+    const writing = settings.getByRole('region', { name: '正文写作模型设置', exact: true });
+    await expect(search).toBeEnabled();
+    await search.fill('  GPT-  ');
+    await expect(models.locator('option')).toHaveText(['选择上游模型', '中文显示名称 · gpt-pro', 'GPT Mini · gpt-mini']);
+    await expect(writing).toContainText('匹配 2 / 4 个模型');
+    await search.press('Enter');
+    await expect(settings.locator('.settings-save-footer')).not.toContainText('有未保存的修改');
+    expect(saveRequests).toBe(0); expect(listRequests).toBe(1);
+    await search.fill('中文显示');
+    await expect(models.locator('option')).toHaveText(['选择上游模型', '中文显示名称 · gpt-pro']);
+    await settings.getByRole('searchbox', { name: '摘要压缩搜索模型', exact: true }).fill('GPT-MINI');
+    const planningModels = settings.getByRole('combobox', { name: '摘要压缩上游模型', exact: true });
+    await expect(planningModels.locator('option')).toHaveText(['选择上游模型', 'GPT Mini · gpt-mini']);
+    await settings.getByRole('searchbox', { name: '资料提取搜索模型', exact: true }).fill('claude');
+    await expect(settings.getByRole('combobox', { name: '资料提取上游模型', exact: true }).locator('option')).toHaveText(['选择上游模型', 'Claude Fast · claude-fast']);
+    await expect(settings.getByLabel('资料提取模型名称', { exact: true })).toHaveValue('private-custom');
+    await expect(search).toHaveValue('中文显示');
+    await search.fill('claude');
+    await expect(models).toHaveValue('gpt-pro');
+    await expect(models.locator('option')).toHaveText(['选择上游模型', '当前选择：中文显示名称 · gpt-pro（未匹配搜索）', 'Claude Fast · claude-fast']);
+    await search.fill('没有这个模型');
+    await expect(models).toBeDisabled(); await expect(models).toHaveValue('gpt-pro');
+    await expect(writing).toContainText('没有匹配的模型，请更换关键词或清空搜索');
+    await expect(settings.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('gpt-pro');
+    await settings.getByRole('button', { name: '供应商连接', exact: true }).click();
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await expect(search).toHaveValue('没有这个模型');
+    await search.fill('gemini');
+    await settings.getByRole('button', { name: '正文写作刷新模型列表', exact: true }).click();
+    await expect(search).toBeEnabled(); await expect(search).toHaveValue('gemini');
+    expect(listRequests).toBe(2); expect(saveRequests).toBe(0);
+    await writing.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('model-search-desktop.png'), animations: 'disabled' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await search.scrollIntoViewIfNeeded();
+    expect(await settings.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+    await models.selectOption('gemini-pro');
+    await expect(settings.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('gemini-pro');
+    await search.fill(''); await expect(models.locator('option')).toHaveCount(5); await expect(models).toHaveValue('gemini-pro');
+    await search.fill('claude'); await search.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('model-search-mobile.png'), animations: 'disabled' });
+    await settings.getByRole('combobox', { name: '正文写作供应商', exact: true }).selectOption(otherId);
+    await expect(search).toBeEnabled(); await expect(search).toHaveValue('');
+    await expect(models.locator('option')).toHaveText(['选择上游模型', 'other-model']);
+    await expect(settings.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('');
+    await search.fill('other');
+    await settings.getByRole('button', { name: '供应商连接', exact: true }).click();
+    await settings.getByLabel('服务地址', { exact: true }).nth(1).fill(mockUrl + '/changed');
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await expect(search).toBeEnabled(); await expect(search).toHaveValue('');
+    await models.selectOption('other-model');
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(settings.getByRole('status')).toContainText('设置已保存');
+    const saved = await (await page.request.get('/api/settings')).json();
+    expect(saved).toMatchObject({ writingProviderId: otherId, writingModel: 'other-model', planningModel: 'gpt-mini', extractionModel: 'private-custom' });
+    expect(saved).not.toHaveProperty('modelSearch');
+  } finally { await page.unroute(route); expect((await page.request.put('/api/settings', { data: previous })).ok()).toBeTruthy(); }
+});
+
 test('独立设置页面切换分类保留草稿，保存检查隐藏字段，返回可取消或放弃并保留已保存配置', async ({ page }, testInfo) => {
   const previous = await (await page.request.get('/api/settings')).json();
   const providerId = 'e2e-settings-navigation';
