@@ -3,6 +3,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { defaultPromptTemplates } from '../shared/prompt-templates';
 import { V08_PRESET_ID } from '../shared/v08-prompts';
+import { REBORN_PRESET_ID } from '../shared/reborn-prompts';
+import { TASK_V2_PRESET_IDS } from '../shared/task-prompts-v2';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1688,7 +1690,7 @@ test('预设和提示词块创建复制前可命名、可取消、后续改名�
     let dialog = page.getByRole('dialog', { name: '新建预设', exact: true });
     await dialog.getByLabel('预设名称', { exact: true }).fill('   '); await expect(dialog.getByRole('button', { name: '确认名称', exact: true })).toBeDisabled();
     await dialog.getByRole('button', { name: '取消', exact: true }).click();
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(1);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(defaultPromptTemplates().presets.writing.length);
     await panel.getByRole('button', { name: '新建预设', exact: true }).click(); await confirmName('新建预设', '预设名称', '自定写作预设');
     await panel.getByRole('button', { name: '重命名预设', exact: true }).click(); await confirmName('重命名预设', '预设名称', '已改名写作预设');
     const before = await panel.getByTestId('prompt-block').count();
@@ -1714,10 +1716,10 @@ test('预设和提示词块创建复制前可命名、可取消、后续改名�
     await settings.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(settings.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
     const saved = (await (await page.request.get('/api/settings')).json()).promptTemplates;
-    expect(saved.presets.writing.map((preset: { name: string }) => preset.name)).toEqual(['默认正文写作', '已改名写作预设', '自选副本名称']);
-    expect(saved.presets.writing[1].blocks.at(-2)).toMatchObject({ id: blockId, name: '场景与情绪', content: '用环境细节表现人物情绪。' });
-    expect(saved.presets.writing[1].blocks.at(-1).id).not.toBe(blockId);
-    expect(saved.presets.writing[2].blocks.at(-1).name).toBe('场景规则副本');
+    expect(saved.presets.writing.map((preset: { name: string }) => preset.name)).toEqual([...defaultPromptTemplates().presets.writing.map(value => value.name), '已改名写作预设', '自选副本名称']);
+    expect(saved.presets.writing.at(-2).blocks.at(-2)).toMatchObject({ id: blockId, name: '场景与情绪', content: '用环境细节表现人物情绪。' });
+    expect(saved.presets.writing.at(-2).blocks.at(-1).id).not.toBe(blockId);
+    expect(saved.presets.writing.at(-1).blocks.at(-1).name).toBe('场景规则副本');
     expect(saved.general.presets.at(-1).name).toBe('通用框架后续改名');
     await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click();
     await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
@@ -1775,12 +1777,12 @@ test('任务提示词支持编辑编排、变量预览、独立导入导出和�
     await panel.getByRole('button', { name: '从 JSON 新增预设', exact: true }).click();
     const importedName = page.getByRole('dialog', { name: '导入预设', exact: true });
     await importedName.getByRole('button', { name: '取消', exact: true }).click();
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(2);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(defaultPromptTemplates().presets.writing.length + 1);
     await panel.getByRole('button', { name: '从 JSON 新增预设', exact: true }).click();
     await importedName.getByLabel('预设名称', { exact: true }).fill('导入写作风格');
     await importedName.getByLabel('搭配的通用预设名称', { exact: true }).fill('导入的通用框架');
     await importedName.getByRole('button', { name: '确认名称', exact: true }).click();
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(3);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(defaultPromptTemplates().presets.writing.length + 2);
     for (const label of ['资料提取', '摘要压缩']) {
       await panel.getByRole('tab', { name: label, exact: true }).click();
       await panel.getByLabel('提示词预设名称', { exact: true }).fill(`${label}测试预设`);
@@ -1789,7 +1791,7 @@ test('任务提示词支持编辑编排、变量预览、独立导入导出和�
     await modal.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(modal.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
     const saved = await (await page.request.get('/api/settings')).json();
-    expect(saved.promptTemplates.presets.writing).toHaveLength(3);
+    expect(saved.promptTemplates.presets.writing).toHaveLength(defaultPromptTemplates().presets.writing.length + 2);
     expect(saved.promptTemplates.presets.writing.at(-1).blocks[1]).toMatchObject({ role: 'assistant', enabled: true, modes: ['original'] });
     expect(saved.promptTemplates.presets.compression[0].name).toBe('摘要压缩测试预设');
     await page.screenshot({ path: testInfo.outputPath('prompt-editor-desktop.png'), animations: 'disabled' });
@@ -1972,7 +1974,7 @@ test('v0.8 通用预设可预览、覆盖通道、恢复自身默认、保存与
     await page.setViewportSize({ width: 1440, height: 1000 });
     await settings.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(settings.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
     let saved = await (await page.request.get('/api/settings')).json();
-    expect(saved.promptTemplates.general.selected).toBe(V08_PRESET_ID); expect(saved.promptTemplates.general.catalogVersion).toBe(1);
+    expect(saved.promptTemplates.general.selected).toBe(V08_PRESET_ID); expect(saved.promptTemplates.general.catalogVersion).toBe(2);
     await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click();
     await settings.getByRole('button', { name: '提示词编排', exact: true }).click(); await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
     await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(V08_PRESET_ID);
@@ -1981,6 +1983,61 @@ test('v0.8 通用预设可预览、覆盖通道、恢复自身默认、保存与
     saved = await (await page.request.get('/api/settings')).json();
     expect(saved.promptTemplates.general.presets.some((value: any) => value.id === V08_PRESET_ID)).toBe(false);
     expect(saved.promptTemplates.general.selected).toBe('default-general');
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('Reborn 框架与三个任务 v2 保留角色，可恢复、导出并保存选择', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  try {
+    await page.request.put('/api/settings', { data: { ...previous, promptTemplates: defaultPromptTemplates() } });
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settings = page.getByTestId('settings-page'); await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    const panel = settings.getByTestId('prompt-templates-panel'); const preview = panel.getByLabel('提示词编译预览', { exact: true });
+    await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
+    await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(REBORN_PRESET_ID);
+    await expect(panel.getByLabel('工具防截断', { exact: true })).toBeChecked();
+    await expect(panel.getByLabel('辅助标签处理', { exact: true })).toHaveValue('reborn');
+    const slot = panel.locator('[data-block-id="reborn-task-slot"]'); await slot.locator('summary').click();
+    await expect(slot.locator('.prompt-block-badge')).toHaveText('任务插槽');
+    await expect(slot.getByLabel('提示词块 2 角色', { exact: true })).toHaveValue('保留任务各块角色');
+    await expect(slot.getByLabel('提示词块 2 角色', { exact: true })).toBeDisabled();
+    for (const [task, label] of [['writing', '正文写作'], ['extraction', '资料提取'], ['compression', '摘要压缩']] as const) {
+      await panel.getByRole('tab', { name: label, exact: true }).click();
+      await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(TASK_V2_PRESET_IDS[task]);
+      await expect(panel.getByLabel('搭配通用预设', { exact: true })).toHaveValue('follow');
+      await expect(preview).toContainText('emit_writing_response');
+      await expect(preview).toContainText('实际提交方式遵循');
+      await expect(preview.locator('[data-role="user"]')).toHaveCount(1);
+      await expect(preview.locator('[data-role="assistant"]')).toHaveCount(0);
+      await expect(panel.getByLabel('恢复默认版本', { exact: true })).toHaveValue(TASK_V2_PRESET_IDS[task]);
+    }
+    await panel.getByRole('tab', { name: '正文写作', exact: true }).click();
+    await panel.getByLabel('提示词块 1 内容', { exact: true }).fill('作者暂改内容');
+    await panel.getByRole('button', { name: '恢复默认提示词', exact: true }).click();
+    await expect(panel.getByLabel('提示词块 1 内容', { exact: true })).toHaveValue(/你的职责是按作者要求写好/);
+    await panel.getByLabel('正文输出通道', { exact: true }).selectOption('text'); await expect(preview).not.toContainText('emit_writing_response');
+    await panel.getByLabel('正文输出通道', { exact: true }).selectOption('follow'); await expect(preview).toContainText('emit_writing_response');
+    await panel.getByText('导入与导出预设 JSON', { exact: true }).click();
+    const download = page.waitForEvent('download'); await panel.getByRole('button', { name: '导出当前提示词预设', exact: true }).click();
+    const exportPath = await (await download).path();
+    const exported = JSON.parse(await readFile(exportPath!, 'utf8'));
+    expect(exported.preset.name).toContain('v2'); expect(exported.generalPreset.id).toBe(REBORN_PRESET_ID);
+    await panel.getByLabel('当前提示词预设', { exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('reborn-v2-desktop.png'), animations: 'disabled' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: testInfo.outputPath('reborn-v2-mobile.png'), animations: 'disabled' });
+    const overflow = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('body *')].filter(element => element.getBoundingClientRect().width && element.getBoundingClientRect().right > innerWidth + 1).map(element => ({ tag: element.tagName, className: element.className, label: element.getAttribute('aria-label'), right: Math.round(element.getBoundingClientRect().right) })).slice(0, 12));
+    expect(overflow).toEqual([]);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(settings.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
+    const saved = await (await page.request.get('/api/settings')).json();
+    expect(saved.promptTemplates.general.selected).toBe(REBORN_PRESET_ID); expect(saved.promptTemplates.selected).toEqual(TASK_V2_PRESET_IDS);
+    await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click();
+    await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
+    for (const [task, label] of [['writing', '正文写作'], ['extraction', '资料提取'], ['compression', '摘要压缩']] as const) {
+      await panel.getByRole('tab', { name: label, exact: true }).click();
+      await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(TASK_V2_PRESET_IDS[task]);
+    }
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 
@@ -2048,7 +2105,7 @@ test('无效提示词草稿可继续修正，保存和导入失败不会覆盖�
     await panel.getByLabel('导入提示词预设 JSON', { exact: true }).fill('{"format":"wrong"}');
     await panel.getByRole('button', { name: '从 JSON 新增预设', exact: true }).click();
     await expect(panel).toContainText('导入失败');
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(1);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(defaultPromptTemplates().presets.writing.length);
     await modal.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(modal.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
     expect((await (await page.request.get('/api/settings')).json()).promptTemplates.presets.writing[0].blocks[0].content).toBe('修正后的规则');

@@ -87,7 +87,7 @@ describe('editable task prompt templates', () => {
     const normalized = normalizePromptTemplates(settings);
     expect(settings).toEqual(before);
     expect(normalized.presets.extraction[0]).toEqual(defaultPromptTemplates().presets.extraction[0]);
-    expect(normalized.presets.extraction.slice(1)).toEqual([edited, copy].map(value => ({ ...value, useGeneral: false })));
+    expect(normalized.presets.extraction.slice(1, 3)).toEqual([edited, copy].map(value => ({ ...value, useGeneral: false })));
     expect(normalized.selected.extraction).toBe('copy');
     expect(normalizePromptTemplates(normalized)).toEqual(normalized);
     const customizedDefault = structuredClone(before);
@@ -103,7 +103,7 @@ describe('editable task prompt templates', () => {
     const before = structuredClone(legacy);
     const upgraded = normalizePromptTemplates(legacy);
     expect(legacy).toEqual(before);
-    expect(upgraded.presets.writing).toEqual(before.presets.writing.map(value => ({ ...value, useGeneral: false })));
+    expect(upgraded.presets.writing.slice(0, before.presets.writing.length)).toEqual(before.presets.writing.map(value => ({ ...value, useGeneral: false })));
     expect(upgraded.presets.compression[1]).toEqual({ ...before.presets.compression[1], useGeneral: false });
     expect(upgraded.selected.compression).toBe('copy');
     for (const task of ['extraction', 'compression'] as const) expect(upgraded.presets[task][0]).toEqual(defaultPromptTemplates().presets[task][0]);
@@ -145,7 +145,7 @@ describe('editable task prompt templates', () => {
     expect(request.system).toBe('后置系统约定');
     expect(request.prompt).toBe('简洁 {{instruction}}：原文中的 {{mode}}\n最后要求');
     expect(activePromptPreset(settings, 'writing').id).toBe('custom');
-    expect(promptPresetVariables('writing', settings.presets.writing[1])).toContainEqual({ key: 'style', label: '自定义变量 · style' });
+    expect(promptPresetVariables('writing', activePromptPreset(settings, 'writing'))).toContainEqual({ key: 'style', label: '自定义变量 · style' });
     expect(normalizePromptTemplates(settings)).toEqual(settings);
   });
 

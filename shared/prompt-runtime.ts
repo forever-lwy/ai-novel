@@ -3,6 +3,10 @@ import { EXTRACTION_TOOL_INSTRUCTION } from './extraction-output.js';
 import { WRITING_TOOL_INSTRUCTION } from './writing-output.js';
 
 export const STRUCTURED_OUTPUT_INSTRUCTION = '本次返回必须是符合要求的单个 JSON 对象。不要输出解释文字或 Markdown。';
+export const TOOL_JSON_INSTRUCTION = `# 工具防截断提交
+将本次任务要求的完整 JSON 文本作为字符串放入 emit_writing_response 的 prose，toolCalls 填 []，只提交一次。
+这里的“仅输出 JSON”约束 prose 中的任务结果；外层遵循接口的工具参数结构，不在普通文本通道重复输出。
+不要输出辅助思考、draft、解释或代码围栏。工具参数必须完整、可解析，提交后直接结束，不执行工具、不追加确认回合。`;
 export const WRITING_STAGE_INSTRUCTION = '# 正文阶段\n当前阶段只生成本章正文，查询资料、插画和 RPG 选择按本次工具约定执行。正文保存后另行整理资料。';
 
 export interface PromptRuntime {
@@ -78,12 +82,9 @@ ${runtime.chapterAnswer}
 本章从这条已确认行动的直接后果开始，不重复上一章正文，不再次询问同一决定；unansweredQuestions 若存在，是上个回合尚未回答的问题，不能当作已确认行动，须根据行动后的实际场景逐个调用 ask_user 等待玩家决定。后续自主行动仍须等待玩家选择。` });
   } else if (task === 'extraction' && runtime.extractionOutputMode === 'tool') system('资料工具提交要求', EXTRACTION_TOOL_INSTRUCTION);
   else {
-    system('JSON 输出要求', `# 返回格式\n${STRUCTURED_OUTPUT_INSTRUCTION}`);
+    if (runtime.writingOutputMode !== 'tool') system('JSON 输出要求', `# 返回格式\n${STRUCTURED_OUTPUT_INSTRUCTION}`);
     if (task === 'extraction' && runtime.extractionOutputMode === 'structured') system('结构化输出要求', '# 结构化输出\n按接口提供的 JSON Schema 填写全部字段，无法确定的可空字段填 null，不要编造。引用只填当前片段的 paragraph，原文由程序补齐。');
   }
-  if (task !== 'writing' && runtime.writingOutputMode === 'tool') system('通用工具通道规则', `# 工具防截断提交
-将本次任务要求的完整 JSON 文本作为字符串放入 emit_writing_response 的 prose，toolCalls 填 []，只提交一次。
-这里的“仅输出 JSON”约束 prose 中的任务结果；外层遵循接口的工具参数结构，不在普通文本通道重复输出。
-不要输出辅助思考、draft、解释或代码围栏。工具参数必须完整、可解析，提交后直接结束，不执行工具、不追加确认回合。`);
+  if (task !== 'writing' && runtime.writingOutputMode === 'tool') system('通用工具通道规则', TOOL_JSON_INSTRUCTION);
   return blocks;
 }

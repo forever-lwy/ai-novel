@@ -6,6 +6,8 @@ import { buildRequestSnapshot, generateStructured, generateText, ModelInteractio
 import { partialWritingProse, unpackWritingResponse, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 import { compileTaskPrompt, defaultPromptTemplates } from '../shared/prompt-templates.js';
 import { V08_PRESET_ID } from '../shared/v08-prompts.js';
+import { REBORN_PRESET_ID } from '../shared/reborn-prompts.js';
+import { TASK_V2_PRESET_IDS } from '../shared/task-prompts-v2.js';
 
 const protocols: ProviderProtocol[] = ['openai-chat', 'openai-responses', 'gemini', 'claude'];
 const servers: Server[] = [];
@@ -46,6 +48,32 @@ function streamEnd(protocol: ProviderProtocol, tail: string, full: unknown) {
 }
 
 describe('layered writing tool transport', () => {
+  describe.each(protocols)('%s Reborn cooperative output transport', protocol => {
+    it.each(['extraction', 'compression'] as const)('submits %s v2 JSON once through real local HTTP', async task => {
+      const expected = task === 'extraction' ? { summary: '推开旧门。', entities: [], relations: [], foreshadows: [] } : { text: '推开旧门。' };
+      const service = await upstream((_index, _body, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(response(protocol, payload(JSON.stringify(expected))))); });
+      const templates = defaultPromptTemplates(); templates.general!.selected = REBORN_PRESET_ID; templates.selected[task] = TASK_V2_PRESET_IDS[task];
+      const compiled = compileTaskPrompt(templates, task, { blockText: '[1] 林舟推开旧门。', summaryText: '林舟到达桥边然后推开旧门。', context: '', chapterTitle: '旧门' });
+      const result = await generateStructured(config(protocol, service.baseUrl), compiled, value => value);
+      expect(result.value).toEqual(expected); expect(service.bodies).toHaveLength(1);
+      expect(service.bodies[0]).toEqual(JSON.parse(buildRequestSnapshot(config(protocol, service.baseUrl), compiled).body));
+    });
+    it('streams legacy wrapper cleanup and executes declared inner tools without fake roles', async () => {
+      const service = await upstream((index, _body, res) => {
+        const value = payload(index ? '<game>后文。</game>' : 'finishReason: STOP\r\n<think_nya~>辅助说明</think_nya~><game>前文。</game>', index ? '' : 'read_entity');
+        const raw = JSON.stringify(value); const split = protocol === 'gemini' ? raw.length : raw.indexOf('说明');
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.end(streamStart(protocol, raw.slice(0, split)) + streamEnd(protocol, raw.slice(split), value));
+      });
+      const templates = defaultPromptTemplates(); templates.general!.selected = REBORN_PRESET_ID; templates.selected.writing = TASK_V2_PRESET_IDS.writing;
+      const compiled = compileTaskPrompt(templates, 'writing', { mode: 'original', instruction: '继续', context: '资料', maxWords: 1000 });
+      const execute = vi.fn(() => ({ name: '林舟' })); const events: ModelActivityEvent[] = []; let prose = '';
+      const result = await generateText(config(protocol, service.baseUrl), { ...request(execute), ...compiled, onTextDelta: text => { prose += text; }, onActivity: event => events.push(event) });
+      expect(result.text).toBe('前文。后文。'); expect(prose).toBe(result.text); expect(service.bodies).toHaveLength(2);
+      expect(execute).toHaveBeenCalledExactlyOnceWith({ id: 'person' });
+      expect(events.filter(event => event.type === 'thinking' && event.thinkingSource === 'preset').map(event => event.text).join('')).toBe('辅助说明');
+      expect(JSON.stringify(service.bodies[0])).not.toContain('soliumbra');
+    });
+  });
   describe.each(protocols)('%s v0.8 general output transport', protocol => {
     it.each(['extraction', 'compression'] as const)('unwraps %s JSON through the real HTTP adapter with no confirmation request', async task => {
       const expected = task === 'extraction' ? { summary: '到达石桥。', entities: [], relations: [], foreshadows: [] } : { text: '到达石桥。' };

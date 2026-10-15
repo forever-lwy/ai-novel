@@ -9,14 +9,14 @@ function settings() { const value = defaultPromptTemplates(); value.general!.sel
 
 describe('v0.8 general protection preset', () => {
   it('adds the built-in once while preserving selection, custom changes, deletion and input objects', () => {
-    const old = defaultPromptTemplates(); old.general!.presets.pop(); delete old.general!.catalogVersion;
+    const old = defaultPromptTemplates(); old.general!.presets = old.general!.presets.slice(0, 1); delete old.general!.catalogVersion;
     old.general!.presets[0].name = '作者的框架'; old.general!.presets[0].blocks[0].content = '作者文本';
     const original = structuredClone(old); const migrated = normalizePromptTemplates(old);
     expect(old).toEqual(original); expect(migrated.general!.selected).toBe(old.general!.selected);
     expect(migrated.general!.presets[0]).toEqual(old.general!.presets[0]);
     expect(migrated.general!.presets[1].id).toBe(V08_PRESET_ID);
     expect(normalizePromptTemplates(migrated)).toEqual(migrated);
-    migrated.general!.presets.pop();
+    migrated.general!.presets = migrated.general!.presets.filter(preset => preset.id !== V08_PRESET_ID);
     expect(normalizePromptTemplates(migrated)).toEqual(migrated);
   });
   it('does not replace a colliding user preset or evict a full catalog', () => {

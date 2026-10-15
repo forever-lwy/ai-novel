@@ -9,6 +9,8 @@ import { structuredRequest } from '../server/providers.js';
 import { STRUCTURED_OUTPUT_INSTRUCTION, type PromptPreviewInput, type PromptPreviewResult } from '../shared/prompt-runtime.js';
 import type { PromptTask, ProviderProtocol } from '../shared/types.js';
 import { V08_PRESET_ID } from '../shared/v08-prompts.js';
+import { REBORN_PRESET_ID } from '../shared/reborn-prompts.js';
+import { TASK_V2_PRESET_IDS } from '../shared/task-prompts-v2.js';
 
 let ctx: Awaited<ReturnType<typeof buildApp>>;
 let cookies: { session: string };
@@ -22,6 +24,24 @@ const variables = { context: '示例故事资料', mode: 'original', instruction
 const input = (task: PromptTask, protocol: ProviderProtocol): PromptPreviewInput => ({ task, protocol, templates: defaultPromptTemplates(), variables, runtime: {} });
 
 describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s final prompt preview', protocol => {
+  it.each<PromptTask>(['writing', 'extraction', 'compression'])('previews Reborn with cooperative %s v2 using real native roles without saving', async task => {
+    const draft = input(task, protocol); draft.templates.general!.selected = REBORN_PRESET_ID; draft.templates.selected[task] = TASK_V2_PRESET_IDS[task];
+    const before = (await ctx.app.inject({ url: '/api/settings', cookies })).body;
+    const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: draft });
+    expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
+    expect(preview.tools.map(tool => tool.name)).toEqual(['emit_writing_response']);
+    expect(preview.messages.filter(message => message.role !== 'system').map(message => message.role)).toEqual(['user']);
+    expect(preview.body).toContain('通用文本任务框架'); expect(preview.body).toContain('实际提交方式遵循');
+    expect(preview.body).not.toMatch(/soliumbra|prefill_thinking|No policies|CSAM/);
+    expect(preview.runtimeBlocks.some(block => block.name === 'JSON 输出要求')).toBe(false);
+    expect((await ctx.app.inject({ url: '/api/settings', cookies })).body).toBe(before);
+    for (const mode of ['structured', 'tool'] as const) if (task === 'extraction') {
+      draft.runtime.extractionOutputMode = mode;
+      const native = ctx.engine.previewPrompt(draft);
+      expect(native.tools.map(tool => tool.name)).toEqual(mode === 'tool' ? ['submit_extraction'] : []);
+      expect(native.body).not.toContain('emit_writing_response');
+    }
+  });
   it.each<PromptTask>(['writing', 'extraction', 'compression'])('previews the v0.8 framework and its actual output transport for %s without saving', async task => {
     const draft = input(task, protocol); draft.templates.general!.selected = V08_PRESET_ID;
     const before = (await ctx.app.inject({ url: '/api/settings', cookies })).body;

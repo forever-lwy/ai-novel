@@ -28,7 +28,7 @@ it('migrates old settings, persists editable presets and preserves them when an 
   const ctx = await buildApp({ initialPassword: 'prompt-test-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-prompt-api-')) }); apps.push(ctx);
   const login = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'prompt-test-password' } });
   const cookies = { session: login.cookies[0].value };
-  expect((await ctx.app.inject({ url: '/api/settings', cookies })).json().promptTemplates.presets.compression).toHaveLength(1);
+  expect((await ctx.app.inject({ url: '/api/settings', cookies })).json().promptTemplates.presets.compression).toHaveLength(defaultPromptTemplates().presets.compression.length);
   const settings = config(); settings.providers[0].apiKey = 'fixture-secret-key';
   settings.promptTemplates!.presets.writing[0].blocks[0].content = '作者修改的系统提示';
   const saved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies, payload: settings });

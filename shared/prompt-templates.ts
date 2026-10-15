@@ -7,7 +7,9 @@ import { previousDramatronPromptTemplates } from './previous-dramatron-prompt-te
 import { dramatronGeneralBlocks, dramatronTailBlocks } from './dramatron-prompts.js';
 import { runtimePromptBlocks, type PromptRuntime } from './prompt-runtime.js';
 import { extractionOutputFormat } from './extraction-output.js';
-import { v08GeneralPreset, V08_PRESET_ID } from './v08-prompts.js';
+import { v08GeneralPreset } from './v08-prompts.js';
+import { rebornGeneralPreset } from './reborn-prompts.js';
+import { taskPresetsV2 } from './task-prompts-v2.js';
 
 export const ENTITY_RESOLUTION_INSTRUCTION = '同一个人物或地点只输出一个实体。先对照已有名称与别名，姓名、本名、旧名以及原文明确指向同一人的描述性称呼应统一到同一实体，优先用本名作为 name，其他称呼写入 aliases；比如原文确认“戴兜帽的旅人”名叫“林舟”，应以“林舟”为 name，把“戴兜帽的旅人”写入 aliases。描述性称呼在后续片段获得本名时，也要保留之前的称呼以便归并。只有原文足以确认同一身份时才建立别名，不凭外貌、职业相似或名字包含关系合并；“他”“少女”“队长”等无法唯一指向的泛称不要作为别名。别名对照仅辅助统一身份，不是事实证据，也不能据此提前揭晓身份秘密。';
 export const CHARACTER_PROFILE_INSTRUCTION = '人物资料要回答“这个人是谁、有什么特点和能力、目前处于什么状态”，不能写成逐段行动流水账。正文明确披露的姓名、性别、种族、血统、年龄、外貌、身份、所属势力、能力、性格、目标、弱点、当前状态与所在地分别使用稳定属性 name、gender、race、bloodline、age、appearance、identity、affiliation、ability、personality、goal、weakness、status、location；缺失资料不补造，也不按称呼、外貌推测性别、种族或血统。可并存的能力、性格等使用稳定子属性，例如 ability:archery、ability:fire_magic、personality:courage，同一项后续变化继续使用相同子属性。只有改变身份、能力、关系、命运或后续剧情的重大/关键经历才写为 attribute=major_event 的 past 事实；吃饭、走路、递物、普通对话等日常经过只保存在 summary，不放入人物 facts 或 description。description 是已明确资料的简洁介绍，不能塞进普通经历或尚未发生的规划。nameStatus=placeholder 表示正文未披露姓名、暂用唯一称呼定位；得知明确本名后使用本名作为 name、nameStatus=confirmed，并在 aliases 中保留正文明确对应的旧称呼，不能把本名仅写进 aliases。isMain 仅在作者指定或正文明确呈现持续核心视角/主线地位时设为 true；仅出现一次、参与一段对话或与主角相识不等于主要角色；不能确定时省略该字段。每条资料仍必须引用当前正文的精确证据，已有名称索引只辅助身份对照。';
@@ -120,31 +122,33 @@ const block = (id: string, name: string, role: PromptBlock['role'], content: str
 const extractionAcknowledgment = '已收到索引。新资料只依据接下来提供的编号片段；无法确认的身份、属性和关系不补造，每条事实与关系都核对本片段证据。';
 /** Each call returns independent objects so editing or reset cannot mutate shared defaults. */
 export function defaultPromptTemplates(): PromptTemplateSettings {
+  const v2 = taskPresetsV2(ENTITY_RESOLUTION_INSTRUCTION, CHARACTER_PROFILE_INSTRUCTION);
   return {
-    general: { selected: 'default-general', catalogVersion: 1, presets: [{ id: 'default-general', name: 'Dramatron 防截断与防空回', textFilter: 'dramatron', blocks: [
+    general: { selected: 'default-general', catalogVersion: 2, presets: [{ id: 'default-general', name: 'Dramatron 防截断与防空回', textFilter: 'dramatron', blocks: [
       ...dramatronGeneralBlocks().slice(0, 2),
       block('snow-ack', '前置文本结束', 'assistant', '前置填充文本已结束，以下按新任务的资料与要求执行。'),
       { ...block('task-slot', '插入当前任务提示词', 'system', ''), slot: 'task' },
       ...dramatronTailBlocks(),
-    ] }, v08GeneralPreset()] },
+    ] }, v08GeneralPreset(), rebornGeneralPreset()] },
     presets: {
       writing: [{ id: 'default-writing', name: '默认正文写作', blocks: [
         block('writing-rules', '文笔、逻辑与文风', 'system', WRITING_SYSTEM),
         block('context', '故事上下文', 'user', '# 故事设定与历史\n<info>\n{{storyMaterials}}\n</info>\n\n<interaction_history>\n{{recentChapters}}\n</interaction_history>'),
         block('context-ack', '上下文承接', 'assistant', '已收到故事资料。我会以本线已发生事实和锁定设定为基础，延续前文的叙述视角、人物口吻与文风，按接下来的具体要求写作。'),
         block('writing-request', '本次写作要求', 'user', '# 本次写作任务\n- 创作模式：{{mode}}\n- 目标长度：约 {{maxWords}} 字\n\n<interactive_input>\n## 作者要求\n{{instruction}}\n\n## 写作范围\n{{writingTarget}}\n</interactive_input>'),
-      ] }],
+      ] }, v2.writing],
       extraction: [{ id: 'default-extraction', name: '默认资料提取', blocks: [
         block('extraction-rules', '提取约定与输出格式', 'system', EXTRACT_SYSTEM),
         block('context', '已有名称与伏笔索引', 'user', '# 名称与伏笔索引\n以下仅辅助身份对照，不作为新事实的证据。\n{{context}}'),
         block('extraction-request', '本次提取原文', 'user', '# 本次提取任务\n待整理章节：{{chapterTitle}}\n仅提取以下片段，保留原段落编号。\n\n## 编号原文\n{{blockText}}\n\n## 提交要求\n返回 summary、entities、relations、foreshadows。没有依据的条目不填；仅输出合法 JSON 对象。'),
-      ] }],
+      ] }, v2.extraction],
       compression: [{ id: 'default-compression', name: '默认摘要压缩', blocks: [
         block('compression-rules', '压缩约定与输出格式', 'system', COMPRESSION_SYSTEM),
         block('summary', '待压缩摘要', 'user', '# 待压缩的已发生剧情\n{{summaryText}}\n\n## 本次要求\n保留各章关键事件、因果和状态变化，合并重复信息，输出更短且连贯的 JSON 摘要。'),
-      ] }],
+      ] }, v2.compression],
     },
     selected: { writing: 'default-writing', extraction: 'default-extraction', compression: 'default-compression' },
+    taskCatalogVersions: { writing: 1, extraction: 1, compression: 1 },
   };
 }
 
@@ -162,13 +166,14 @@ const promptPresetSchema = z.object({
   id: identifier, name: nonEmptyName, blocks: z.array(promptBlockSchema).min(1).max(80, '每个预设最多 80 个提示词块'),
   variables: z.record(z.string().max(100).regex(/^[a-zA-Z][a-zA-Z0-9_]*$/, '变量名须以字母开头，仅包含字母、数字或下划线'), z.string().max(100000)).optional(),
   useGeneral: z.boolean().optional(), generalPresetId: identifier.optional(), writingOutputMode: z.enum(['text', 'tool']).optional(),
-  toolTransport: z.boolean().optional(), textFilter: z.enum(['dramatron', 'v08']).optional(),
+  toolTransport: z.boolean().optional(), textFilter: z.enum(['dramatron', 'v08', 'reborn']).optional(),
 }).strict();
 const presetList = z.array(promptPresetSchema).min(1, '每个任务至少保留一个预设').max(20, '每个任务最多 20 个预设');
 const templateShape = z.object({
   presets: z.object({ writing: presetList, planning: presetList.optional(), extraction: presetList, compression: presetList }).strict(),
   selected: z.object({ writing: identifier, planning: identifier.optional(), extraction: identifier, compression: identifier }).strict(),
-  general: z.object({ presets: presetList, selected: identifier, catalogVersion: z.number().int().min(0).max(1).optional() }).strict().optional(),
+  general: z.object({ presets: presetList, selected: identifier, catalogVersion: z.number().int().min(0).max(2).optional() }).strict().optional(),
+  taskCatalogVersions: z.object({ writing: z.number().int().min(0).max(1).optional(), extraction: z.number().int().min(0).max(1).optional(), compression: z.number().int().min(0).max(1).optional() }).strict().optional(),
 }).strict();
 const builtInKeys = new Set([...promptTasks.flatMap(task => promptVariables[task].map(variable => variable.key)), 'currentChapterPlan']);
 const variablePattern = /\{\{([^{}]*)\}\}/g;
@@ -271,12 +276,15 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
   });
   // Add the new built-in once, without selecting it or replacing author edits.
   // Keep a full catalog intact and retry when the author frees a slot.
-  if (!settings.general!.catalogVersion) {
-    if (!settings.general!.presets.some(preset => preset.id === V08_PRESET_ID) && settings.general!.presets.length < 20) {
-      const candidate = { ...settings, general: { ...settings.general!, presets: [...settings.general!.presets, v08GeneralPreset()] } };
-      if (promptTemplateSchema.safeParse(candidate).success) settings.general = candidate.general;
+  for (const [index, builtin] of defaults.general!.presets.slice(1).entries()) {
+    const version = index + 1;
+    if ((settings.general!.catalogVersion ?? 0) >= version) continue;
+    if (!settings.general!.presets.some(preset => preset.id === builtin.id)) {
+      const candidate = { ...settings, general: { ...settings.general!, presets: [...settings.general!.presets, builtin] } };
+      if (!promptTemplateSchema.safeParse(candidate).success) break;
+      settings.general = candidate.general;
     }
-    if (settings.general!.presets.some(preset => preset.id === V08_PRESET_ID)) settings.general!.catalogVersion = 1;
+    settings.general!.catalogVersion = version;
   }
   const oldExtraction = previousPromptTemplates.presets.extraction[0];
   const acknowledged: PromptPreset = { ...oldExtraction, blocks: [...oldExtraction.blocks.slice(0, 2), block('context-ack', '证据边界确认', 'assistant', extractionAcknowledgment), ...oldExtraction.blocks.slice(2)] };
@@ -288,6 +296,18 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
     // Legacy author edits retain their exact compiled text until explicitly opted in.
     return !hadGeneral && preset.useGeneral === undefined ? { ...preset, useGeneral: false } : preset;
   });
+  // Track each task independently so a full catalog cannot resurrect an edition
+  // deliberately deleted from a different task. Never change current selections.
+  for (const task of promptTasks) {
+    if ((settings.taskCatalogVersions?.[task] ?? 0) >= 1) continue;
+    const builtin = defaults.presets[task][1];
+    if (!settings.presets[task].some(preset => preset.id === builtin.id)) {
+      const candidate = { ...settings, presets: { ...settings.presets, [task]: [...settings.presets[task], builtin] } };
+      if (!promptTemplateSchema.safeParse(candidate).success) continue;
+      settings.presets = candidate.presets;
+    }
+    settings.taskCatalogVersions = { ...settings.taskCatalogVersions, [task]: 1 };
+  }
   return settings;
 }
 export function promptPresetList(config: PromptTemplateSettings, task: PromptScope): PromptPreset[] {

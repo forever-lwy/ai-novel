@@ -6,7 +6,7 @@ import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequ
 import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions } from './provider-options.js';
 import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream, streamFrameFragments } from './model-stream.js';
 import { chapterBudgetInstruction, chapterBudgetReached } from '../shared/rpg-chapter.js';
-import { STRUCTURED_OUTPUT_INSTRUCTION } from '../shared/prompt-runtime.js';
+import { STRUCTURED_OUTPUT_INSTRUCTION, TOOL_JSON_INSTRUCTION } from '../shared/prompt-runtime.js';
 import { EXTRACTION_SUBMISSION_NAME, EXTRACTION_TOOL_INSTRUCTION } from '../shared/extraction-output.js';
 import { partialWritingProse, unpackWritingResponse, writingResponseTool, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
@@ -876,7 +876,7 @@ export function parseStructuredText<T>(text: string, validate: (value: unknown) 
 
 /** Normalize before budgeting; repeated normalization never duplicates the output constraint. */
 export function structuredRequest(request: ModelRequest): ModelRequest {
-  const instruction = request.structuredOutput?.mode === 'tool' ? EXTRACTION_TOOL_INSTRUCTION : STRUCTURED_OUTPUT_INSTRUCTION;
+  const instruction = request.structuredOutput?.mode === 'tool' ? EXTRACTION_TOOL_INSTRUCTION : request.writingOutputMode === 'tool' ? TOOL_JSON_INSTRUCTION : STRUCTURED_OUTPUT_INSTRUCTION;
   if (request.messages?.length) {
     if (request.messages.some(message => message.role === 'system' && message.content.includes(instruction))) return request;
     return { ...request, messages: [...request.messages, { role: 'system', content: instruction }] };

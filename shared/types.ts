@@ -54,11 +54,11 @@ export type PromptTask = 'writing' | 'extraction' | 'compression';
 export type PromptScope = PromptTask | 'general';
 export type WritingOutputMode = 'text' | 'tool';
 export type PromptFeature = 'snow' | 'literal' | 'cot-three' | 'cot-single' | 'defense-normal' | 'defense-laoda' | 'defense-v08';
-export type PromptTextFilter = 'dramatron' | 'v08';
+export type PromptTextFilter = 'dramatron' | 'v08' | 'reborn';
 export interface PromptMessage { role: 'system' | 'user' | 'assistant'; content: string }
 export interface PromptBlock extends PromptMessage { id: string; name: string; enabled: boolean; modes?: Mode[]; tasks?: (PromptTask | 'planning')[]; feature?: PromptFeature; slot?: 'task' }
 export interface PromptPreset { id: string; name: string; blocks: PromptBlock[]; variables?: Record<string, string>; useGeneral?: boolean; generalPresetId?: string; writingOutputMode?: WritingOutputMode; toolTransport?: boolean; textFilter?: PromptTextFilter }
-export interface PromptTemplateSettings { presets: Record<PromptTask, PromptPreset[]> & { planning?: PromptPreset[] }; selected: Record<PromptTask, string> & { planning?: string }; general?: { presets: PromptPreset[]; selected: string; catalogVersion?: number } }
+export interface PromptTemplateSettings { presets: Record<PromptTask, PromptPreset[]> & { planning?: PromptPreset[] }; selected: Record<PromptTask, string> & { planning?: string }; general?: { presets: PromptPreset[]; selected: string; catalogVersion?: number }; taskCatalogVersions?: Partial<Record<PromptTask, number>> }
 export interface ImageSettings {
   providerId: string; model: string; protocol: 'openai-images' | 'gemini' | 'together-images'; size: string;
   quality: 'auto' | 'low' | 'medium' | 'high' | 'standard' | 'hd' | 'xhigh' | 'max'; stylePrompt: string; autoPortrait: boolean; autoCG: boolean; timeoutMs: number;
