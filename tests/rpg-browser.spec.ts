@@ -358,6 +358,8 @@ test('章末选择已消费但POST回包丢失，只读恢复新任务且不再�
   expect(recoveredJob!.id).not.toBe(chapterChoice.jobId);
   expect((await jobs(page, project.id)).filter(job => job.branchId === rpgBranchId && job.kind === 'generate')).toHaveLength(2);
   const afterStats = await (await page.request.get(`${mockUrl.replace(/\/v1$/, '')}/__e2e/stats`)).json();
-  expect(afterStats.modelRequestsByModel['e2e-rpg-budget'] - (beforeStats.modelRequestsByModel['e2e-rpg-budget'] || 0)).toBe(3);
+  const namingRequests = afterStats.chapterTitleRequests - beforeStats.chapterTitleRequests;
+  expect(namingRequests).toBe(2);
+  expect(afterStats.modelRequestsByModel['e2e-rpg-budget'] - (beforeStats.modelRequestsByModel['e2e-rpg-budget'] || 0) - namingRequests).toBe(3);
   await page.screenshot({ path: testInfo.outputPath('rpg-chapter-lost-post-response-recovered.png'), animations: 'disabled' });
 });

@@ -116,7 +116,7 @@ export interface ModelToolContinuation {
 /** A submission tool only returns data; it is never executed or continued. */
 export interface ModelStructuredOutput { mode: 'json_schema' | 'tool'; name: string; description: string; schema: Record<string, unknown> }
 export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; writingOutputMode?: WritingOutputMode; textFilter?: PromptTextFilter; structuredOutput?: ModelStructuredOutput; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
-export type OutputStage = 'planning' | 'compression' | 'writing' | 'extraction';
+export type OutputStage = 'planning' | 'compression' | 'writing' | 'chapter-title' | 'extraction';
 export interface OutputIssue { path: string; message: string; paragraph?: number; quote?: string; sourceText?: string }
 export interface ModelOutputRecord extends CapturedModelResponse {
   id: string; jobId: string; projectId: string; branchId: string; baseRevisionId: string;

@@ -43,7 +43,7 @@ async function upstream(reply?: (body: any, response_: ServerResponse, index: nu
 }
 const settings = (url: string): Settings => ({ providers: [{ id: 'local', name: '本地协议模拟', protocol: 'openai-chat', baseUrl: url, model: 'writer', maxOutputTokens: 1000, contextTokens: 64000 }], writingProviderId: 'local', planningProviderId: 'local', extractionProviderId: 'local' });
 function engineFor(store: Store, config: Settings) {
-  const models: TextModels = { generateText, generateStructured: vi.fn(async (_config, _request, validate) => ({ value: validate(extraction()), inputTokens: 1, outputTokens: 1 })) as TextModels['generateStructured'] };
+  const models: TextModels = { generateText, generateStructured: vi.fn(async (_config, request, validate) => ({ value: validate(request.system.includes('# 章节自动命名') ? { title: '桥头之行' } : extraction()), inputTokens: 1, outputTokens: 1 })) as TextModels['generateStructured'] };
   const engine = new StoryEngine(store, () => config, models); engines.push(engine); engine.start(); return engine;
 }
 async function until<T>(read: () => T, accepts: (value: T) => boolean): Promise<T> {
@@ -77,7 +77,8 @@ describe('durable RPG story choices', () => {
     const replacement = engineFor(store, config); const copy = replacement.listJobs(restored.id).find(value => value.kind === 'generate')!;
     replacement.choose(copy.id, { choiceId: copy.pendingChoice!.id, optionId: 'bridge' });
     expect((await completed(replacement, copy.id)).status).toBe('completed'); expect(service.bodies).toHaveLength(2);
-    expect(store.exportText(copy.branchId)).toBe('新章节\n\n你站在岔路口。你沿着桥头继续前进。');
+    await until(() => store.state(copy.branchId).chapters[0], chapter => chapter?.status === 'ready');
+    expect(store.exportText(copy.branchId)).toBe('桥头之行\n\n你站在岔路口。你沿着桥头继续前进。');
     expect(store.exportText(copy.branchId)).not.toContain('argumentsJson');
     expect(rawJob(store, copy.id).payload.rpgContinuation).toMatchObject({ writingOutputMode: 'tool' });
     expect(JSON.stringify(service.bodies[1])).toContain('toolResults'); expect(JSON.stringify(service.bodies[1])).toContain('前往桥头');

@@ -376,7 +376,7 @@ export class Store {
   clearChapterExtraction(branchId: string, base: string, chapterId: string, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
     return this.changeChapterMaterials(branchId, base, chapterId, false, checkpoint);
   }
-  updateChapterTitles(branchId: string, base: string, changes: { chapterId: string; originalTitle: string; title: string }[]): BranchView {
+  updateChapterTitles(branchId: string, base: string, changes: { chapterId: string; originalTitle: string; title: string }[], checkpoint?: (revisionId: string, branchId: string) => void, label = '修复章节标题'): BranchView {
     this.assertVersion(branchId, base); const current = this.state(branchId);
     if (!changes.length || new Set(changes.map(change => change.chapterId)).size !== changes.length) throw new HttpError('章节标题修改为空或包含重复章节。');
     const replacements = new Map<string, string>(); let first = current.chapters.length;
@@ -391,7 +391,7 @@ export class Store {
     if (!replacements.size) throw new HttpError('所选标题没有变化。');
     const states = this.chapterTimeline(branchId, first + 1);
     for (const state of states) for (const chapter of state.chapters) if (replacements.has(chapter.id)) chapter.title = replacements.get(chapter.id)!;
-    return this.commit(branchId, base, states.at(-1)!, '修复章节标题', undefined, states.slice(0, -1));
+    return this.commit(branchId, base, states.at(-1)!, label, checkpoint, states.slice(0, -1));
   }
   deleteChapter(branchId: string, base: string, chapterId: string): BranchView {
     return this.changeChapterMaterials(branchId, base, chapterId, true);
@@ -875,7 +875,12 @@ export class Store {
         job.payload.rpgLookupAliases = { ...Object.fromEntries(Object.entries(previous).map(([oldId, target]) => [oldId, map.get(target) ?? (Object.hasOwn(sourceIdMap, target) ? sourceIdMap[target] : target)])), ...Object.fromEntries(map), ...sourceIdMap };
       }
       for (const field of ['blockIndex', 'importIndex']) if (job.payload[field] !== undefined && (!Number.isInteger(job.payload[field]) || Number(job.payload[field]) < 0)) throw new HttpError('备份任务进度无效');
-      for (const field of ['generatedChapterId', 'extractChapterId', 'importCurrentChapterId', 'chapterId', 'targetChapterId']) if (job.payload[field] && !chapterIds.has(String(job.payload[field]))) throw new HttpError('备份任务章节不存在');
+      for (const field of ['generatedChapterId', 'extractChapterId', 'importCurrentChapterId', 'chapterId', 'targetChapterId', 'pendingTitleChapterId']) if (job.payload[field] && !chapterIds.has(String(job.payload[field]))) throw new HttpError('备份任务章节不存在');
+      if (job.payload.pendingTitleChapterId !== undefined) {
+        const writing = jobs.get(String(job.payload.writingJobId));
+        const snapshot = restoredState(restored.revisions.findIndex(entry => entry.revision.id === job.baseRevisionId));
+        if (job.kind !== 'extract' || writing?.kind !== 'generate' || writing.branchId !== job.branchId || !writing.payload.autoTitle || writing.payload.titleGenerated || writing.payload.generatedChapterId !== job.payload.pendingTitleChapterId || !snapshot.chapters.some(chapter => chapter.id === job.payload.pendingTitleChapterId)) throw new HttpError('备份章节命名关联无效');
+      }
       if (job.payload.targetChapterId !== undefined) {
         const snapshot = restoredState(restored.revisions.findIndex(entry => entry.revision.id === job.baseRevisionId));
         if (job.kind !== 'extract' || job.total !== 1 || typeof job.payload.targetChapterId !== 'string' || job.payload.extractChapterId !== job.payload.targetChapterId || !snapshot.chapters.some(chapter => chapter.id === job.payload.targetChapterId)) throw new HttpError('备份单章提取目标无效');

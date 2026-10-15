@@ -43,8 +43,8 @@ export function parseVisualOutput(text: string, stage: OutputStage, compression 
     const unwrapped = unwrapVisualText(text);
     const parsed: unknown = JSON.parse(stripFence(unwrapped.text));
     if (!isObject(parsed)) return { ok: false, message: '当前内容不是一份完整的资料对象，暂时不能显示为表单。请切到高级 JSON 检查内容，或粘贴另一份完整输出。' };
-    const expected = compression ? ['text'] : stage === 'extraction' ? ['summary', 'entities', 'relations', 'foreshadows'] : ['fine', 'foreshadows'];
-    if (Object.keys(parsed).length && !expected.some(key => key in parsed)) return { ok: false, message: `当前内容缺少${compression ? '压缩摘要 text' : stage === 'extraction' ? '摘要、资料、关系或伏笔' : '预期规划或伏笔'}这些字段，无法安全显示为表单。请在高级 JSON 中检查是否粘贴了正确的模型输出。` };
+    const expected = compression ? ['text'] : stage === 'chapter-title' ? ['title'] : stage === 'extraction' ? ['summary', 'entities', 'relations', 'foreshadows'] : ['fine', 'foreshadows'];
+    if (Object.keys(parsed).length && !expected.some(key => key in parsed)) return { ok: false, message: `当前内容缺少${compression ? '压缩摘要 text' : stage === 'chapter-title' ? '章节名 title' : stage === 'extraction' ? '摘要、资料、关系或伏笔' : '预期规划或伏笔'}这些字段，无法安全显示为表单。请在高级 JSON 中检查是否粘贴了正确的模型输出。` };
     return { ok: true, value: parsed, unwrapped: unwrapped.unwrapped };
   } catch (e) {
     if (e instanceof SyntaxError) return { ok: false, message: 'JSON 的引号、逗号或括号不完整，暂时无法显示成表单。请切到“高级 JSON”修复格式，或粘贴完整输出；你的内容仍然保留。' };

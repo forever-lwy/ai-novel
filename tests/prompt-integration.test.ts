@@ -75,7 +75,7 @@ it('uses the selected message blocks and story variables for writing and backgro
   store.applyExtraction(project.mainBranchId, saved.branch.revisionId, saved.state.chapters[0].id, { summary: '旅人离开村庄。', entities: [], relations: [], foreshadows: [] }, true);
   const anchor = buildWritingContext({ state: store.state(project.mainBranchId), chapterText: id => store.chapter(project.mainBranchId, id).text }).variables.continuationAnchor;
   const engine = new StoryEngine(store, () => settings, models); engines.push(engine); engine.start();
-  const writing = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, instruction: '写旅人', mode: 'original' });
+  const writing = engine.enqueue(project.mainBranchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(project.mainBranchId).revisionId, instruction: '写旅人', mode: 'original' });
   expect((await terminal(engine, writing.id)).status).toBe('completed');
   const extraction = engine.listJobs().find(value => value.kind === 'extract')!;
   expect((await terminal(engine, extraction.id)).status).toBe('completed');

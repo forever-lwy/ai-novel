@@ -77,7 +77,7 @@ describe('author-only persisted model output recovery (neutral, simulated respon
     const model = provider(() => { calls++; return JSON.stringify(extraction()); });
     model.generateText = async (_config, request) => { calls++; request.onResponse?.({ rawResponse: '{"partial":true}', text: '记录员走向灯塔，', incomplete: true, httpStatus: 200, inputTokens: 10, outputTokens: 20 }); throw new ModelOutputError('模拟正文截断', { inputTokens: 10, outputTokens: 20 }); };
     const context = make(model); context.store.updateOutline(context.project.mainBranchId, context.store.getBranch(context.project.mainBranchId).revisionId, { ...planning(), locked: '', fine: planning().fine });
-    const job = context.engine.enqueue(context.project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '描述一次设备检查' }); await waitJob(context.engine, job.id);
+    const job = context.engine.enqueue(context.project.mainBranchId, 'generate', { title: '新章节', baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '描述一次设备检查' }); await waitJob(context.engine, job.id);
     const outputId = context.engine.listOutputs(job.id)[0].id; const envelope = JSON.stringify({ choices: [{ message: { content: '记录员走向灯塔，完成了检查。' } }] });
     expect(apply(context.engine, job, outputId, envelope).status).toBe('completed'); expect(calls).toBe(1); expect(context.store.exportText(context.project.mainBranchId)).toContain('记录员走向灯塔，完成了检查。'); expect(context.store.state(context.project.mainBranchId).chapters[0].status).toBe('pending');
     const background = context.engine.listJobs(context.project.id).find(item => item.kind === 'extract')!;

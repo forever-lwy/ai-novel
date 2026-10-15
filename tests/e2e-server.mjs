@@ -56,6 +56,7 @@ function fixtureReply(system, prompt) {
 }
 
 let modelRequests = 0;
+let chapterTitleRequests = 0;
 let modelListRequests = 0;
 const modelRequestsByModel = {};
 let lastModelParameters;
@@ -63,7 +64,7 @@ let imageRequests = 0; let imageEditRequests = 0; let lastImageRequest;
 let promptOptimizationRequests = 0; let lastPromptOptimizationRequest; let lastOptimizedImagePrompt;
 const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aP9sAAAAASUVORK5CYII=';
 const modelServer = createServer(async (req, res) => {
-  if (req.url === '/__e2e/stats' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ modelRequests, modelListRequests, modelRequestsByModel, lastModelParameters, imageRequests, imageEditRequests, lastImageRequest, promptOptimizationRequests, lastPromptOptimizationRequest, lastOptimizedImagePrompt })); return; }
+  if (req.url === '/__e2e/stats' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ modelRequests, chapterTitleRequests, modelListRequests, modelRequestsByModel, lastModelParameters, imageRequests, imageEditRequests, lastImageRequest, promptOptimizationRequests, lastPromptOptimizationRequest, lastOptimizedImagePrompt })); return; }
   if (req.url === '/__e2e/shutdown' && req.method === 'POST') { res.writeHead(200); res.end('stopping test fixture'); setImmediate(() => void close()); return; }
   if (req.method === 'POST' && ['/v1/images/generations', '/v1/images/edits'].includes(req.url)) {
     const chunks = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const raw = Buffer.concat(chunks); const edit = req.url.endsWith('/edits');
@@ -120,6 +121,12 @@ const modelServer = createServer(async (req, res) => {
       res.end(`data: ${JSON.stringify({ promptFeedback: { blockReason: 'SAFETY' }, usageMetadata: { promptTokenCount: 12 } })}\n\n`); return;
     }
     lastModelParameters = Object.fromEntries(['model', 'temperature', 'top_p', 'seed', 'stream', 'max_tokens', 'max_completion_tokens', 'reasoning_effort'].filter(key => body[key] !== undefined).map(key => [key, body[key]]));
+    if (system.includes('# 章节自动命名')) {
+      chapterTitleRequests++;
+      const text = JSON.stringify({ title: body.model === 'e2e-title-invalid' ? '新章节' : '城门下的钥匙' });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 30, completion_tokens: 10 } })); return;
+    }
     if (body.model === 'e2e-preset-activities') {
       const hasResults = body.messages?.some(message => message.role === 'tool');
       const frame = (delta, finish_reason = null) => `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }], usage: { prompt_tokens: 30, completion_tokens: 15 } })}\n\n`;

@@ -12,6 +12,7 @@ import { normalizeChapterWords, chapterBudgetReached } from '../shared/rpg-chapt
 import { HttpError, OutputValidationError, Store, rpgSetupSchema, rpgChoiceSchema } from './store.js';
 import { extractionContext, normalizeExtraction, splitExtractionBlocks as splitBlocks } from './extraction.js';
 import { buildWritingContext } from './writing-context.js';
+import { chapterNamingRequest, parseGeneratedChapterTitle } from './chapter-naming.js';
 import type { ImageService } from './images.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
 import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, StoryReference } from '../shared/types.js';
@@ -143,6 +144,7 @@ export class StoryEngine {
     if (job.branchId !== output.branchId || job.baseRevisionId !== output.baseRevisionId || this.store.getBranch(job.branchId).revisionId !== output.baseRevisionId) return '故事线已有新版本，此输出只能查看';
     if (this.jobsInternal(undefined, true).some(other => other.id !== job.id && other.branchId === job.branchId)) return '本故事线有其他进行中的任务';
     if (output.stage === 'extraction' && (String(job.payload.extractChapterId ?? '') !== output.chapterId || Number(job.payload.blockIndex ?? 0) !== output.blockIndex)) return '资料整理进度已经变化，此输出只能查看';
+    if (output.stage === 'chapter-title' && job.payload.pendingTitleChapterId !== output.chapterId) return '章节命名进度已经变化，此输出只能查看';
     if (['planning', 'compression'].includes(output.stage) && job.payload.purpose === 'compress-summary' && output.blockIndex !== undefined && output.blockIndex !== (job.payload.compressionWork as CompressionWork | undefined)?.completed) return '摘要压缩进度已经变化，此输出只能查看';
     return undefined;
   }
@@ -177,9 +179,11 @@ export class StoryEngine {
     let chapterId: string | undefined; let blockIndex: number | undefined;
     if (!stage) {
       if (job.kind === 'plan') { if (job.payload.purpose !== 'compress-summary') throw new HttpError('剧情规划功能已移除，不能导入新的规划输出', 410); stage = 'compression'; }
+      else if (job.payload.pendingTitleChapterId) stage = 'chapter-title';
       else if (job.kind === 'import' || job.kind === 'extract' || job.payload.generatedChapterId) stage = 'extraction';
       else stage = 'writing';
     }
+    if (stage === 'chapter-title') chapterId = String(job.payload.pendingTitleChapterId ?? '');
     if (stage === 'extraction') {
       chapterId = String(job.payload.extractChapterId ?? job.payload.generatedChapterId ?? job.payload.importCurrentChapterId ?? this.store.state(job.branchId).chapters.find(c => c.status !== 'ready')?.id ?? '');
       if (!chapterId) throw new HttpError('任务没有可恢复的待整理章节', 409);
@@ -199,6 +203,7 @@ export class StoryEngine {
     try {
       if (['planning', 'compression'].includes(output.stage) && job.payload.purpose === 'compress-summary') this.applyCompression(job, output, parseStructuredText(editedText, value => z.object({ text: z.string().min(1) }).parse(value)).text);
       else if (output.stage === 'writing') this.applyWriting(job, output, unwrapModelOutput(editedText), true);
+      else if (output.stage === 'chapter-title') this.applyGeneratedTitle(job, output, parseStructuredText(editedText, parseGeneratedChapterTitle).title, true);
       else this.applyExtracted(job, output, parseStructuredText(editedText, value => value), true);
       job = this.get(jobId); return this.publicJob(job);
     } catch (error) { this.failOutput(output, error); throw new HttpError('输出仍未通过校验；修改内容已保存，请查看作者输出记录中的具体位置', 422); }
@@ -233,7 +238,7 @@ export class StoryEngine {
     }
     finally { pending = false; }
   }
-  private publicJob(job: Job): Job { return { ...job, chapterStartChoiceId: (job.payload.rpgChapterAnswer as { choiceId?: string } | undefined)?.choiceId, pendingChoice: job.status === 'paused' && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice ? job.payload.rpgChoice as RpgChoice | undefined : undefined, usageEstimated: Boolean(job.payload.usageEstimated), generatedChapterId: job.payload.generatedChapterId as string | undefined, title: job.payload.title as string | undefined, generationInput: job.kind === 'generate' ? { mode: job.payload.mode as GenerateInput['mode'], instruction: String(job.payload.instruction ?? ''), maxWords: job.payload.maxWords as number | undefined, title: job.payload.title as string | undefined } : undefined, purpose: job.payload.purpose === 'compress-summary' ? 'compress-summary' : undefined, payload: {} }; }
+  private publicJob(job: Job): Job { return { ...job, chapterStartChoiceId: (job.payload.rpgChapterAnswer as { choiceId?: string } | undefined)?.choiceId, pendingChoice: job.status === 'paused' && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice ? job.payload.rpgChoice as RpgChoice | undefined : undefined, usageEstimated: Boolean(job.payload.usageEstimated), generatedChapterId: job.payload.generatedChapterId as string | undefined, title: job.payload.title as string | undefined, generationInput: job.kind === 'generate' ? { mode: job.payload.mode as GenerateInput['mode'], instruction: String(job.payload.instruction ?? ''), maxWords: job.payload.maxWords as number | undefined, title: job.payload.autoTitle ? undefined : job.payload.title as string | undefined } : undefined, purpose: job.payload.purpose === 'compress-summary' ? 'compress-summary' : undefined, payload: {} }; }
   writingSnapshot(jobId: string): Extract<WritingEvent, { type: 'snapshot' }> {
     const job = this.get(jobId); if (job.kind !== 'generate') throw new HttpError('此任务不是正文生成任务', 400);
     const row = this.store.db.prepare('SELECT text FROM job_writing_drafts WHERE job_id=?').get(job.id);
@@ -302,6 +307,10 @@ export class StoryEngine {
     }
     const total = kind === 'import' ? (payload.chapters as unknown[]).length : kind === 'extract' ? state.chapters.filter(c => c.status !== 'ready').length : 1;
     const { chapters: inputChapters, ...smallPayload } = payload;
+    if (kind === 'generate') {
+      smallPayload.title = typeof payload.title === 'string' ? payload.title.trim() : '';
+      smallPayload.autoTitle = !smallPayload.title;
+    }
     let job: Job;
     this.store.db.exec('BEGIN IMMEDIATE');
     try {
@@ -314,7 +323,7 @@ export class StoryEngine {
         const original = this.store.chapter(branchId, String(payload.chapterId));
         const fork = this.store.forkForGeneration(branchId, branch.revisionId, original.id, payload.branchName as string | undefined); branch = fork.branch;
         smallPayload.sourceBranchId = branchId; smallPayload.sourceChapterId = original.id;
-        smallPayload.chapterId = undefined; smallPayload.title = payload.title || original.title;
+        smallPayload.chapterId = undefined; smallPayload.title = smallPayload.title || original.title;
         if (payload.discardBackground) for (const background of backgroundJobs) { background.status = 'cancelled'; background.message = '作者放弃后台整理，已创建重新生成分支'; this.save(background); }
       }
       if (kind === 'generate') {
@@ -384,7 +393,7 @@ export class StoryEngine {
       const title = '新章节';
       let nextJob!: Job;
       this.store.commit(branchId, branch.revisionId, state, '确认章末选择，开始下一章', revisionId => {
-        nextJob = { id: randomUUID(), projectId: job.projectId, branchId, kind: 'generate', status: 'queued', baseRevisionId: revisionId, progress: 0, total: 1, message: '已保存章末选择，等待开始下一章', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { mode: 'rpg', instruction: nextChoice.instruction, maxWords: nextChoice.maxWords, title, rpgChapterAnswer: { question: nextChoice.question, ...answer, ...(nextChoice.followingChoices?.length ? { unansweredQuestions: nextChoice.followingChoices } : {}) }, sourceReferenceCaptured: true, ...(reference ? { sourceReference: reference } : {}) } };
+        nextJob = { id: randomUUID(), projectId: job.projectId, branchId, kind: 'generate', status: 'queued', baseRevisionId: revisionId, progress: 0, total: 1, message: '已保存章末选择，等待开始下一章', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { mode: 'rpg', instruction: nextChoice.instruction, maxWords: nextChoice.maxWords, title, autoTitle: true, rpgChapterAnswer: { question: nextChoice.question, ...answer, ...(nextChoice.followingChoices?.length ? { unansweredQuestions: nextChoice.followingChoices } : {}) }, sourceReferenceCaptured: true, ...(reference ? { sourceReference: reference } : {}) } };
         this.save(nextJob, false);
       });
       this.notifyWriting(nextJob); queueMicrotask(() => this.pump()); return this.publicJob(nextJob);
@@ -544,8 +553,30 @@ export class StoryEngine {
     queueMicrotask(() => this.pump());
   }
   private queueExtraction(writing: Job, chapterId: string, paused: boolean, blockIndex = 0) {
-    const background: Job = { id: randomUUID(), projectId: writing.projectId, branchId: writing.branchId, kind: 'extract', status: paused ? 'paused' : 'queued', baseRevisionId: writing.baseRevisionId, progress: 0, total: 1, message: paused ? '正文已修复；请手动继续后台资料整理' : '正文已保存，等待后台资料整理', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { extractChapterId: chapterId, blockIndex, writingJobId: writing.id } };
+    const autoTitle = writing.payload.autoTitle && !writing.payload.titleGenerated;
+    const background: Job = { id: randomUUID(), projectId: writing.projectId, branchId: writing.branchId, kind: 'extract', status: paused ? 'paused' : 'queued', baseRevisionId: writing.baseRevisionId, progress: 0, total: 1, message: paused ? `正文已修复；请手动继续后台${autoTitle ? '命名与' : ''}资料整理` : `正文已保存，等待后台${autoTitle ? '命名与' : ''}资料整理`, inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { extractChapterId: chapterId, blockIndex, writingJobId: writing.id, ...(autoTitle ? { pendingTitleChapterId: chapterId } : {}) } };
     this.save(background);
+  }
+  private applyGeneratedTitle(job: Job, output: ModelOutputRecord, title: string, local: boolean) {
+    if (!output.chapterId || job.payload.pendingTitleChapterId !== output.chapterId) throw new HttpError('章节命名进度已经变化', 409);
+    const chapter = this.store.chapter(job.branchId, output.chapterId);
+    const writing = this.get(String(job.payload.writingJobId));
+    if (writing.branchId !== job.branchId || writing.projectId !== job.projectId || writing.payload.generatedChapterId !== chapter.id || !writing.payload.autoTitle || writing.payload.titleGenerated) throw new HttpError('章节命名任务已失效', 409);
+    const checkpoint = this.outputCheckpoint(job, output, { ...job.payload, pendingTitleChapterId: undefined, pendingStage: undefined }, job.progress, '章节名已保存，等待资料整理', local);
+    const saveTitle = (revisionId: string, branchId: string) => {
+      checkpoint(revisionId, branchId);
+      writing.payload.title = title; writing.payload.titleGenerated = true; this.save(writing, false);
+    };
+    if (chapter.title === title) this.store.commit(job.branchId, job.baseRevisionId, this.store.state(job.branchId), '确认章节名称', saveTitle);
+    else this.store.updateChapterTitles(job.branchId, job.baseRevisionId, [{ chapterId: chapter.id, originalTitle: chapter.title, title }], saveTitle, '自动命名章节');
+    this.notifyWriting(writing);
+  }
+  private async nameChapter(jobId: string, chapterId: string, signal: AbortSignal) {
+    const job = this.live(jobId); const chapter = this.store.chapter(job.branchId, chapterId); const provider = this.provider('writing');
+    job.message = '正文已保存，正在根据本章内容生成章节名'; this.save(job);
+    const request = this.budget(job, provider, { ...chapterNamingRequest(chapter.text), signal });
+    const { result, output } = await this.requestCaptured(jobId, 'chapter-title', request, req => this.models.generateStructured(provider, req, parseGeneratedChapterTitle), result => JSON.stringify(result.value), chapterId);
+    this.applyGeneratedTitle(this.live(jobId), output, result.value.title, false);
   }
   private imageTools(jobId: string, preview?: PromptRuntime['illustrations']): { tools: ModelTool[] } {
     const config = preview ? { autoPortrait: preview.portrait, autoCG: preview.cg } : normalizeImageSettings(this.getSettings().imageSettings);
@@ -803,6 +834,8 @@ export class StoryEngine {
         return;
       }
       if (job.kind === 'extract') {
+        job = this.live(jobId);
+        if (typeof job.payload.pendingTitleChapterId === 'string') await this.nameChapter(jobId, job.payload.pendingTitleChapterId, controller.signal);
         job = this.live(jobId);
         if (typeof job.payload.pendingIllustrationChapterId === 'string') this.illustrateChapter(job, job.payload.pendingIllustrationChapterId);
         job = this.live(jobId); const pending = this.store.state(job.branchId).chapters.filter(c => c.status !== 'ready' && (!job.payload.targetChapterId || c.id === job.payload.targetChapterId));

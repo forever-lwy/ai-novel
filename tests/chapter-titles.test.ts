@@ -152,7 +152,7 @@ describe('continuation ignores split positions', () => {
     const requests: ModelRequest[] = [];
     const models: TextModels = { generateText: async (_provider, request) => { requests.push(request); return { text: '他推开门，跨进门后的灯火。', inputTokens: 1, outputTokens: 1 }; }, generateStructured: async (_provider, _request, validate) => ({ value: validate({ summary: '林舟推门进入。', entities: [], relations: [], foreshadows: [] }), inputTokens: 1, outputTokens: 1 }) };
     const engine = new StoryEngine(store, () => settings, models); engines.push(engine); engine.start();
-    const job = engine.enqueue(branchId, 'generate', { baseRevisionId: store.getBranch(branchId).revisionId, mode: 'continuation', instruction: '接着发生新事件' });
+    const job = engine.enqueue(branchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(branchId).revisionId, mode: 'continuation', instruction: '接着发生新事件' });
     for (let attempt = 0; attempt < 1000 && !['completed', 'failed'].includes(engine.listJobs().find(value => value.id === job.id)!.status); attempt++) await new Promise(resolve => setTimeout(resolve, 5));
     expect(engine.listJobs().find(value => value.id === job.id)!.status).toBe('completed');
     const request = requests[0]; expect(request.prompt).toContain('LAST_SAVED_END'); expect(request.prompt).toContain('continuationAnchor'); expect(request.prompt).toContain('第16章 夜谈');

@@ -213,12 +213,12 @@ describe('durable writing and extraction jobs (simulated models)', () => {
   it('saves generated prose before extraction fails and retries only extraction', async () => {
     const store = makeStore(); const p = store.createProject({ title: '失败恢复' }); let calls = 0;
     const mock = models(async () => { if (++calls === 1) throw new Error('模拟提取断网'); const result = emptyExtraction(); result.entities.push(person('阿青', '抵达临江城', '阿青')); return result; }); const engine = engineFor(store, mock);
-    const job = engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '写开场' });
+    const job = engine.enqueue(p.mainBranchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '写开场' });
     expect((await terminal(engine, job.id)).status).toBe('completed');
     const background = engine.listJobs(p.id).find(item => item.kind === 'extract')!;
     expect(background.id).not.toBe(job.id); expect((await terminal(engine, background.id)).status).toBe('failed');
     const pending = store.state(p.mainBranchId); expect(pending.chapters).toHaveLength(1); expect(pending.chapters[0].status).toBe('pending'); expect(store.exportText(p.mainBranchId)).toContain('阿青走进临江城');
-    expect(() => engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original' })).toThrow('上一章');
+    expect(() => engine.enqueue(p.mainBranchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original' })).toThrow('上一章');
     expect(() => engine.action(job.id, 'retry')).toThrow('只能继续');
     engine.action(background.id, 'retry'); expect((await terminal(engine, background.id)).status).toBe('completed');
     expect(jobState(engine, job.id).status).toBe('completed');
@@ -228,7 +228,7 @@ describe('durable writing and extraction jobs (simulated models)', () => {
   it('discards a late result after cancellation and keeps a single active job per story', async () => {
     const store = makeStore(); const p = store.createProject({ title: '取消' }); const delayed = deferred<string>(); let started = false;
     const mock = models(undefined, async () => { started = true; return delayed.promise; }); const engine = engineFor(store, mock);
-    const job = engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '开始' });
+    const job = engine.enqueue(p.mainBranchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '开始' });
     await until(() => started, Boolean);
     expect(() => engine.enqueue(p.mainBranchId, 'plan', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, purpose: 'compress-summary' })).toThrow('已有');
     const revision = store.getBranch(p.mainBranchId).revisionId; engine.action(job.id, 'cancel'); delayed.resolve('迟到正文'); await new Promise(r => setTimeout(r, 30));
@@ -238,7 +238,7 @@ describe('durable writing and extraction jobs (simulated models)', () => {
   it('does not overwrite a newer manual change when a background result arrives', async () => {
     const store = makeStore(); const p = store.createProject({ title: '并发编辑' }); const delayed = deferred<string>(); let started = false;
     const engine = engineFor(store, models(undefined, async () => { started = true; return delayed.promise; }));
-    const job = engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '开场' }); await until(() => started, Boolean);
+    const job = engine.enqueue(p.mainBranchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '开场' }); await until(() => started, Boolean);
     const current = store.view(p.mainBranchId, true); const manual = store.updateOutline(p.mainBranchId, current.branch.revisionId, { ...current.state.outline, locked: '新设备已经编辑的设定' }); delayed.resolve('基于旧版本生成的正文');
     expect((await terminal(engine, job.id)).status).toBe('stale'); expect(store.state(p.mainBranchId).chapters).toHaveLength(0); expect(store.getBranch(p.mainBranchId).revisionId).toBe(manual.branch.revisionId);
   });
@@ -268,7 +268,7 @@ describe('durable writing and extraction jobs (simulated models)', () => {
   it('estimates missing provider usage and continues extraction regardless of cumulative usage', async () => {
     const store = makeStore(); const p = store.createProject({ title: '限额' }); const mock = models();
     mock.generateText = vi.fn(async () => ({ text: '阿青的新正文', inputTokens: 600000, outputTokens: 0 })); const engine = engineFor(store, mock);
-    const job = engine.enqueue(p.mainBranchId, 'generate', { baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '写作' }); const done = await terminal(engine, job.id);
+    const job = engine.enqueue(p.mainBranchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(p.mainBranchId).revisionId, mode: 'original', instruction: '写作' }); const done = await terminal(engine, job.id);
     expect(done.status).toBe('completed'); expect(done.inputTokens).toBeGreaterThanOrEqual(600000); expect(done.outputTokens).toBeGreaterThan(0); expect(rawJob(store, job.id).payload.usageEstimated).toBe(true);
     const background = engine.listJobs(p.id).find(item => item.kind === 'extract')!;
     const extracted = await terminal(engine, background.id); expect(extracted.status).toBe('completed'); expect(extracted.inputTokens).toBe(10); expect(extracted.outputTokens).toBe(20);

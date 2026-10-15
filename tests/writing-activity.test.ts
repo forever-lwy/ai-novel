@@ -20,7 +20,7 @@ function models(write: (request: ModelRequest) => Promise<string>): TextModels {
   return { generateText: vi.fn(async (_provider, request) => ({ text: await write(request), inputTokens: 10, outputTokens: 20 })), generateStructured: vi.fn(async (_provider, _request, validate) => ({ value: validate(extraction()), inputTokens: 3, outputTokens: 4 })) };
 }
 function harness(model: TextModels) { const store = new Store(mkdtempSync(join(tmpdir(), 'novel-activity-'))); stores.push(store); const project = store.createProject({ title: '写作活动' }); const engine = new StoryEngine(store, settings, model); engines.push(engine); engine.start(); return { store, project, engine }; }
-function start(context: ReturnType<typeof harness>) { return context.engine.enqueue(context.project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章' }); }
+function start(context: ReturnType<typeof harness>) { return context.engine.enqueue(context.project.mainBranchId, 'generate', { title: '新章节', baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章' }); }
 const activityEvents = (events: WritingEvent[]): WritingActivity[] => events.flatMap(event => event.type === 'activity' ? [event.activity] : []);
 
 describe('author writing activity persistence and streaming', () => {
@@ -54,7 +54,7 @@ describe('author writing activity persistence and streaming', () => {
 
   it('uses author-visible redacted prose positions and preserves legacy unpositioned activity', async () => {
     const context = harness(models(async () => '最终正文。'));
-    const writing = context.engine.enqueue(context.project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '' });
+    const writing = context.engine.enqueue(context.project.mainBranchId, 'generate', { title: '新章节', baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '' });
     context.engine.action(writing.id, 'pause');
     context.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?)').run(writing.id, '开头 fixture-secret 后文');
     const redact = (value: string) => value.replaceAll('fixture-secret', '[REDACTED]');
@@ -237,7 +237,7 @@ describe('author-only activity API and SSE', () => {
     const loginResponse = await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'activity-api-test-password' } });
     const cookies = { session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value };
     const project = context.store.createProject({ title: '活动权限' });
-    const writing = context.engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章' });
+    const writing = context.engine.enqueue(project.mainBranchId, 'generate', { title: '新章节', baseRevisionId: context.store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章' });
     context.store.recordWritingActivity(writing.id, { type: 'thinking', id: 'private-thinking', text: '作者可见的思考过程' });
     context.store.recordWritingActivity(writing.id, { type: 'tool_call', id: 'private-tool', name: 'search_story', arguments: { q: '未揭晓的钥匙' } });
     context.store.recordWritingActivity(writing.id, { type: 'thinking', id: 'private-preset', text: '预设中的作者辅助核对', thinkingSource: 'preset' });
@@ -264,7 +264,7 @@ describe('author-only activity API and SSE', () => {
     const model = models(async request => { request.onActivity?.({ type: 'thinking', id: 'live-thought', text: '核对故事资料。' }); request.onActivity?.({ type: 'tool_call', id: 'live-tool', name: 'search_story', arguments: { q: '旧桥' } }); request.onTextDelta?.('旅人来到桥边。'); began.resolve(); await pending(finish.promise, request.signal); return '旅人来到桥边。'; });
     (context.engine as unknown as { models: TextModels }).models = model;
     const loginResponse = await context.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'activity-http-test-password' } }); const cookies = { session: loginResponse.cookies.find(cookie => cookie.name === 'session')!.value };
-    const project = context.store.createProject({ title: '活动实时流' }); const writing = context.engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章' });
+    const project = context.store.createProject({ title: '活动实时流' }); const writing = context.engine.enqueue(project.mainBranchId, 'generate', { title: '新章节', baseRevisionId: context.store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章' });
     const response = context.app.inject({ url: `/api/jobs/${writing.id}/events?view=author`, cookies });
     await context.app.ready(); context.engine.start(); await began.promise; finish.resolve();
     const stream = await response; expect(stream.statusCode).toBe(200);

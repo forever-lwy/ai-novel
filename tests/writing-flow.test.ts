@@ -20,7 +20,7 @@ const job = (engine: StoryEngine, id: string) => engine.listJobs().find(value =>
 const terminal = (engine: StoryEngine, id: string) => until(() => job(engine, id), value => ['completed', 'failed', 'cancelled', 'stale', 'paused'].includes(value.status));
 function harness(models: TextModels, config = settings()) { const store = new Store(mkdtempSync(join(tmpdir(), 'novel-writing-flow-'))); stores.push(store); const project = store.createProject({ title: '流式测试' }); const engine = new StoryEngine(store, () => config, models); engines.push(engine); engine.start(); return { store, project, engine }; }
 function mockModels(structured: () => Promise<unknown> = async () => extraction()): TextModels { return { generateText: vi.fn(async (_provider, request) => { request.onTextDelta?.('旅人'); request.onTextDelta?.('来到桥边。'); return { text: '旅人来到桥边。', inputTokens: 10, outputTokens: 12 }; }), generateStructured: vi.fn(async (_provider, _request, validate) => ({ value: validate(await structured()), inputTokens: 3, outputTokens: 4 })) }; }
-function start(ctx: ReturnType<typeof harness>, extra: Record<string, unknown> = {}) { return ctx.engine.enqueue(ctx.project.mainBranchId, 'generate', { baseRevisionId: ctx.store.getBranch(ctx.project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章', ...extra }); }
+function start(ctx: ReturnType<typeof harness>, extra: Record<string, unknown> = {}) { return ctx.engine.enqueue(ctx.project.mainBranchId, 'generate', { baseRevisionId: ctx.store.getBranch(ctx.project.mainBranchId).revisionId, mode: 'original', instruction: '写下一章', title: '新章节', ...extra }); }
 function readyChapter(store: Store, branchId: string, text: string) { let view = store.saveChapter(branchId, { baseRevisionId: store.getBranch(branchId).revisionId, title: '旧章节', text }); const id = view.state.chapters.at(-1)!.id; view = store.applyExtraction(branchId, view.branch.revisionId, id, { ...extraction(), summary: `${text}的完整剧情摘要。` }, true); return view; }
 
 describe('streaming prose, detached extraction and regeneration', () => {
@@ -132,7 +132,7 @@ describe('streaming prose, detached extraction and regeneration', () => {
     const second = start(ctx, { chapterId: firstState.chapters[15].id, regenerate: true, branchName: '第十六章第二版' });
     expect((await terminal(ctx.engine, second.id)).status).toBe('completed');
     const secondState = ctx.store.state(second.branchId);
-    const third = ctx.engine.enqueue(second.branchId, 'generate', { baseRevisionId: ctx.store.getBranch(second.branchId).revisionId, mode: 'original', instruction: '再次重新生成', chapterId: secondState.chapters[15].id, regenerate: true, branchName: '第十六章第三版' });
+    const third = ctx.engine.enqueue(second.branchId, 'generate', { baseRevisionId: ctx.store.getBranch(second.branchId).revisionId, mode: 'original', instruction: '再次重新生成', title: '新章节', chapterId: secondState.chapters[15].id, regenerate: true, branchName: '第十六章第三版' });
     expect((await terminal(ctx.engine, third.id)).status).toBe('completed');
     expect(ctx.store.getBranch(second.branchId).parentBranchId).toBe(ctx.project.mainBranchId);
     expect(ctx.store.getBranch(third.branchId).parentBranchId).toBe(ctx.project.mainBranchId);

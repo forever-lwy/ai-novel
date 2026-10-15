@@ -199,7 +199,7 @@ describe('provider connections and task model assignments', () => {
     const project = ctx.store.createProject({ title: '分任务模型' }); seedReadyChapter(ctx, project.mainBranchId); const branch = ctx.store.getBranch(project.mainBranchId);
     ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId, purpose: 'compress-summary' });
     await waitForTask(ctx.engine, planJob.id);
-    const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
+    const job = ctx.engine.enqueue(branch.id, 'generate', { title: '新章节', baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
     const deadline = Date.now() + 4000;
     while (!['completed', 'failed'].includes(ctx.engine.listJobs().find(value => value.id === job.id)!.status)) {
       if (Date.now() > deadline) throw new Error('本地模拟任务未完成'); await new Promise(resolve => setTimeout(resolve, 5));
@@ -232,7 +232,7 @@ describe('provider connections and task model assignments', () => {
     const project = ctx.store.createProject({ title: '相同模型按任务隔离参数' }); seedReadyChapter(ctx, project.mainBranchId); const branch = ctx.store.getBranch(project.mainBranchId);
     ctx.engine.start(); const planJob = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: branch.revisionId, purpose: 'compress-summary' });
     await waitForTask(ctx.engine, planJob.id);
-    const job = ctx.engine.enqueue(branch.id, 'generate', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
+    const job = ctx.engine.enqueue(branch.id, 'generate', { title: '新章节', baseRevisionId: ctx.store.getBranch(branch.id).revisionId, mode: 'original', instruction: '继续写作' });
     const deadline = Date.now() + 4000;
     while (!['completed', 'failed'].includes(ctx.engine.listJobs().find(value => value.id === job.id)!.status)) {
       if (Date.now() > deadline) throw new Error('本地模拟任务未完成'); await new Promise(resolve => setTimeout(resolve, 5));

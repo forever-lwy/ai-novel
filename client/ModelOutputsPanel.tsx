@@ -7,7 +7,7 @@ import { VisualOutputEditor } from './VisualOutputEditor';
 import { humanIssuePath, parseVisualOutput, unwrapVisualText } from './output-form';
 import { RequestDiagnostics } from './RequestDiagnostics';
 
-const stageNames: Record<OutputStage, string> = { planning: '历史规划', compression: '摘要压缩', writing: '正文生成', extraction: '资料提取' };
+const stageNames: Record<OutputStage, string> = { planning: '历史规划', compression: '摘要压缩', writing: '正文生成', 'chapter-title': '章节自动命名', extraction: '资料提取' };
 const outputStatusNames: Record<ModelOutputRecord['status'], string> = { received: '已收到', invalid: '校验未通过', applied: '已应用' };
 
 function downloadText(text: string, filename: string) {
@@ -243,7 +243,7 @@ export function ModelOutputsPanel({ job, branchName, onClose, onApplied, onDirty
             {output.incomplete && <div className="notice"><AlertCircle size={16} /><span>该次响应可能被截断。请核对完整结构与引文后再应用。</span></div>}
             {output.adjustments && output.adjustments.length > 0 && <details className="output-fold output-adjustments"><summary>系统已整理 {output.adjustments.length} 处 · 展开查看说明</summary><ul>{output.adjustments.map((adjustment, index) => <li key={index}><strong>{humanIssuePath(adjustment.path)}</strong><span>{adjustment.message}</span></li>)}</ul><p className="hint">这些是自动补全或对齐说明，不代表校验错误；原响应与最初文本仍保留。</p></details>}
             <div className="output-editor-modes" role="group" aria-label="修正方式"><button className={editorMode === 'form' ? 'active' : ''} onClick={() => { setEditorMode('form'); setFocusHelp(''); setFocusRequest(null); }}><ListChecks size={15} />可视化修正</button><button className={editorMode === 'json' ? 'active' : ''} onClick={() => showJson()}><Code2 size={15} />高级 JSON</button>{draft !== savedDraft && <span className="draft-badge">未保存</span>}</div>
-            <div className="visual-help"><BookOpen size={18} /><div><strong>{compression ? '直接修正压缩摘要候选，保留原摘要的关键事实' : output.stage === 'extraction' ? '按资料卡片修改，不需要编辑代码' : output.stage === 'planning' ? '按故事规划修改，不需要编辑代码' : '直接修改正文，再保存到故事中'}</strong><ol><li>有错误时，从“需要修正的地方”点击“去修改”。</li><li>{compression ? '压缩结果要比本次原摘要更短；修复后的候选仍需你另行确认才用于写作。' : output.stage === 'extraction' ? '引用有误时先选原文段落，再用整段或选中的文字填入。' : output.stage === 'planning' ? '核对章节预期规划和伏笔安排，保留原有设定。' : '核对下方正文并直接修改，原始响应不会被覆盖。'}</li><li>点击底部“保存并校验应用”。这一步不会调用模型。</li></ol>{output.issues.length > 0 && <p>问题标记来自上次校验；修改后再次保存，系统才会重新检查。</p>}</div></div>
+            <div className="visual-help"><BookOpen size={18} /><div><strong>{compression ? '直接修正压缩摘要候选，保留原摘要的关键事实' : output.stage === 'chapter-title' ? '根据本章内容填写章节名' : output.stage === 'extraction' ? '按资料卡片修改，不需要编辑代码' : output.stage === 'planning' ? '按故事规划修改，不需要编辑代码' : '直接修改正文，再保存到故事中'}</strong><ol><li>有错误时，从“需要修正的地方”点击“去修改”。</li><li>{compression ? '压缩结果要比本次原摘要更短；修复后的候选仍需你另行确认才用于写作。' : output.stage === 'chapter-title' ? '题名不附加章节编号。正文已经保存，应用后可继续资料整理。' : output.stage === 'extraction' ? '引用有误时先选原文段落，再用整段或选中的文字填入。' : output.stage === 'planning' ? '核对章节预期规划和伏笔安排，保留原有设定。' : '核对下方正文并直接修改，原始响应不会被覆盖。'}</li><li>点击底部“保存并校验应用”。这一步不会调用模型。</li></ol>{output.issues.length > 0 && <p>问题标记来自上次校验；修改后再次保存，系统才会重新检查。</p>}</div></div>
             {output.issues.length > 0 ? <section className="output-issues" aria-label="具体校验问题">
               <h3><AlertCircle size={16} />需要修正的地方 <span>{output.issues.length}</span></h3>
               {output.issues.map((issue, index) => <article className="output-issue" key={`${issue.path}-${index}`}>

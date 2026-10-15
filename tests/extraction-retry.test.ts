@@ -169,7 +169,7 @@ describe('bounded, cancellable extraction retries', () => {
 
   it('retries detached extraction without ever regenerating saved prose', async () => {
     let calls = 0; const model = models(() => ++calls === 1 ? '{"summary":' : valid()); const context = harness(model, config(), null);
-    const writing = context.engine.enqueue(context.project.mainBranchId, 'generate', { baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '描述设备检查' });
+    const writing = context.engine.enqueue(context.project.mainBranchId, 'generate', { title: '新章节', baseRevisionId: context.store.getBranch(context.project.mainBranchId).revisionId, mode: 'original', instruction: '描述设备检查' });
     expect((await terminal(context.engine, writing.id)).status).toBe('completed');
     const background = await until(() => context.engine.listJobs().find(job => job.kind === 'extract'), Boolean);
     expect((await terminal(context.engine, background!.id)).status).toBe('completed'); expect(model.generateText).toHaveBeenCalledTimes(1); expect(model.generateStructured).toHaveBeenCalledTimes(2);

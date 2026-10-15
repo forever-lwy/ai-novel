@@ -44,7 +44,7 @@ function engineFor(store: Store, config: Settings, start = true, extraction: () 
       requests.push({ budget: request.chapterBudget && { ...request.chapterBudget }, continuationRound: request.continuation?.round, continuationText: request.continuation?.text });
       return generateText(provider, request);
     }),
-    generateStructured: vi.fn(async (_provider, _request, validate) => ({ value: validate(extraction()), inputTokens: 1, outputTokens: 1 })) as TextModels['generateStructured'],
+    generateStructured: vi.fn(async (_provider, request, validate) => ({ value: validate(request.system.includes('# 章节自动命名') ? { title: '桥头之行' } : extraction()), inputTokens: 1, outputTokens: 1 })) as TextModels['generateStructured'],
   };
   const engine = new StoryEngine(store, () => config, models); engines.push(engine); if (start) engine.start(); return { engine, models, requests };
 }
@@ -179,7 +179,8 @@ describe('RPG chapter budgets and durable chapter-boundary choices', () => {
     const choice = store.state(queued.branchId).rpg!.nextChoice!; expect(store.chapter(queued.branchId, choice.chapterId).text).toBe(text);
     expect(() => answer(store, ctx.engine, choice)).toThrow(); expect(store.state(queued.branchId).rpg?.nextChoice).toEqual(choice);
     failExtraction = false; ctx.engine.action(background!.id, 'retry'); await ready(store, ctx.engine, queued.branchId);
-    expect(ctx.models.generateStructured).toHaveBeenCalledTimes(2); expect(service.bodies).toHaveLength(1);
+    expect(ctx.models.generateStructured).toHaveBeenCalledTimes(3); // 一次命名与两次资料提取。
+    expect(service.bodies).toHaveLength(1);
     expect(store.state(queued.branchId).rpg?.nextChoice).toEqual(choice); expect(store.chapter(queued.branchId, choice.chapterId).text).toBe(text);
     await ctx.engine.close(); const offline = engineFor(store, config, false); expect(answer(store, offline.engine, choice).id).not.toBe(queued.id);
     expect(service.bodies).toHaveLength(1);
@@ -279,7 +280,7 @@ describe('RPG chapter budgets and durable chapter-boundary choices', () => {
     const state = store.state(queued.branchId); expect(store.chapter(queued.branchId, state.chapters[0].id).text).toBe(text); expect(state.rpg?.nextChoice?.question).toBe('正文保存失败也不能丢失的问题');
     const extraction = await until(() => ctx.engine.listJobs().find(value => value.branchId === queued.branchId && value.kind === 'extract'), value => value?.status === 'paused');
     ctx.engine.action(extraction!.id, 'resume'); await ready(store, ctx.engine, queued.branchId);
-    expect(service.bodies).toHaveLength(1); expect(ctx.models.generateText).toHaveBeenCalledTimes(1); expect(ctx.models.generateStructured).toHaveBeenCalledTimes(1);
+    expect(service.bodies).toHaveLength(1); expect(ctx.models.generateText).toHaveBeenCalledTimes(1); expect(ctx.models.generateStructured).toHaveBeenCalledTimes(2); // 一次命名与一次资料提取。
     expect(store.state(queued.branchId).rpg?.nextChoice).toEqual(state.rpg?.nextChoice);
   });
 

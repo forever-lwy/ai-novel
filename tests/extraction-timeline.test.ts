@@ -136,7 +136,7 @@ describe('extracted chapter summaries, clues and character location snapshots', 
     const planned = store.updateOutline(branchId, imported.branch.revisionId, plan);
     expect(planned.state.chapters.map(chapter => chapter.summary)).toEqual([first.summary, second.summary]);
     expect(planned.state.outline).toEqual(plan);
-    const job = engine.enqueue(branchId, 'generate', { baseRevisionId: planned.branch.revisionId, mode: 'continuation', instruction: '接着写' });
+    const job = engine.enqueue(branchId, 'generate', { title: '新章节', baseRevisionId: planned.branch.revisionId, mode: 'continuation', instruction: '接着写' });
     await waitForJob(job.id);
     expect(writingPrompt).toContain(first.summary); expect(writingPrompt).toContain(second.summary); expect(writingPrompt).toContain(plan.worldview); expect(writingPrompt).not.toContain('追查旧塔');
     const background = engine.listJobs().find(item => item.kind === 'extract')!;

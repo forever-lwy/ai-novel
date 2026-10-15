@@ -34,7 +34,7 @@ describe('three-task prompts without plot planning',()=>{
   });
   it('starts writing and extraction without any planner request, tool or legacy plan in the prompt',async()=>{
     const {store,project,engine,models}=fixture();const before=store.state(project.mainBranchId);before.outline.fine=[{chapter:2,title:'历史预期',goal:'LEGACY_PLAN_MARKER'}];store.commit(project.mainBranchId,store.getBranch(project.mainBranchId).revisionId,before,'历史样例');
-    engine.start();const job=engine.enqueue(project.mainBranchId,'generate',{baseRevisionId:store.getBranch(project.mainBranchId).revisionId,mode:'original',instruction:'继续'});
+    engine.start();const job=engine.enqueue(project.mainBranchId,'generate',{title:'新章节',baseRevisionId:store.getBranch(project.mainBranchId).revisionId,mode:'original',instruction:'继续'});
     await until(()=>engine.listJobs().find(item=>item.id===job.id)?.status==='completed'&&store.state(project.mainBranchId).chapters[0]?.status==='ready');
     expect(models.generateText).toHaveBeenCalledTimes(1);expect(models.generateStructured).toHaveBeenCalledTimes(1);
     const request=vi.mocked(models.generateText).mock.calls[0][1];expect(request.tools?.some(tool=>tool.name==='update_plot_plan')).toBe(false);expect(JSON.stringify(request.messages)).not.toContain('LEGACY_PLAN_MARKER');expect(engine.listOutputs(job.id).map(output=>output.stage)).toEqual(['writing']);
@@ -42,7 +42,7 @@ describe('three-task prompts without plot planning',()=>{
     expect(buildWritingContext({state:store.state(project.mainBranchId),chapterText:id=>store.chapter(project.mainBranchId,id).text}).variables.currentChapterPlan).toBeUndefined();
   });
   it('resumes previously saved prose by organizing materials without re-generating or planning',async()=>{
-    const {store,project,engine,models}=fixture();const job=engine.enqueue(project.mainBranchId,'generate',{baseRevisionId:store.getBranch(project.mainBranchId).revisionId,mode:'original',instruction:'旧任务'});
+    const {store,project,engine,models}=fixture();const job=engine.enqueue(project.mainBranchId,'generate',{title:'新章节',baseRevisionId:store.getBranch(project.mainBranchId).revisionId,mode:'original',instruction:'旧任务'});
     const saved=store.saveChapter(project.mainBranchId,{baseRevisionId:job.baseRevisionId,title:'已保存正文',text:'已经保存的正文。'});
     job.status='failed';job.baseRevisionId=saved.branch.revisionId;job.payload.generatedChapterId=saved.state.chapters[0].id;job.payload.pendingStage='planning';job.payload.postWritingPlanning='pending';persist(store,job);
     engine.start();engine.action(job.id,'resume');await until(()=>store.state(project.mainBranchId).chapters[0].status==='ready');

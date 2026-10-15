@@ -167,7 +167,7 @@ describe('version-bound original novel references', () => {
 
   it('pins the absence of a reference when an original job is queued', async () => {
     const store = storeFor(), project = store.createProject({ title: '队列固定空参考' }), engine = engineFor(store);
-    const queued = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '' });
+    const queued = engine.enqueue(project.mainBranchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '' });
     expect(rawJob(store, queued.id).payload).toMatchObject({ sourceReferenceCaptured: true }); expect(rawJob(store, queued.id).payload.sourceReference).toBeUndefined();
     source(store, project.id, project.mainBranchId, 'later-confirmed-source');
     const reading = vi.spyOn(store, 'originalReference'); engine.start();
@@ -177,21 +177,21 @@ describe('version-bound original novel references', () => {
 
   it('keeps rejected pure-original future material out of regeneration while retaining it for explicit derivative modes', () => {
     const { store, project, firstChapterId } = fixture(); const engine = engineFor(store); const baseRevisionId = store.getBranch(project.mainBranchId).revisionId;
-    const original = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId, mode: 'original', chapterId: firstChapterId, regenerate: true, instruction: '' });
+    const original = engine.enqueue(project.mainBranchId, 'generate', { title: '新章节', baseRevisionId, mode: 'original', chapterId: firstChapterId, regenerate: true, instruction: '' });
     expect(rawJob(store, original.id).payload.sourceReference).toBeUndefined(); expect(rawJob(store, original.id).payload.sourceReferenceCaptured).toBe(true);
     expect(store.state(original.branchId).sourceReference).toBeDefined();
-    const fanfiction = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId, mode: 'fanfiction', chapterId: firstChapterId, instruction: '' });
+    const fanfiction = engine.enqueue(project.mainBranchId, 'generate', { title: '新章节', baseRevisionId, mode: 'fanfiction', chapterId: firstChapterId, instruction: '' });
     expect(rawJob(store, fanfiction.id).payload.sourceReference).toBeDefined();
     source(store, project.id, project.mainBranchId, 'confirmed-canon');
     engine.action('import-confirmed-canon', 'cancel');
-    const imported = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId, mode: 'original', chapterId: firstChapterId, regenerate: true, instruction: '' });
+    const imported = engine.enqueue(project.mainBranchId, 'generate', { title: '新章节', baseRevisionId, mode: 'original', chapterId: firstChapterId, regenerate: true, instruction: '' });
     expect((rawJob(store, imported.id).payload.sourceReference as StoryReference).sourceIds).toEqual(['confirmed-canon']);
   });
 
   it('pins queued generation, persists the reference with prose, and excludes it from extraction context', async () => {
     const { store, project, firstChapterId } = fixture(); const fork = store.fork(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, chapterId: firstChapterId, name: '生成集成' });
     const extractionRequests: ModelRequest[] = []; const engine = engineFor(store, extractionRequests);
-    const queued = engine.enqueue(fork.branch.id, 'generate', { baseRevisionId: fork.branch.revisionId, mode: 'fanfiction', instruction: '' }); const pinned = rawJob(store, queued.id).payload.sourceReference as StoryReference;
+    const queued = engine.enqueue(fork.branch.id, 'generate', { title: '新章节', baseRevisionId: fork.branch.revisionId, mode: 'fanfiction', instruction: '' }); const pinned = rawJob(store, queued.id).payload.sourceReference as StoryReference;
     entity(store, project.mainBranchId, '排队之后的新人物');
     const read = vi.spyOn(store, 'originalReference'); engine.start();
     const done = await until(() => engine.listJobs().find(job => job.id === queued.id)!, job => ['completed', 'failed'].includes(job.status)); expect(done.status).toBe('completed');

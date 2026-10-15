@@ -66,7 +66,7 @@ function harness(turns: Turn[], options: { autoCG?: boolean; autoPortrait?: bool
   };
   const engine = new StoryEngine(store, () => settings, models, images);
   const fixture = { store, engines: [engine], images }; fixtures.push(fixture); engine.start();
-  const start = (branchId = project.mainBranchId, selectedEngine = engine) => selectedEngine.enqueue(branchId, 'generate', { baseRevisionId: store.getBranch(branchId).revisionId, mode: 'original', instruction: '继续创作' });
+  const start = (branchId = project.mainBranchId, selectedEngine = engine) => selectedEngine.enqueue(branchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(branchId).revisionId, mode: 'original', instruction: '继续创作' });
   return { ...fixture, project, engine, start, settings, models, generator, requests };
 }
 async function finish(ctx: ReturnType<typeof harness>, imageCount: number, projectId = ctx.project.id) {

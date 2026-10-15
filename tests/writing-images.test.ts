@@ -27,7 +27,7 @@ function harness(autoCG: boolean, toolCalls = true, configured = true, imageFail
     generateStructured: vi.fn(async (_provider, _request, validate) => ({ value: validate(extracted()), inputTokens: 4, outputTokens: 8 })),
   };
   const engine = new StoryEngine(store, () => settings, models, { generateAutomatic } as any); fixtures.push({ store, engine }); engine.start();
-  const job = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '写新人物与大战' });
+  const job = engine.enqueue(project.mainBranchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'original', instruction: '写新人物与大战' });
   return { store, engine, project, job, models, generateAutomatic };
 }
 

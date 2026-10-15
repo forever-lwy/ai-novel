@@ -224,7 +224,7 @@ export function VisualOutputEditor({ value, stage, issues, sourceParagraphs, dis
   }, [focusRequest]);
   const context: EditorContext = { value, issues, sourceParagraphs, disabled, change: (path, next) => { if (!disabled) onChange(replaceAt(value, path, next)); } };
   return <Context.Provider value={context}><div className="visual-output-editor" ref={root}>
-    {compression ? <TextField path={['text']} label="压缩摘要候选" rows={16} help="保留关键事件、人物变化和因果关系，确保比本次原摘要更短。保存修正后仍需作者确认，才用于之后的写作。" /> : stage === 'extraction' ? <>
+    {compression ? <TextField path={['text']} label="压缩摘要候选" rows={16} help="保留关键事件、人物变化和因果关系，确保比本次原摘要更短。保存修正后仍需作者确认，才用于之后的写作。" /> : stage === 'chapter-title' ? <TextField path={['title']} label="章节名" help="填写贴合本章内容的简短题名，不附加章节编号。保存后可继续资料整理。" /> : stage === 'extraction' ? <>
       <TextField path={['summary']} label="本段摘要" rows={3} help="用几句话概括本次原文片段中已经发生的事，不写未来剧情或未揭晓的答案。" />
       <ListSection path={['entities']} title="人物、地点与其他资料" help="每张卡片对应一项资料；需要修改的具体变化放在卡片内的事实中。" empty="本次没有提取到资料。需要补充人物、地点或规则时，可以添加。" addLabel="添加资料" newItem={() => ({ kind: 'character', name: '', aliases: [], description: '', visibility: 'secret', facts: [] })}>{(item, path, index) => <EntityCard key={index} item={item} path={path} index={index} />}</ListSection>
       <ListSection path={['relations']} title="资料之间的关系" help="例如人物位于某地、组织隶属、师徒或亲属关系。" empty="本次没有需要新增的关系，可保持为空。" addLabel="添加关系" newItem={() => ({ from: '', to: '', label: '', visibility: 'secret' })}>{(item, path, index) => <RelationCard key={index} item={item} path={path} index={index} />}</ListSection>
@@ -232,6 +232,6 @@ export function VisualOutputEditor({ value, stage, issues, sourceParagraphs, dis
 
       <ListSection path={['fine']} title="未发生剧情的预期规划" help="核对当前待写章节与接下来三章的安排，章节序号应与故事进度一致。" empty="暂时没有章节安排，请添加需要规划的章节。" addLabel="添加章节规划" newItem={() => ({ chapter: Array.isArray(value.fine) ? Math.max(0, ...value.fine.filter(isObject).map(item => typeof item.chapter === 'number' ? item.chapter : 0)) + 1 : 1, title: '', goal: '' })}>{(item, path, index) => <FineOutlineCard key={index} item={item} path={path} index={index} />}</ListSection>
     </>}
-    {!compression && <ListSection path={['foreshadows']} title="伏笔与隐藏安排" help="这里的内容只供作者查看，不会出现在普通阅读资料中。" empty="本次没有新增伏笔，可保持为空。" addLabel="添加伏笔" newItem={newForeshadow}>{(item, path, index) => <ForeshadowCard key={index} item={item} path={path} index={index} />}</ListSection>}
+    {!compression && stage !== 'chapter-title' && <ListSection path={['foreshadows']} title="伏笔与隐藏安排" help="这里的内容只供作者查看，不会出现在普通阅读资料中。" empty="本次没有新增伏笔，可保持为空。" addLabel="添加伏笔" newItem={newForeshadow}>{(item, path, index) => <ForeshadowCard key={index} item={item} path={path} index={index} />}</ListSection>}
   </div></Context.Provider>;
 }
