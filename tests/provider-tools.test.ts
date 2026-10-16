@@ -55,8 +55,8 @@ describe('real provider tool continuations with visible streaming', () => {
     for (const call of onRequest.mock.calls) expect(call[0].stream).toBe(true);
     const first = service.bodies[0], second = service.bodies[1];
     expect(JSON.stringify(second)).toContain('航海'); expect(JSON.stringify(first)).not.toContain('航海');
-    if (protocol === 'openai-chat') { expect(second.messages.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'lookup-1' }); expect(second.messages.at(-2).reasoning_content).toBe('内部思考'); expect(second.max_tokens).toBe(1000); }
-    else if (protocol === 'openai-responses') { expect(second.input.at(-1)).toMatchObject({ type: 'function_call_output', call_id: 'lookup-1' }); expect(JSON.stringify(second)).toContain('reasoning-signature'); expect(second.max_output_tokens).toBe(1000); }
+    if (protocol === 'openai-chat') { expect(second.messages.at(-2)).toMatchObject({ role: 'tool', tool_call_id: 'lookup-1' }); expect(second.messages.at(-3).reasoning_content).toBe('内部思考'); expect(second.max_tokens).toBe(1000); }
+    else if (protocol === 'openai-responses') { expect(second.input.at(-2)).toMatchObject({ type: 'function_call_output', call_id: 'lookup-1' }); expect(JSON.stringify(second)).toContain('reasoning-signature'); expect(second.max_output_tokens).toBe(1000); }
     else if (protocol === 'gemini') { expect(second.contents.at(-1).parts[0].functionResponse).toMatchObject({ name: 'read_entity', id: 'lookup-1' }); expect(JSON.stringify(second)).toContain('reasoning-signature'); expect(second.generationConfig.maxOutputTokens).toBe(1000); }
     else { expect(second.messages.at(-1).content[0]).toMatchObject({ type: 'tool_result', tool_use_id: 'lookup-1' }); expect(JSON.stringify(second)).toContain('reasoning-signature'); expect(second.max_tokens).toBe(1000); }
   });

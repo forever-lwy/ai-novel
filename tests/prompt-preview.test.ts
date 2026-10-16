@@ -6,7 +6,7 @@ import { buildApp } from '../server/app.js';
 import { defaultPromptTemplates, EXTRACT_SYSTEM } from '../shared/prompt-templates.js';
 import { normalizeExtraction, splitExtractionBlocks } from '../server/extraction.js';
 import { structuredRequest } from '../server/providers.js';
-import { STRUCTURED_OUTPUT_INSTRUCTION, type PromptPreviewInput, type PromptPreviewResult } from '../shared/prompt-runtime.js';
+import { STRUCTURED_OUTPUT_INSTRUCTION, TOOL_RESULT_REVIEW_INSTRUCTION, type PromptPreviewInput, type PromptPreviewResult } from '../shared/prompt-runtime.js';
 import type { PromptTask, ProviderProtocol } from '../shared/types.js';
 import { V08_PRESET_ID } from '../shared/v08-prompts.js';
 import { REBORN_PRESET_ID } from '../shared/reborn-prompts.js';
@@ -24,6 +24,12 @@ const variables = { context: '示例故事资料', mode: 'original', instruction
 const input = (task: PromptTask, protocol: ProviderProtocol): PromptPreviewInput => ({ task, protocol, templates: defaultPromptTemplates(), variables, runtime: {} });
 
 describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s final prompt preview', protocol => {
+  it('shows the same post-tool review rule used by actual continuations', () => {
+    const preview = ctx.engine.previewPrompt(input('writing', protocol));
+    expect(preview.runtimeBlocks.find(block => block.name === '工具结果复核规则')?.content).toBe(TOOL_RESULT_REVIEW_INSTRUCTION);
+    expect(preview.messages.some(message => message.content.includes(TOOL_RESULT_REVIEW_INSTRUCTION))).toBe(true);
+    expect(preview.body).toContain('# 工具结果复核');
+  });
   it.each<PromptTask>(['writing', 'extraction', 'compression'])('previews Reborn with cooperative %s v2 using real native roles without saving', async task => {
     const draft = input(task, protocol); draft.templates.general!.selected = REBORN_PRESET_ID; draft.templates.selected[task] = TASK_V2_PRESET_IDS[task];
     const before = (await ctx.app.inject({ url: '/api/settings', cookies })).body;

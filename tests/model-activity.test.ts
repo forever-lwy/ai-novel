@@ -136,7 +136,7 @@ describe('public author model activity separated from novel prose', () => {
     const result = await generateText(config('openai-chat', service.baseUrl, false), { system: '中性测试', prompt: '正文', tools: [{ name: 'lookup', description: '查询', parameters: { type: 'object' }, execute: () => ({ error: '未找到此资料' }) }], onActivity: event => events.push(event) });
     expect(result.text).toBe(prose); expect(service.bodies).toHaveLength(2);
     expect(events.find(event => event.type === 'tool_result')).toMatchObject({ result: { error: '未找到此资料' }, error: '未找到此资料' });
-    expect(service.bodies[1].messages.at(-1)).toMatchObject({ role: 'tool', content: JSON.stringify({ error: '未找到此资料' }) });
+    expect(service.bodies[1].messages.at(-2)).toMatchObject({ role: 'tool', content: JSON.stringify({ error: '未找到此资料' }) });
   });
 
   it('keeps native and preset thoughts separate and redacts split secrets in preset thoughts', async () => {

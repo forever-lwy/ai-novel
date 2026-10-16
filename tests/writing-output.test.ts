@@ -195,8 +195,8 @@ describe('layered writing tool transport', () => {
     expect(activities.find(value => value.type === 'tool_call')).toMatchObject({ name: 'read_entity', arguments: { id: 'person' } });
     expect(service.bodies).toHaveLength(2);
     const next = service.bodies[1]; expect(JSON.stringify(next)).toContain('toolResults');
-    if (protocol === 'openai-chat') expect(next.messages.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'outer-1' });
-    else if (protocol === 'openai-responses') expect(next.input.at(-1)).toMatchObject({ type: 'function_call_output', call_id: 'outer-1' });
+    if (protocol === 'openai-chat') expect(next.messages.at(-2)).toMatchObject({ role: 'tool', tool_call_id: 'outer-1' });
+    else if (protocol === 'openai-responses') expect(next.input.at(-2)).toMatchObject({ type: 'function_call_output', call_id: 'outer-1' });
     else if (protocol === 'gemini') expect(next.contents.at(-1).parts[0].functionResponse).toMatchObject({ name: WRITING_RESPONSE_NAME, id: 'outer-1' });
     else expect(next.messages.at(-1).content[0]).toMatchObject({ type: 'tool_result', tool_use_id: 'outer-1' });
     if (protocol !== 'openai-chat') expect(JSON.stringify(next)).toContain('opaque-signature');

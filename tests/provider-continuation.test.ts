@@ -60,7 +60,7 @@ describe('persistent human decisions inside provider tool rounds', () => {
     expect(answer).toHaveBeenCalledTimes(1); expect(service.bodies).toHaveLength(2);
     expect(initialContinuation.pending?.nextIndex).toBe(1); expect(initialContinuation.pending?.results).toHaveLength(1);
     const resumedBody = service.bodies[1]; expect(JSON.stringify(resumedBody)).toContain('渡河'); expect(JSON.stringify(resumedBody)).toContain('read-before'); expect(JSON.stringify(resumedBody)).toContain('read-after');
-    if (protocol === 'openai-chat') { expect(resumedBody.messages.at(-4).reasoning_content).toBe('内部思考'); expect(resumedBody.messages.slice(-3).map((message: any) => message.tool_call_id)).toEqual(['read-before', 'decision', 'read-after']); }
+    if (protocol === 'openai-chat') { expect(resumedBody.messages.at(-5).reasoning_content).toBe('内部思考'); expect(resumedBody.messages.slice(-4, -1).map((message: any) => message.tool_call_id)).toEqual(['read-before', 'decision', 'read-after']); }
     else expect(JSON.stringify(resumedBody)).toContain('signed-reasoning');
     expect(persisted.pending).toBeUndefined(); expect(persisted.round).toBe(1); expect(persisted.callCount).toBe(3);
     expect(JSON.parse(buildRequestSnapshot(model, { ...request(read, answer), continuation: persisted }).body)).toEqual(resumedBody);
@@ -202,10 +202,12 @@ describe('RPG cumulative chapter budget', () => {
       if (index) {
         expect(JSON.stringify(body)).toContain(protocol === 'openai-chat' ? '内部思考' : 'signed-reasoning');
         if (protocol === 'gemini') {
-          expect(body.contents.at(-1).parts.slice(0, -1).every((part: any) => part.functionResponse)).toBe(true);
+          expect(body.contents.at(-1).parts.slice(0, -2).every((part: any) => part.functionResponse)).toBe(true);
+          expect(body.contents.at(-1).parts.at(-2).text).toContain('# 工具结果复核');
           expect(body.contents.at(-1).parts.at(-1).text).toContain('[ai-novel:rpg-chapter-budget]');
         } else if (protocol === 'claude') {
-          expect(body.messages.at(-1).content.slice(0, -1).every((part: any) => part.type === 'tool_result')).toBe(true);
+          expect(body.messages.at(-1).content.slice(0, -2).every((part: any) => part.type === 'tool_result')).toBe(true);
+          expect(body.messages.at(-1).content.at(-2).text).toContain('# 工具结果复核');
           expect(body.messages.at(-1).content.at(-1).text).toContain('[ai-novel:rpg-chapter-budget]');
         }
       }

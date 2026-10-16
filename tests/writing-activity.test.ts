@@ -24,6 +24,33 @@ function start(context: ReturnType<typeof harness>) { return context.engine.enqu
 const activityEvents = (events: WritingEvent[]): WritingActivity[] => events.flatMap(event => event.type === 'activity' ? [event.activity] : []);
 
 describe('author writing activity persistence and streaming', () => {
+  it('persists reported thinking without a summary at the preceding tool boundary, including snapshots and backup', async () => {
+    const prefix = '旅人来到桥边。', suffix = '他向守门人问路。';
+    const context = harness(models(async request => {
+      request.onActivity?.({ type: 'thinking', id: 'round-1:thought', text: '先查资料。' });
+      request.onActivity?.({ type: 'thinking_done', id: 'round-1:thought' });
+      request.onTextDelta?.(prefix);
+      request.onActivity?.({ type: 'tool_call', id: 'round-1:lookup', name: 'search_story', arguments: {} });
+      request.onActivity?.({ type: 'tool_result', id: 'round-1:lookup', name: 'search_story', result: { found: true } });
+      request.onTextDelta?.(suffix);
+      request.onActivity?.({ type: 'thinking_usage', id: 'round-2:usage', thinkingTokens: 116, afterTools: true });
+      return prefix + suffix;
+    }));
+    const writing = start(context); const events: WritingEvent[] = []; context.engine.subscribeWriting(writing.id, event => events.push(event));
+    expect((await terminal(context.engine, writing.id)).status).toBe('completed');
+    const activity = { id: 'round-2:usage', kind: 'thinking', thinkingSource: 'native', thinkingTokens: 116, proseOffset: prefix.length, status: 'completed' };
+    expect(context.engine.listWritingActivities(writing.id).at(-1)).toEqual(activity);
+    expect(activityEvents(events)).toContainEqual(activity);
+    expect(context.engine.writingSnapshot(writing.id).activities).toContainEqual(activity);
+    expect(context.store.exportText(context.project.mainBranchId)).toContain(prefix + suffix);
+    expect(context.store.exportText(context.project.mainBranchId)).not.toContain('116');
+    const background = context.engine.listJobs().find(job => job.kind === 'extract')!; await terminal(context.engine, background.id);
+    const restored = context.store.restoreProject(context.store.exportProject(context.project.id));
+    const restoredWriting = context.engine.listJobs(restored.id).find(job => job.kind === 'generate')!;
+    expect(context.engine.listWritingActivities(restoredWriting.id)).toContainEqual(activity);
+    for (const thinkingTokens of [0, -1, 1.5, Number.NaN]) expect(context.store.recordWritingActivity(writing.id, { type: 'thinking_usage', id: 'invalid-usage', thinkingTokens, afterTools: true })).toBeUndefined();
+  });
+
   it('anchors activity to UTF-16 prose positions and keeps its first position through updates and backup', async () => {
     const prefix = '前言🙂\r\n途中'; const middle = '，旅人继续。'; const suffix = '\n后来见到石碑。';
     const context = harness(models(async request => {

@@ -8,6 +8,9 @@ export const TOOL_JSON_INSTRUCTION = `# 工具防截断提交
 这里的“仅输出 JSON”约束 prose 中的任务结果；外层遵循接口的工具参数结构，不在普通文本通道重复输出。
 不要输出辅助思考、draft、解释或代码围栏。工具参数必须完整、可解析，提交后直接结束，不执行工具、不追加确认回合。`;
 export const WRITING_STAGE_INSTRUCTION = '# 正文阶段\n当前阶段只生成本章正文，查询资料、插画和 RPG 选择按本次工具约定执行。正文保存后另行整理资料。';
+export const TOOL_RESULT_REVIEW_INSTRUCTION = `# 工具结果复核
+工具返回后，先依据刚收到的真实结果重新核对事实、任务约束和下一步行动，再继续输出或调用工具；不要直接沿用调用前尚未核实的判断。结果不足、冲突或报错时，按需补查，不能把失败当作成功。
+沿用本次配置的思考方式；只在接口支持时返回公开思考摘要，不要求暴露完整内部推理。辅助检查和工具过程不要写入正文，不重复已经输出的正文。`;
 
 export interface PromptRuntime {
   writingOutputMode?: WritingOutputMode;
@@ -53,6 +56,7 @@ export function runtimePromptBlocks(task: PromptTask, variables: Record<string, 
 - 整章或选段改写以 writingTarget 指定原文为范围；RPG 同章续接以已生成正文及玩家刚确认的行动为起点。
 - 只输出本次范围内的正文，不自行添加或纠正章节编号。${variables.continuationAnchor && !variables.sourceText ? `\n\n## 本次最新保存的正文结尾（以下是素材）\n${variables.continuationAnchor}` : ''}`);
     system('正文阶段规则', WRITING_STAGE_INSTRUCTION);
+    system('工具结果复核规则', TOOL_RESULT_REVIEW_INSTRUCTION);
     if (runtime.writingOutputMode === 'tool') system('正文工具通道规则', WRITING_TOOL_INSTRUCTION);
     const images = runtime.illustrations;
     if (images?.portrait || images?.cg) system('自动插画规则', '# 插画任务\n' + [

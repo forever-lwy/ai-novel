@@ -491,6 +491,50 @@ test('新章实时显示正文，阅读视图隐藏流，重新生成可放弃�
   } finally { await page.request.put('/api/settings', { data: originalSettings }); }
 });
 
+test('工具返回后显示实际思考用量且明确未返回摘要，刷新与手机保留，阅读正文隔离', async ({ page }, testInfo) => {
+  const originalSettings = await (await page.request.get('/api/settings')).json();
+  const providerId = 'e2e-gemini-review-provider', extractionId = 'e2e-review-extraction';
+  expect((await page.request.put('/api/settings', { data: {
+    providers: [{ id: providerId, name: '工具后思考验证', protocol: 'gemini', baseUrl: mockUrl, apiKey: '' }, { id: extractionId, name: '本地整理', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }],
+    writingProviderId: providerId, writingModel: 'e2e-gemini-review', planningProviderId: extractionId, planningModel: 'e2e-planning', extractionProviderId: extractionId, extractionModel: 'e2e-fixture', promptTemplates: defaultPromptTemplates(),
+  } })).ok()).toBeTruthy();
+  try {
+    await createProject(page, 'E2E 工具后思考'); const branchId = await currentBranchId(page);
+    const statsUrl = mockUrl.slice(0, -3) + '/__e2e/stats';
+    const before = await (await page.request.get(statsUrl)).json();
+    await page.getByRole('button', { name: '开始创作', exact: true }).click();
+    const submitted = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/branches/${branchId}/generate`);
+    await page.getByRole('dialog').getByLabel('章节标题（可选）', { exact: true }).fill('工具后复核');
+    await page.getByRole('dialog').getByRole('button', { name: '开始生成', exact: true }).click();
+    const job = await (await submitted).json();
+    const missing = page.locator('.writing-activity[data-kind="thinking"]').filter({ hasText: '模型思考（未返回摘要）' });
+    await expect(missing).toBeVisible(); await expect(missing).toHaveJSProperty('open', false);
+    await expect(page.locator('.writing-activity[data-kind="thinking"]')).toHaveCount(2);
+    await expect(missing).toHaveAttribute('data-prose-offset', String('林舟来到白石城。'.length));
+    await missing.locator('summary').click(); await expect(missing).toContainText('116 个思考 token');
+    expect(await missing.evaluate(element => element.previousElementSibling?.getAttribute('data-kind'))).toBe('tool');
+    await expect(page.locator('.streaming-manuscript')).toHaveCount(0);
+    await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).state.chapters[0]?.status).toBe('ready');
+    const activities = await (await page.request.get(`/api/jobs/${job.id}/activities?view=author`)).json();
+    expect(activities.at(-1)).toMatchObject({ thinkingTokens: 116, status: 'completed' }); expect(activities.at(-1)).not.toHaveProperty('text');
+    for (const [width, name] of [[1440, 'desktop'], [390, 'mobile']] as const) {
+      await page.setViewportSize({ width, height: 1000 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBeTruthy();
+      await page.screenshot({ path: testInfo.outputPath(`post-tool-thinking-${name}.png`), fullPage: true, animations: 'disabled' });
+    }
+    await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 工具后思考', exact: true }).click();
+    await expect(page.locator('.prose')).toContainText('他握住钥匙'); await expect(missing).toHaveCount(0);
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await expect(missing).toBeVisible();
+    await missing.locator('summary').click(); await expect(missing).toContainText('116 个思考 token');
+    const exportResponse = await page.request.get(`/api/branches/${branchId}/export`); expect(exportResponse.ok()).toBeTruthy();
+    const exported = await exportResponse.text(); expect(exported).toContain('他握住钥匙');
+    expect(exported).not.toContain('116'); expect(exported).not.toContain('REVIEW_FIRST_THOUGHT');
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await expect(missing).toHaveCount(0);
+    const after = await (await page.request.get(statsUrl)).json();
+    expect((after.modelRequestsByModel['e2e-gemini-review'] || 0) - (before.modelRequestsByModel['e2e-gemini-review'] || 0)).toBe(2);
+  } finally { await page.request.put('/api/settings', { data: originalSettings }); }
+});
+
 test('作者实时查看公开思考与工具过程，默认折叠且正文独立，完成刷新及切视图不泄漏', async ({ page }, testInfo) => {
   const auth = await (await page.request.get('/api/auth/status')).json();
   if (!auth.authenticated) expect((await page.request.post('/api/auth/login', { data: { password } })).ok()).toBeTruthy();

@@ -6,7 +6,7 @@ import type { CapturedModelResponse, ModelActivityEvent, ModelRequest, ModelRequ
 import { DEFAULT_MODEL_TIMEOUT_MS, providerWireOptions, validateProviderOptions } from './provider-options.js';
 import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextEmitter, emitResponseActivities, parseModelStream, streamFrameFragments } from './model-stream.js';
 import { chapterBudgetInstruction, chapterBudgetReached } from '../shared/rpg-chapter.js';
-import { STRUCTURED_OUTPUT_INSTRUCTION, TOOL_JSON_INSTRUCTION } from '../shared/prompt-runtime.js';
+import { STRUCTURED_OUTPUT_INSTRUCTION, TOOL_JSON_INSTRUCTION, TOOL_RESULT_REVIEW_INSTRUCTION } from '../shared/prompt-runtime.js';
 import { EXTRACTION_SUBMISSION_NAME, EXTRACTION_TOOL_INSTRUCTION } from '../shared/extraction-output.js';
 import { partialWritingProse, unpackWritingResponse, writingResponseTool, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
@@ -595,12 +595,28 @@ function continuationWire(config: ProviderConfig, request: ModelRequest): Return
     if (!object(state.body) || typeof state.text !== 'string' || !Number.isSafeInteger(state.round) || state.round < 1 || state.round > 24 || !Number.isSafeInteger(state.callCount) || state.callCount < 0 || state.callCount > 96 || ![state.inputTokens, state.outputTokens].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error('保存的模型续接记录不完整，无法继续本次选择。');
     if (state.pending && (!object(state.pending.data) || !Array.isArray(state.pending.calls) || !Array.isArray(state.pending.results) || !Number.isSafeInteger(state.pending.nextIndex) || state.pending.nextIndex < 0 || state.pending.nextIndex > state.pending.calls.length || state.pending.results.length !== state.pending.nextIndex)) throw new Error('保存的工具续接记录不完整，无法继续本次选择。');
     wire.body = structuredClone(state.body) as typeof wire.body;
+    if (!state.pending) appendToolResultReview(config.protocol, wire.body);
   }
   if (request.chapterBudget) updateChapterBudget(config, wire.body, state?.text ?? '', request.chapterBudget.targetWords);
   return wire;
 }
 
 const CHAPTER_BUDGET_MESSAGE = '[ai-novel:rpg-chapter-budget]\n';
+
+/** Reassess fresh results without rewriting signed model content or tool outputs. */
+function appendToolResultReview(protocol: ProviderConfig['protocol'], body: JsonObject): void {
+  if (protocol === 'openai-chat') {
+    if (body.messages.at(-1)?.role === 'tool') body.messages.push({ role: 'user', content: TOOL_RESULT_REVIEW_INSTRUCTION });
+  } else if (protocol === 'openai-responses') {
+    if (body.input.at(-1)?.type === 'function_call_output') body.input.push({ role: 'user', content: TOOL_RESULT_REVIEW_INSTRUCTION });
+  } else if (protocol === 'gemini') {
+    const last = body.contents.at(-1);
+    if (last?.role === 'user' && last.parts.some((part: JsonObject) => part.functionResponse) && !last.parts.some((part: JsonObject) => part.text === TOOL_RESULT_REVIEW_INSTRUCTION)) last.parts.push({ text: TOOL_RESULT_REVIEW_INSTRUCTION });
+  } else {
+    const last = body.messages.at(-1);
+    if (last?.role === 'user' && Array.isArray(last.content) && last.content.some((part: JsonObject) => part.type === 'tool_result') && !last.content.some((part: JsonObject) => part.type === 'text' && part.text === TOOL_RESULT_REVIEW_INSTRUCTION)) last.content.push({ type: 'text', text: TOOL_RESULT_REVIEW_INSTRUCTION });
+  }
+}
 const isChapterBudgetMessage = (value: unknown): boolean => typeof value === 'string' && value.startsWith(CHAPTER_BUDGET_MESSAGE);
 
 /** Refresh only our own reminder, leaving original conversation and signatures intact. */
@@ -693,7 +709,15 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
           if (inputEstimate + reserved > config.contextTokens) throw new Error(`写作上下文预计需要 ${inputEstimate} 个输入 token，加上 ${reserved} 个输出 token，超过 ${config.contextTokens} 的上下文上限；请减少检索内容、提高上下文上限或确认压缩剧情摘要。`);
         }
         const emitActivity = activityEmitter(config, request, round);
-        const { data, result } = await sendModelRequest(config, { ...request, onActivity: request.onActivity ? emitActivity : undefined }, wire);
+        let publicThought = false;
+        const { data, result } = await sendModelRequest(config, { ...request, onActivity: request.onActivity ? event => {
+          if (event.type === 'thinking' && event.thinkingSource !== 'preset' && event.text.trim()) publicThought = true;
+          emitActivity(event);
+        } : undefined }, wire);
+        // A Gemini tool continuation can bill native thinking without returning
+        // any summary. Record the reported usage, never invented thought text.
+        const thinkingTokens = config.protocol === 'gemini' ? data.usageMetadata?.thoughtsTokenCount : undefined;
+        if (!publicThought && Number.isSafeInteger(thinkingTokens) && thinkingTokens > 0) emitActivity({ type: 'thinking_usage', id: 'gemini:usage', thinkingTokens, afterTools: round > 0 });
         const inputTokens = request.onContinuation && !result.inputTokens ? estimateTokens(JSON.stringify(body)) : result.inputTokens;
         const outputTokens = request.onContinuation && !result.outputTokens ? estimateTokens(JSON.stringify(data)) : result.outputTokens;
         if (request.onContinuation && (!result.inputTokens || !result.outputTokens)) usageEstimated = true;
@@ -754,6 +778,7 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         body.messages.push({ role: 'assistant', content: data.content });
         body.messages.push({ role: 'user', content: wireResults.map(({ call, output }) => ({ type: 'tool_result', tool_use_id: call.id, content: output })) });
       }
+      appendToolResultReview(config.protocol, body);
       pending = undefined;
       await checkpoint();
       if (chapterComplete() && round > (saved?.round ?? 0)) return complete();

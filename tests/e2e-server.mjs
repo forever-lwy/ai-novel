@@ -96,7 +96,8 @@ const modelServer = createServer(async (req, res) => {
     res.end(JSON.stringify({ data: ids.map(id => ({ id, display_name: id })), models: ids.map(id => ({ name: `models/${id}`, displayName: id, supportedGenerationMethods: ['generateContent'] })) })); return;
   }
   const geminiBlockFixture = req.url === '/v1/models/e2e-gemini-blocked:streamGenerateContent?alt=sse';
-  if ((req.url !== '/v1/chat/completions' && !geminiBlockFixture) || req.method !== 'POST') { res.writeHead(404); res.end(); return; }
+  const geminiReviewFixture = req.url === '/v1/models/e2e-gemini-review:streamGenerateContent?alt=sse';
+  if ((req.url !== '/v1/chat/completions' && !geminiBlockFixture && !geminiReviewFixture) || req.method !== 'POST') { res.writeHead(404); res.end(); return; }
   try {
     const chunks = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -113,12 +114,18 @@ const modelServer = createServer(async (req, res) => {
       setTimeout(() => { if (res.destroyed) return; res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 80, completion_tokens: 40 } })); }, 100); return;
     }
     modelRequests++;
-    const modelName = body.model || (geminiBlockFixture ? 'e2e-gemini-blocked' : 'unknown');
+    const modelName = body.model || (geminiBlockFixture ? 'e2e-gemini-blocked' : geminiReviewFixture ? 'e2e-gemini-review' : 'unknown');
     modelRequestsByModel[modelName] = (modelRequestsByModel[modelName] || 0) + 1;
     if (geminiBlockFixture) {
       lastModelParameters = { generationConfig: body.generationConfig };
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.end(`data: ${JSON.stringify({ promptFeedback: { blockReason: 'SAFETY' }, usageMetadata: { promptTokenCount: 12 } })}\n\n`); return;
+    }
+    if (geminiReviewFixture) {
+      const afterTool = body.contents.some(message => message.parts.some(part => part.functionResponse));
+      const parts = afterTool ? [{ text: '他握住钥匙，推开了城门。' }] : [{ thought: true, text: 'REVIEW_FIRST_THOUGHT：先核对城门线索。' }, { text: '林舟来到白石城。' }, { functionCall: { id: 'review-search', name: 'search_story', args: { query: '林舟', scope: 'entities' } }, thoughtSignature: 'opaque-fixture-signature' }];
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(`data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 15, thoughtsTokenCount: afterTool ? 116 : 72 } })}\n\n`); return;
     }
     lastModelParameters = Object.fromEntries(['model', 'temperature', 'top_p', 'seed', 'stream', 'max_tokens', 'max_completion_tokens', 'reasoning_effort'].filter(key => body[key] !== undefined).map(key => [key, body[key]]));
     if (system.includes('# 章节自动命名')) {
