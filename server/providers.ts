@@ -247,7 +247,10 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
         contents: messages ? messages.filter(message => message.role !== 'system').map(message => ({ role: message.role === 'assistant' ? 'model' : 'user', parts: [{ text: message.content }] })) : [{ role: 'user', parts: [{ text: request.prompt }] }],
         generationConfig: { maxOutputTokens: tokens, ...options, ...(schema ? { responseMimeType: 'application/json', responseJsonSchema: schema } : {}) },
         ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, [forced ? 'parametersJsonSchema' : 'parameters']: tool.parameters })) }] } : {}),
-        ...(forced ? { toolConfig: { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [forced.name] } } } : {}),
+        ...(forced || (stream && tools.length && config.geminiStreamFunctionCallArguments !== undefined) ? { toolConfig: { functionCallingConfig: {
+          ...(forced ? { mode: 'ANY', allowedFunctionNames: [forced.name] } : {}),
+          ...(stream && tools.length && config.geminiStreamFunctionCallArguments !== undefined ? { streamFunctionCallArguments: config.geminiStreamFunctionCallArguments } : {}),
+        } } } : {}),
       } };
     case 'claude':
       if (key) headers['x-api-key'] = key;

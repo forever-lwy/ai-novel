@@ -1,5 +1,6 @@
 import type { ModelActivityEvent, ProviderProtocol } from '../shared/types.js';
 import { partialWritingProse, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
+import { GeminiFunctionStream } from './gemini-function-stream.js';
 
 type Json = Record<string, any>;
 type Event = { name: string; data: string; complete: boolean };
@@ -56,6 +57,7 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
   const carrierField = typeof writingTool === 'object' ? writingTool.field : 'prose';
   let pending = '';
   const toolParts = new Map<string, { name: string; raw: string; sent: string }>();
+  const geminiCalls = new GeminiFunctionStream();
   let plain = ''; let sent = '';
   const transport = (id: string, toolName?: string, fragment?: string, snapshot?: unknown) => {
     const part = toolParts.get(id) ?? { name: '', raw: '', sent: '' };
@@ -64,7 +66,8 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
     if (snapshot !== undefined) part.raw = typeof snapshot === 'string' ? snapshot : JSON.stringify(snapshot);
     toolParts.set(id, part);
     if (part.name !== carrierName) return;
-    part.sent = partialWritingProse(part.raw, carrierField);
+    // A closed JSON snapshot may still end halfway through a streamed UTF-16 pair.
+    part.sent = partialWritingProse(part.raw, carrierField).replace(/[\ud800-\udbff]$/, '');
   };
   return chunk => {
     pending += chunk;
@@ -89,7 +92,10 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
           if (name === 'response.completed') objects(data.response?.output).forEach((value, index) => { if (value.type === 'function_call') transport(String(index), value.name, undefined, value.arguments); });
         } else if (protocol === 'gemini') {
           const candidate = objects(data.candidates).find(value => value.index === undefined || value.index === 0);
-          for (const part of objects(candidate?.content?.parts)) if (part.functionCall) transport(String(part.functionCall.id ?? 'gemini'), part.functionCall.name, undefined, part.functionCall.args);
+          for (const part of objects(candidate?.content?.parts)) {
+            const call = geminiCalls.add(part);
+            if (call) transport(call.key, call.part.functionCall.name, undefined, call.part.functionCall.args);
+          }
         } else {
           const id = String(data.index ?? 0);
           if (name === 'message_start') objects(data.message?.content).forEach((value, index) => { if (value.type === 'tool_use') transport(String(index), value.name, undefined, value.input); });
@@ -246,6 +252,7 @@ export function parseModelStream(protocol: ProviderProtocol, raw: string): { dat
   const chatCalls = new Map<number, Json>();
   const responseItems = new Map<number, Json>();
   const geminiParts: Json[] = [];
+  const geminiCalls = new GeminiFunctionStream();
   for (const item of events) {
     if (!item.data) continue;
     if (item.data.trim() === '[DONE]') { if (protocol === 'openai-chat' && item.complete) ended = true; continue; }
@@ -293,7 +300,10 @@ export function parseModelStream(protocol: ProviderProtocol, raw: string): { dat
     } else if (protocol === 'gemini') {
       const candidate = objects(data.candidates).find(value => value.index === undefined || value.index === 0);
       for (const part of objects(candidate?.content?.parts)) {
-        geminiParts.push(part);
+        if (part.functionCall) {
+          const call = geminiCalls.add(part);
+          if (call?.fresh) geminiParts.push(call.part);
+        } else geminiParts.push(part);
         if (!part.thought && typeof part.text === 'string') text += part.text;
       }
       if (candidate?.finishReason) { finish = candidate.finishReason; ended = item.complete; }
@@ -325,6 +335,10 @@ export function parseModelStream(protocol: ProviderProtocol, raw: string): { dat
       }
       if (name === 'message_stop') ended = item.complete;
     }
+  }
+  if (protocol === 'gemini') {
+    error ??= geminiCalls.error;
+    if (geminiCalls.incomplete) error ??= 'Gemini 工具参数分片尚未完整，已保留收到的内容。';
   }
   let data: Json;
   if (protocol === 'openai-chat') data = { choices: [{ message: { content: text, ...(chatReasoning ? { reasoning_content: chatReasoning } : {}), ...(chatCalls.size ? { tool_calls: [...chatCalls.entries()].sort((a, b) => a[0] - b[0]).map(value => value[1]) } : {}), ...(blocked ? { refusal: true } : {}) }, finish_reason: finish }], usage: { prompt_tokens: input, completion_tokens: output } };

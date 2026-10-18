@@ -2119,6 +2119,53 @@ test('中性原生结果工具流式写作保留真实查询和预设思考，�
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 
+test('Gemini 工具参数流式开关保存与清除，正文在完整响应前显示并保留查询与思考', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  const writerId = 'gemini-args-writer', extractorId = 'gemini-args-extractor';
+  const fixture = mockUrl.slice(0, -3);
+  try {
+    const templates = defaultPromptTemplates(); templates.general!.selected = NEUTRAL_PRESET_ID; templates.selected.writing = TASK_V3_PRESET_IDS.writing; templates.presets.extraction[0].useGeneral = false;
+    expect((await page.request.put('/api/settings', { data: { ...previous, providers: [{ id: writerId, name: '参数分片写作', protocol: 'gemini', baseUrl: mockUrl }, { id: extractorId, name: '本地整理', protocol: 'openai-chat', baseUrl: mockUrl }], writingProviderId: writerId, writingModel: 'e2e-gemini-args', planningProviderId: extractorId, planningModel: 'e2e-fixture', extractionProviderId: extractorId, extractionModel: 'e2e-fixture', modelParameters: [], promptTemplates: templates, imageSettings: { ...previous.imageSettings, autoPortrait: false, autoCG: false }, taskSettings: { extraction: { outputMode: 'prompt', autoRetry: false, maxRetries: 0, retryDelayMs: 0 } } } })).ok()).toBe(true);
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    const settings = page.getByTestId('settings-page'); await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    const writing = settings.getByRole('region', { name: '正文写作模型设置', exact: true }); await openModelParameters(writing);
+    const option = writing.getByLabel('Gemini 工具参数流式', { exact: true }); await expect(option).toHaveValue('');
+    for (const value of ['true', 'false', '', 'true']) {
+      await option.selectOption(value); await settings.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(settings.getByRole('status')).toContainText('设置已保存');
+      const saved = await (await page.request.get('/api/settings')).json();
+      const profile = saved.modelParameters.find((item: any) => item.role === 'writing' && item.providerId === writerId);
+      if (value) expect(profile.geminiStreamFunctionCallArguments).toBe(value === 'true'); else expect(profile).not.toHaveProperty('geminiStreamFunctionCallArguments');
+      expect(saved.modelParameters.filter((item: any) => item.role !== 'writing').every((item: any) => item.geminiStreamFunctionCallArguments === undefined)).toBe(true);
+    }
+    for (const [width, name] of [[1440, 'desktop'], [390, 'mobile']] as const) {
+      await page.setViewportSize({ width, height: 1000 }); await option.scrollIntoViewIfNeeded();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`gemini-args-option-${name}.png`), animations: 'disabled' });
+    }
+    await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click(); await settings.getByRole('button', { name: '任务模型', exact: true }).click(); await openModelParameters(writing); await expect(option).toHaveValue('true');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await createProject(page, 'E2E Gemini 参数分片'); const branchId = await currentBranchId(page);
+    const before = await (await page.request.get(`${fixture}/__e2e/stats`)).json();
+    await page.getByRole('button', { name: '开始创作', exact: true }).click(); await page.getByRole('dialog').getByLabel('章节标题（可选）', { exact: true }).fill('城门参数分片');
+    const submitted = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/branches/${branchId}/generate`);
+    await page.getByRole('dialog').getByRole('button', { name: '开始生成', exact: true }).click(); const job = await (await submitted).json();
+    await expect(page.locator('.streaming-prose')).toContainText('林舟来到城门前。'); expect(await visibleProse(page)).not.toContain('他推开城门');
+    const active = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json(); expect(active.state.chapters).toHaveLength(0);
+    await page.screenshot({ path: testInfo.outputPath('gemini-args-partial-prose.png'), animations: 'disabled' });
+    expect((await page.request.post(`${fixture}/__e2e/gemini-args-release`)).ok()).toBe(true);
+    await expect.poll(() => visibleProse(page)).toContain('他推开城门，走进白石城。');
+    await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}?view=author`)).json()).state.chapters[0]?.status).toBe('ready');
+    const activities = await (await page.request.get(`/api/jobs/${job.id}/activities?view=author`)).json();
+    expect(activities.filter((activity: any) => activity.kind === 'tool' && activity.name === 'search_story')).toHaveLength(1);
+    expect(activities.some((activity: any) => activity.kind === 'thinking' && activity.text?.includes('STREAM_ARGS_NATIVE_THOUGHT'))).toBe(true);
+    expect(activities.some((activity: any) => activity.kind === 'thinking' && activity.thinkingSource === 'preset' && activity.text?.includes('STREAM_ARGS_PRESET_NOTE'))).toBe(true);
+    expect(await visibleProse(page)).not.toMatch(/STREAM_ARGS|辅助摘要|partialArgs/);
+    const after = await (await page.request.get(`${fixture}/__e2e/stats`)).json(); expect((after.modelRequestsByModel['e2e-gemini-args'] || 0) - (before.modelRequestsByModel['e2e-gemini-args'] || 0)).toBe(2);
+    const exported = await (await page.request.get(`/api/branches/${branchId}/export`)).text(); expect(exported).toContain('他推开城门'); expect(exported).not.toMatch(/STREAM_ARGS|辅助摘要|partialArgs/);
+    await page.reload(); await page.getByRole('button', { name: '打开作品 E2E Gemini 参数分片', exact: true }).click(); await expect.poll(() => visibleProse(page)).toContain('他推开城门'); await expect(page.locator('.writing-activity')).toHaveCount(0);
+  } finally { await page.request.post(`${fixture}/__e2e/gemini-args-release`); await page.request.put('/api/settings', { data: previous }); }
+});
+
 test('通用预设和四任务支持文件导入导出，整套恢复先确认且保存后生效', async ({ page }, testInfo) => {
   test.setTimeout(120000);
   const previous = await (await page.request.get('/api/settings')).json();

@@ -75,8 +75,13 @@ AxonHub 的 [空响应检查](https://github.com/looplj/axonhub/blob/223e696aa6b
 | 思考预算 | 不发送 | 不发送 | `thinkingConfig.thinkingBudget` | `thinking.budget_tokens` |
 | 返回思考摘要 | 不发送 | 不发送 | `thinkingConfig.includeThoughts` | 不发送 |
 | 流式 | `stream:true` | `stream:true` | `streamGenerateContent?alt=sse` | `stream:true` |
+| 工具参数流式 | 沿用原生参数增量 | 沿用原生参数增量 | 可选 `toolConfig.functionCallingConfig.streamFunctionCallArguments` | 沿用原生 JSON 增量 |
 
 Gemini 的 `thinkingConfig` 放在 `generationConfig` 内，等级与预算不能同时发送。Claude 手动思考用 `thinking.type:enabled`，自适应用 `adaptive`，关闭用 `disabled`。支持范围依型号而异，不猜测网关别名来自动改参。
+
+Gemini 的“工具参数流式”独立于思考摘要和接口流式。启用时，在实际流式且包含工具定义的请求中发送 `toolConfig.functionCallingConfig.streamFunctionCallArguments:true`；关闭明确发送 false，服务默认省略该字段。非流式、无工具请求与其他协议不发送。程序按 `partialArgs` 的 `jsonPath` 合并字符串、数字、布尔与 null，保留调用 ID、思考签名和原始 SSE；结果工具正文随安全分片显示，完整参数与结束状态校验通过前不执行实际工具。未完整、非法或被取消的分片保留已收到草稿，不自动切换协议或重发请求。
+
+[Google Cloud 的参数流式说明](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/multimodal/function-calling#streaming_function_call_arguments)提供此功能，但[官方 SDK 的普通 Gemini API 说明](https://googleapis.github.io/js-genai/release_docs/interfaces/types.FunctionCallingConfig.html)将该字段标记为不支持。兼容网关是否透传或提供此能力需单独验证，不能仅凭原生思考正常流式就判定参数分片可用。连接测试不带工具，因此不会发送此选项；应核对真实工具任务的实际请求与原响应。不支持时保留错误，手动关闭或恢复服务默认后再决定是否重试。
 
 单次输出上限 `maxOutputTokens` 按该模型保存的值发送；上下文上限 `contextTokens` 限制每次请求的预估输入与完整预留输出之和。超出上下文上限时，在发送前停止并保留任务进度，调整设置或减少本次输入后可手动重试，不暗中缩小输出上限。累计输入与输出仅作统计，不会阻止后续请求；旧配置中的 `taskTokenLimit` 在读取时忽略，保存时移除，已有输出上限、上下文上限、密钥和任务模型保留。
 

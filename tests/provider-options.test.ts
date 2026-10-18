@@ -28,6 +28,23 @@ describe('optional provider parameters', () => {
     for (const protocol of ['openai-chat', 'openai-responses', 'claude'] as const) expect(body(protocol, { geminiIncludeThoughts: true })).not.toHaveProperty('thinkingConfig');
     expect(() => validateProviderOptions(config('gemini', { geminiIncludeThoughts: 'true' } as any))).toThrow('布尔值');
   });
+  it.each([undefined, false, true])('maps optional Gemini argument streaming only for streaming requests with tools (%s)', setting => {
+    const request = { system: '', prompt: '写作', writingOutputMode: 'tool' as const };
+    const preview = (protocol: ProviderProtocol, stream: boolean, tool = true) => JSON.parse(buildRequestSnapshot(config(protocol, { stream, geminiStreamFunctionCallArguments: setting }), tool ? request : { system: '', prompt: '连接测试' }).body);
+    const forced = preview('gemini', true);
+    expect(forced.toolConfig.functionCallingConfig).toMatchObject({ mode: 'ANY', allowedFunctionNames: ['emit_writing_response'] });
+    if (setting === undefined) expect(forced.toolConfig.functionCallingConfig).not.toHaveProperty('streamFunctionCallArguments');
+    else expect(forced.toolConfig.functionCallingConfig.streamFunctionCallArguments).toBe(setting);
+    expect(forced.generationConfig).not.toHaveProperty('streamFunctionCallArguments');
+    expect(preview('gemini', false).toolConfig.functionCallingConfig).not.toHaveProperty('streamFunctionCallArguments');
+    expect(preview('gemini', true, false)).not.toHaveProperty('toolConfig');
+    for (const protocol of ['openai-chat', 'openai-responses', 'claude'] as const) expect(preview(protocol, true)).not.toHaveProperty('toolConfig');
+  });
+  it('keeps native tool auto-selection while enabling argument streaming and accepts only boolean settings', () => {
+    const native = JSON.parse(buildRequestSnapshot(config('gemini', { geminiStreamFunctionCallArguments: true }), { system: '', prompt: '', writingOutputMode: 'tool', responseCarrier: { name: 'result', field: 'content' }, onTextDelta: () => {} }).body);
+    expect(native.toolConfig).toEqual({ functionCallingConfig: { streamFunctionCallArguments: true } });
+    expect(() => validateProviderOptions(config('gemini', { geminiStreamFunctionCallArguments: 'true' } as any))).toThrow('布尔值');
+  });
   it('maps Responses effort and excludes Chat-only parameters', () => {
     const mapped = body('openai-responses', { topK: 10, temperature: 1, topP: 0.9, seed: 42, presencePenalty: 1, frequencyPenalty: 1, stopSequences: ['stop'], reasoningEffort: 'high', openaiMaxTokensField: 'max_completion_tokens' });
     expect(mapped).toMatchObject({ temperature: 1, top_p: 0.9, reasoning: { effort: 'high' }, max_output_tokens: 4096 });

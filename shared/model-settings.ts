@@ -4,7 +4,7 @@ export const modelRoles = ['writing', 'planning', 'extraction'] as const satisfi
 
 export const modelParameterKeys = [
   'maxOutputTokens', 'contextTokens', 'temperature', 'topP', 'topK', 'presencePenalty', 'frequencyPenalty', 'seed', 'stopSequences',
-  'timeoutMs', 'stream', 'openaiMaxTokensField', 'reasoningEffort', 'geminiThinking', 'geminiIncludeThoughts', 'claudeThinking', 'claudeEffort',
+  'timeoutMs', 'stream', 'openaiMaxTokensField', 'reasoningEffort', 'geminiThinking', 'geminiIncludeThoughts', 'geminiStreamFunctionCallArguments', 'claudeThinking', 'claudeEffort',
 ] as const satisfies readonly (keyof ModelParameters)[];
 
 export function defaultModelParameters(): ModelParameters {

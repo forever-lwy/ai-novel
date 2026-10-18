@@ -39,6 +39,7 @@ const modelParametersSchema = z.object({
   openaiMaxTokensField: z.enum(['max_tokens', 'max_completion_tokens']).optional(), reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
   geminiThinking: z.discriminatedUnion('mode', [z.object({ mode: z.literal('level'), level: z.enum(['minimal', 'low', 'medium', 'high']) }).strict(), z.object({ mode: z.literal('budget'), budget: z.number().int().min(-1).max(1000000) }).strict()]).optional(),
   geminiIncludeThoughts: z.boolean().optional(),
+  geminiStreamFunctionCallArguments: z.boolean().optional(),
   claudeThinking: z.discriminatedUnion('type', [z.object({ type: z.literal('disabled') }).strict(), z.object({ type: z.literal('adaptive') }).strict(), z.object({ type: z.literal('enabled'), budgetTokens: z.number().int().min(1024).max(128000) }).strict()]).optional(),
   claudeEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
 });

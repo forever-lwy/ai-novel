@@ -37,6 +37,7 @@ export interface ModelParameters {
   reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   geminiThinking?: { mode: 'level'; level: 'minimal' | 'low' | 'medium' | 'high' } | { mode: 'budget'; budget: number };
   geminiIncludeThoughts?: boolean;
+  geminiStreamFunctionCallArguments?: boolean;
   claudeThinking?: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number } | { type: 'adaptive' };
   claudeEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }

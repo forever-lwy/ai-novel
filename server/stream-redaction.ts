@@ -1,3 +1,5 @@
+import { geminiArgumentPathKeys } from './gemini-function-stream.js';
+
 export function secretVariants(keys: string[]) {
   return [...new Set(keys.flatMap(key => [key, key.trim()]).filter(Boolean).flatMap(value => [value, JSON.stringify(value).slice(1, -1), encodeURIComponent(value)]))].sort((a, b) => b.length - a.length);
 }
@@ -39,7 +41,18 @@ export function redactSseFragments(text: string, keys: string[]) {
       if (!value || typeof value !== 'object') continue;
       for (const [field, entry] of Object.entries(value)) {
         const key = `${path}/${field}`;
-        if (typeof entry === 'string') { const group = groups.get(key) || []; group.push({ owner: value as Record<string, unknown>, field, value: entry }); groups.set(key, group); }
+        if (typeof entry === 'string') {
+          // PartialArg array positions and part positions can change between
+          // events. The JSONPath identifies fragments of the same argument.
+          const partial = value as Record<string, unknown>;
+          let groupKey = key;
+          if (field === 'stringValue' && typeof partial.jsonPath === 'string' && /\/content\/parts\/\d+\/functionCall\/partialArgs\/\d+$/.test(path)) {
+            let argument = partial.jsonPath;
+            try { argument = JSON.stringify(geminiArgumentPathKeys(argument)); } catch { /* Invalid fragments are captured too. */ }
+            groupKey = `${path.replace(/\/content\/parts\/\d+\/functionCall\/partialArgs\/\d+$/, '')}/functionCall/${argument}/stringValue`;
+          }
+          const group = groups.get(groupKey) || []; group.push({ owner: value as Record<string, unknown>, field, value: entry }); groups.set(groupKey, group);
+        }
         else if (entry && typeof entry === 'object') queue.push({ value: entry, path: key, depth: depth + 1 });
       }
     }

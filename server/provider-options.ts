@@ -21,6 +21,7 @@ export function validateProviderOptions(config: ProviderConfig, effectiveTokens 
   number('timeoutMs', '请求超时（毫秒）', 1000, 3_600_000, true);
   if (config.stream !== undefined && typeof config.stream !== 'boolean') throw new Error('流式接收设置必须是布尔值。');
   if (config.geminiIncludeThoughts !== undefined && typeof config.geminiIncludeThoughts !== 'boolean') throw new Error('Gemini 思考摘要设置必须是布尔值。');
+  if (config.geminiStreamFunctionCallArguments !== undefined && typeof config.geminiStreamFunctionCallArguments !== 'boolean') throw new Error('Gemini 工具参数流式设置必须是布尔值。');
   const stopLimit = config.protocol === 'openai-chat' ? 4 : config.protocol === 'gemini' ? 5 : 16;
   if (config.stopSequences !== undefined && (!Array.isArray(config.stopSequences) || config.stopSequences.length > stopLimit || config.stopSequences.some(value => typeof value !== 'string' || !value.length || value.length > 1000))) {
     throw new Error(`停止词必须是非空文本数组，最多 ${stopLimit} 项，每项最多 1000 字符。`);

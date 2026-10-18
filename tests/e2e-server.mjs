@@ -60,12 +60,14 @@ let chapterTitleRequests = 0;
 let modelListRequests = 0;
 const modelRequestsByModel = {};
 let lastModelParameters;
+let finishGeminiArgsStream;
 let imageRequests = 0; let imageEditRequests = 0; let lastImageRequest;
 let promptOptimizationRequests = 0; let lastPromptOptimizationRequest; let lastOptimizedImagePrompt;
 const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aP9sAAAAASUVORK5CYII=';
 const modelServer = createServer(async (req, res) => {
   if (req.url === '/__e2e/stats' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ modelRequests, chapterTitleRequests, modelListRequests, modelRequestsByModel, lastModelParameters, imageRequests, imageEditRequests, lastImageRequest, promptOptimizationRequests, lastPromptOptimizationRequest, lastOptimizedImagePrompt })); return; }
   if (req.url === '/__e2e/shutdown' && req.method === 'POST') { res.writeHead(200); res.end('stopping test fixture'); setImmediate(() => void close()); return; }
+  if (req.url === '/__e2e/gemini-args-release' && req.method === 'POST') { const finish = finishGeminiArgsStream; finishGeminiArgsStream = undefined; finish?.(); res.writeHead(200); res.end('released'); return; }
   if (req.method === 'POST' && ['/v1/images/generations', '/v1/images/edits'].includes(req.url)) {
     const chunks = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const raw = Buffer.concat(chunks); const edit = req.url.endsWith('/edits');
     imageRequests++; if (edit) imageEditRequests++;
@@ -97,7 +99,8 @@ const modelServer = createServer(async (req, res) => {
   }
   const geminiBlockFixture = req.url === '/v1/models/e2e-gemini-blocked:streamGenerateContent?alt=sse';
   const geminiReviewFixture = req.url === '/v1/models/e2e-gemini-review:streamGenerateContent?alt=sse';
-  if ((req.url !== '/v1/chat/completions' && !geminiBlockFixture && !geminiReviewFixture) || req.method !== 'POST') { res.writeHead(404); res.end(); return; }
+  const geminiArgsFixture = req.url === '/v1/models/e2e-gemini-args:streamGenerateContent?alt=sse';
+  if ((req.url !== '/v1/chat/completions' && !geminiBlockFixture && !geminiReviewFixture && !geminiArgsFixture) || req.method !== 'POST') { res.writeHead(404); res.end(); return; }
   try {
     const chunks = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -121,8 +124,21 @@ const modelServer = createServer(async (req, res) => {
       setTimeout(() => { if (res.destroyed) return; res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 80, completion_tokens: 40 } })); }, 100); return;
     }
     modelRequests++;
-    const modelName = body.model || (geminiBlockFixture ? 'e2e-gemini-blocked' : geminiReviewFixture ? 'e2e-gemini-review' : 'unknown');
+    const modelName = body.model || (geminiBlockFixture ? 'e2e-gemini-blocked' : geminiReviewFixture ? 'e2e-gemini-review' : geminiArgsFixture ? 'e2e-gemini-args' : 'unknown');
     modelRequestsByModel[modelName] = (modelRequestsByModel[modelName] || 0) + 1;
+    if (geminiArgsFixture) {
+      if (body.toolConfig?.functionCallingConfig?.streamFunctionCallArguments !== true) { res.writeHead(400); res.end(JSON.stringify({ error: 'fixture requires streamed arguments' })); return; }
+      const frame = (parts, finishReason) => `data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts }, ...(finishReason ? { finishReason } : {}) }], usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 15, thoughtsTokenCount: 10 } })}\n\n`;
+      const afterTool = body.contents.some(message => message.parts.some(part => part.functionResponse));
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (!afterTool) {
+        res.end(frame([{ thought: true, text: 'STREAM_ARGS_NATIVE_THOUGHT：核对城门资料。' }, { functionCall: { id: 'args-query', name: 'search_story', partialArgs: [{ jsonPath: '$.keywords[0]', stringValue: '城门' }, { jsonPath: '$.scope', stringValue: 'chapters' }] }, thoughtSignature: 'args-query-signature' }], 'STOP')); return;
+      }
+      const sink = body.tools[0].functionDeclarations.find(tool => tool.name === 'emit_complete_text');
+      res.write(frame([{ functionCall: { id: 'args-prose', name: sink.name, partialArgs: [{ jsonPath: '$.content', stringValue: '<draft>STREAM_ARGS_PRESET_NOTE</draft><game>林舟来到城门前。', willContinue: true }], willContinue: true }, thoughtSignature: 'args-prose-signature' }]));
+      finishGeminiArgsStream = () => { if (!res.destroyed) res.end(frame([{ functionCall: { partialArgs: [{ jsonPath: '$.content', stringValue: '他推开城门，走进白石城。</game><summary>辅助摘要不得保存</summary>' }] } }], 'STOP')); };
+      return;
+    }
     if (geminiBlockFixture) {
       lastModelParameters = { generationConfig: body.generationConfig };
       res.writeHead(200, { 'content-type': 'text/event-stream' });

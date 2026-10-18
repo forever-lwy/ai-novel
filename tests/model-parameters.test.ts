@@ -16,6 +16,19 @@ function settings(): Settings {
 }
 
 describe('parameters for each task, connection and model', () => {
+  it('migrates and isolates the optional Gemini argument streaming flag without changing existing profiles', () => {
+    const original = settings(); original.planningModel = 'writer'; original.extractionModel = 'writer';
+    original.providers[0].geminiStreamFunctionCallArguments = true;
+    original.modelParameters = [{ role: 'writing', providerId: 'first', model: 'writer', ...defaultModelParameters(), geminiStreamFunctionCallArguments: false }];
+    let normalized = normalizeModelSettings(original);
+    expect(getModelParameters(normalized, 'writing', 'first', 'writer').geminiStreamFunctionCallArguments).toBe(false);
+    for (const role of ['planning', 'extraction'] as const) expect(getModelParameters(normalized, role, 'first', 'writer').geminiStreamFunctionCallArguments).toBe(true);
+    normalized = upsertModelParameters(normalized, 'writing', 'second', 'writer', { ...defaultModelParameters(), geminiStreamFunctionCallArguments: true });
+    expect(resolveModelConfig(normalized, normalized.providers[0], 'writer', 'writing').geminiStreamFunctionCallArguments).toBe(false);
+    expect(resolveModelConfig(normalized, normalized.providers[1], 'writer', 'writing').geminiStreamFunctionCallArguments).toBe(true);
+    expect(getModelParameters(normalized, 'writing', 'first', 'new-model')).not.toHaveProperty('geminiStreamFunctionCallArguments');
+    expect(normalizeModelSettings(normalized)).toEqual(normalized);
+  });
   it('gives unconfigured models useful fresh defaults without sharing a mutable object', () => {
     const defaults = { maxOutputTokens: 4096, contextTokens: 64000, temperature: 1, topP: 1, presencePenalty: 0, frequencyPenalty: 0, timeoutMs: 180000, stream: false };
     const first = defaultModelParameters();

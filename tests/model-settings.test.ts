@@ -27,19 +27,23 @@ async function endpoint(reply: (body: any, response: import('node:http').ServerR
 
 it('round-trips optional parameters including zero and rejects conflicting thinking without changing saved settings', async () => {
   const ctx = await context(); const cookies = { session: ctx.session };
-  const value = settings({ temperature: 0, topP: 0, topK: 1, seed: 0, presencePenalty: 0, frequencyPenalty: 0, stopSequences: ['END'], timeoutMs: 240000, stream: true, geminiThinking: { mode: 'budget', budget: 0 }, geminiIncludeThoughts: false, reasoningEffort: 'high' });
+  const value = settings({ temperature: 0, topP: 0, topK: 1, seed: 0, presencePenalty: 0, frequencyPenalty: 0, stopSequences: ['END'], timeoutMs: 240000, stream: true, geminiThinking: { mode: 'budget', budget: 0 }, geminiIncludeThoughts: false, geminiStreamFunctionCallArguments: true, reasoningEffort: 'high' });
   const saved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies, payload: value });
   expect(saved.statusCode).toBe(200); expect(saved.body).not.toContain('test-secret-key');
-  expect(saved.json().modelParameters[0]).toMatchObject({ temperature: 0, topP: 0, seed: 0, geminiThinking: { mode: 'budget', budget: 0 }, geminiIncludeThoughts: false, stream: true, timeoutMs: 240000 });
+  expect(saved.json().modelParameters[0]).toMatchObject({ temperature: 0, topP: 0, seed: 0, geminiThinking: { mode: 'budget', budget: 0 }, geminiIncludeThoughts: false, geminiStreamFunctionCallArguments: true, stream: true, timeoutMs: 240000 });
   expect(saved.json().providers[0]).not.toHaveProperty('temperature');
   const ambiguous = structuredClone(value) as any; ambiguous.modelParameters[0].geminiThinking.level = 'high';
   expect((await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies, payload: ambiguous })).statusCode).toBe(400);
   const invalidClaude = settings({ protocol: 'claude', temperature: 0.2, claudeThinking: { type: 'enabled', budgetTokens: 2048 } });
   expect((await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies, payload: invalidClaude })).statusCode).toBe(400);
   expect(ctx.settings.get().providers[0].protocol).toBe('gemini');
+  const invalidStreaming = structuredClone(value) as any; invalidStreaming.modelParameters[0].geminiStreamFunctionCallArguments = 'true';
+  expect((await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies, payload: invalidStreaming })).statusCode).toBe(400);
   const clear = structuredClone(value); delete clear.modelParameters![0].temperature; delete clear.modelParameters![0].geminiThinking; clear.providers[0].apiKey = '';
+  clear.modelParameters![0].geminiStreamFunctionCallArguments = false;
   expect((await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies, payload: clear })).statusCode).toBe(200);
   expect(ctx.settings.get().modelParameters![0].temperature).toBeUndefined(); expect(ctx.settings.get().providers[0].apiKey).toBe('test-secret-key');
+  expect(ctx.settings.get().modelParameters![0].geminiStreamFunctionCallArguments).toBe(false);
   expect(ctx.settings.get().modelParameters!.find(profile => profile.role === 'planning')).toMatchObject({ temperature: 0, geminiThinking: { mode: 'budget', budget: 0 } });
 });
 
