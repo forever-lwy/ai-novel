@@ -1,70 +1,21 @@
+import { withLegacyPresets } from './fixtures/prompt-presets.js';
 import { describe, expect, it } from 'vitest';
-import { compilePrompt, compileTaskPrompt, defaultPromptTemplates, normalizePromptTemplates, promptTasks, validatePromptTemplates } from '../shared/prompt-templates.js';
-import { rebornGeneralPreset, REBORN_PRESET_ID } from '../shared/reborn-prompts.js';
-import { TASK_V2_PRESET_IDS } from '../shared/task-prompts-v2.js';
+import { compilePrompt, compileTaskPrompt, defaultPromptTemplates, normalizePromptTemplates, validatePromptTemplates } from '../shared/prompt-templates.js';
+import { rebornGeneralPreset, REBORN_PRESET_ID } from './fixtures/legacy-presets/reborn-prompts.js';
+import { TASK_V2_PRESET_IDS } from './fixtures/legacy-presets/task-prompts-v2.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
 import type { PromptTask } from '../shared/types.js';
 
+const promptTasks = ['writing', 'extraction', 'compression'] as const;
 const variables = { mode: 'continuation', instruction: '继续调查 {{原样素材}}', context: '名称索引', storyMaterials: '本线设定和摘要', recentChapters: '最近全文', continuationAnchor: '门正缓缓打开。', maxWords: 1000, writingTarget: '续写', chapterTitle: '旧门', blockText: '[1] 林舟推开旧门。', summaryText: '林舟到达桥边，然后推开旧门。' };
 function settings() {
-  const value = defaultPromptTemplates(); value.general!.selected = REBORN_PRESET_ID;
+  const value = withLegacyPresets(); value.general!.selected = REBORN_PRESET_ID;
   for (const task of promptTasks) value.selected[task] = TASK_V2_PRESET_IDS[task];
   return value;
 }
-function oldSettings() {
-  const value = defaultPromptTemplates(); value.general!.presets = value.general!.presets.filter(preset => preset.id !== REBORN_PRESET_ID); value.general!.catalogVersion = 1;
-  delete value.taskCatalogVersions;
-  for (const task of promptTasks) value.presets[task] = value.presets[task].filter(preset => preset.id !== TASK_V2_PRESET_IDS[task]);
-  return value;
-}
-
 describe('Reborn framework and cooperative task editions', () => {
-  it('adds all editions without changing choices, references, original presets or input objects', () => {
-    const old = oldSettings(); old.presets.writing[0].blocks[0].content += '\n作者规则'; old.presets.writing[0].generalPresetId = old.general!.selected;
-    const before = structuredClone(old); const upgraded = normalizePromptTemplates(old);
-    expect(old).toEqual(before); expect(upgraded.selected).toEqual(old.selected); expect(upgraded.general!.selected).toBe(old.general!.selected);
-    for (const task of promptTasks) { expect(upgraded.presets[task][0]).toEqual(old.presets[task][0]); expect(upgraded.presets[task].at(-1)?.id).toBe(TASK_V2_PRESET_IDS[task]); }
-    expect(upgraded.general!.presets.slice(0, 2)).toEqual(old.general!.presets); expect(upgraded.general!.presets.at(-1)).toEqual(rebornGeneralPreset());
-    expect(normalizePromptTemplates(upgraded)).toEqual(upgraded);
-    upgraded.general!.presets.pop(); upgraded.presets.writing.pop();
-    expect(normalizePromptTemplates(upgraded)).toEqual(upgraded);
-  });
-  it('keeps colliding author editions intact and tracks task capacity independently', () => {
-    const old = oldSettings();
-    const edited = settings().presets.extraction[1]; edited.name = '作者自己的 v2'; edited.blocks[0].content = '作者证据规则'; old.presets.extraction.push(edited);
-    old.presets.writing = Array.from({ length: 20 }, (_, index) => ({ ...old.presets.writing[0], id: index ? `author-${index}` : 'default-writing' }));
-    const upgraded = normalizePromptTemplates(old);
-    expect(upgraded.presets.extraction[1]).toEqual(edited); expect(upgraded.presets.writing).toEqual(old.presets.writing);
-    expect(upgraded.taskCatalogVersions).toEqual({ extraction: 1, compression: 1 });
-    upgraded.presets.extraction.pop(); upgraded.presets.writing.pop();
-    const retry = normalizePromptTemplates(upgraded);
-    expect(retry.presets.extraction).toEqual(upgraded.presets.extraction);
-    expect(retry.presets.writing.at(-1)?.id).toBe(TASK_V2_PRESET_IDS.writing);
-  });
-  it('defers a full general catalog without evicting existing entries', () => {
-    const old = oldSettings(); const original = old.general!.presets[0];
-    old.general!.presets.push(...Array.from({ length: 18 }, (_, i) => ({ ...original, id: `author-general-${i}`, blocks: [{ id: 'slot', name: '插槽', role: 'system' as const, enabled: true, content: '', slot: 'task' as const }] })));
-    expect(normalizePromptTemplates(old).general).toEqual(old.general);
-    old.general!.presets.pop();
-    expect(normalizePromptTemplates(old).general!.presets.at(-1)?.id).toBe(REBORN_PRESET_ID);
-  });
-  it('does not replace an author framework with the built-in ID', () => {
-    const old = oldSettings(); const author = rebornGeneralPreset(); author.name = '作者框架'; author.blocks[0].content = '作者自己的保护规则';
-    old.general!.presets.push(author);
-    expect(normalizePromptTemplates(old).general!.presets.at(-1)).toEqual(author);
-  });
-  it('defers editions at the UTF-8 capacity limit and retries after space is freed', () => {
-    const old = oldSettings(); old.general!.presets = [{ id: 'author-general', name: '作者框架', blocks: [{ id: 'slot', name: '插槽', role: 'system', enabled: true, slot: 'task', content: '' }] }]; old.general!.selected = 'author-general';
-    for (const task of promptTasks) old.presets[task] = [{ id: `default-${task}`, name: '作者任务', blocks: [{ id: 'input', name: '输入', role: 'user', enabled: true, content: '材料' }] }];
-    old.presets.writing[0].blocks.push(...Array.from({ length: 7 }, (_, i) => ({ id: `filler-${i}`, name: '已有文本', role: 'system' as const, enabled: true, content: 'x'.repeat(i === 6 ? 99000 : 100000) })));
-    expect(() => validatePromptTemplates(old)).not.toThrow(); expect(normalizePromptTemplates(old)).toEqual(old);
-    old.presets.writing[0].blocks.pop(); const upgraded = normalizePromptTemplates(old);
-    expect(upgraded.general!.presets.at(-1)?.id).toBe(REBORN_PRESET_ID);
-    for (const task of promptTasks) expect(upgraded.presets[task].at(-1)?.id).toBe(TASK_V2_PRESET_IDS[task]);
-    expect(() => validatePromptTemplates(upgraded)).not.toThrow();
-  });
   it.each<PromptTask>(['writing', 'extraction', 'compression'])('preserves native roles and avoids conflicting delivery instructions for %s', task => {
-    const value = settings(); const slot = value.general!.presets.at(-1)!.blocks.find(block => block.slot)!;
+    const value = settings(); const slot = value.general!.presets.find(preset => preset.id === REBORN_PRESET_ID)!.blocks.find(block => block.slot)!;
     slot.role = 'assistant'; // Slot metadata must never relabel its task messages.
     const compiled = compilePrompt(value, task, variables);
     expect(compiled.messages.map(message => message.role)).toEqual(['system', 'system', 'user', 'system']);

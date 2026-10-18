@@ -1,5 +1,6 @@
+import { withDramatronPresets } from './fixtures/prompt-presets.js';
 import { describe, expect, it } from 'vitest';
-import { dramatronSource } from '../shared/dramatron-source.js';
+import { dramatronSource } from './fixtures/legacy-presets/dramatron-source.js';
 import { previousGeneralPromptTemplates } from '../shared/previous-general-prompt-templates.js';
 import { compileTaskPrompt, defaultPromptTemplates, normalizePromptTemplates, validatePromptTemplates } from '../shared/prompt-templates.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
@@ -11,7 +12,7 @@ const config: ProviderConfig = { id: 'local', name: 'local', protocol: 'openai-c
 
 describe('Dramatron anti-truncation and empty-response structure', () => {
   it('retains the original long filler, CLEAR and identity modules before actual task material', () => {
-    const settings = defaultPromptTemplates(); const blocks = settings.general!.presets[0].blocks;
+    const settings = withDramatronPresets(); const blocks = settings.general!.presets[0].blocks;
     expect(blocks.find(block => block.feature === 'snow')!.content).toBe(dramatronSource['a443f257-0f5d-4286-a1ff-f60653ed6400'].content);
     expect(blocks.find(block => block.id === 'clear')!.content).toBe(dramatronSource.main.content);
     const request = compileTaskPrompt(settings, 'writing', variables);
@@ -33,12 +34,12 @@ describe('Dramatron anti-truncation and empty-response structure', () => {
     original.general!.presets[0].blocks[0].content += '\n自定义通用规则';
     original.presets.writing[0].blocks[0].content += '\n自定义写作规则';
     expect(normalizePromptTemplates(original).general!.presets[0]).toEqual(original.general!.presets[0]); expect(normalizePromptTemplates(original).presets.writing.slice(0, original.presets.writing.length)).toEqual(original.presets.writing);
-    const settings = defaultPromptTemplates(); settings.general!.presets[0].blocks[0].content = '自定义填充 {{not_a_variable}}';
+    const settings = withDramatronPresets(); settings.general!.presets[0].blocks[0].content = '自定义填充 {{not_a_variable}}';
     expect(compileTaskPrompt(settings, 'writing', variables).messages[0].content).toBe('自定义填充 {{not_a_variable}}');
     expect(normalizePromptTemplates(normalizePromptTemplates(settings))).toEqual(settings);
   });
   it('makes both sets of alternatives exclusive and skips prose tails for native submission contracts', () => {
-    const settings = defaultPromptTemplates(); const blocks = settings.general!.presets[0].blocks;
+    const settings = withDramatronPresets(); const blocks = settings.general!.presets[0].blocks;
     const feature = (name: PromptFeature) => blocks.find(block=>block.feature===name)!;
     feature('cot-single').enabled = true; expect(()=>validatePromptTemplates(settings)).toThrow('三段与单段'); feature('cot-three').enabled = false;
     expect(compileTaskPrompt(settings, 'writing', variables).system).not.toContain('<Interleaved_thinking>');

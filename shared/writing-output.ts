@@ -31,7 +31,7 @@ export function writingResponseTool(tools: { name: string; description: string; 
 /** Recover only a top-level prose string, including a safely decoded partial one.
  * JSON in nested tool arguments must never become chapter text.
  */
-export function partialWritingProse(raw: string): string {
+export function partialWritingProse(raw: string, field = 'prose'): string {
   let depth = 0;
   for (let index = 0; index < raw.length; index++) {
     const char = raw[index];
@@ -46,7 +46,7 @@ export function partialWritingProse(raw: string): string {
     try { key = JSON.parse(raw.slice(start, index + 1)); } catch { return ''; }
     let cursor = index + 1;
     while (/\s/.test(raw[cursor] ?? '') && cursor < raw.length) cursor++;
-    if (raw[cursor++] !== ':' || key !== 'prose') continue;
+    if (raw[cursor++] !== ':' || key !== field) continue;
     while (/\s/.test(raw[cursor] ?? '') && cursor < raw.length) cursor++;
     if (raw[cursor++] !== '"') return '';
     let text = '';

@@ -10,6 +10,7 @@ import { StoryEngine, type TextModels } from '../server/engine.js';
 import { generateText } from '../server/providers.js';
 import { buildApp } from '../server/app.js';
 import { defaultPromptTemplates, validatePromptTemplates } from '../shared/prompt-templates.js';
+import { withDramatronPresets } from './fixtures/prompt-presets.js';
 import { WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 import type { Entity, ExtractionResult, Job, Settings } from '../shared/types.js';
 
@@ -67,7 +68,7 @@ describe('durable RPG story choices', () => {
       toolCalls: index === 0 ? [{ name: 'ask_user', argumentsJson: JSON.stringify({ question: '接下来去哪里？', options }) }] : [],
     } }]));
     const store = makeStore(), config = settings(service.url);
-    config.promptTemplates = defaultPromptTemplates(); config.promptTemplates.presets.writing[0].writingOutputMode = 'tool';
+    config.promptTemplates = withDramatronPresets(); config.promptTemplates.presets.writing[0].writingOutputMode = 'tool';
     const engine = engineFor(store, config), project = store.createProject({ title: '工具通道体验' });
     const queued = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'rpg', instruction: '体验', rpg: originalSetup() });
     const waiting = await paused(engine, queued.id); expect(engine.writingSnapshot(queued.id).text).toBe('你站在岔路口。');

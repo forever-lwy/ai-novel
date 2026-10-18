@@ -1,3 +1,4 @@
+import { withDramatronPresets, withLegacyPresets, withTavernPresets } from './fixtures/prompt-presets.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,9 +9,9 @@ import { normalizeExtraction, splitExtractionBlocks } from '../server/extraction
 import { structuredRequest } from '../server/providers.js';
 import { STRUCTURED_OUTPUT_INSTRUCTION, TOOL_RESULT_REVIEW_INSTRUCTION, type PromptPreviewInput, type PromptPreviewResult } from '../shared/prompt-runtime.js';
 import type { PromptTask, ProviderProtocol } from '../shared/types.js';
-import { V08_PRESET_ID } from '../shared/v08-prompts.js';
-import { REBORN_PRESET_ID } from '../shared/reborn-prompts.js';
-import { TASK_V2_PRESET_IDS } from '../shared/task-prompts-v2.js';
+import { V08_PRESET_ID } from './fixtures/legacy-presets/v08-prompts.js';
+import { REBORN_PRESET_ID } from './fixtures/legacy-presets/reborn-prompts.js';
+import { TASK_V2_PRESET_IDS } from './fixtures/legacy-presets/task-prompts-v2.js';
 
 let ctx: Awaited<ReturnType<typeof buildApp>>;
 let cookies: { session: string };
@@ -21,9 +22,17 @@ beforeAll(async () => {
 });
 afterAll(async () => { await ctx?.app.close(); });
 const variables = { context: '示例故事资料', mode: 'original', instruction: '继续故事', chapterNumber: '2', endChapter: '5', maxWords: '1500', writingTarget: '请写第 2 章', chapterTitle: '雨夜', blockText: '[1] 林舟来到码头。', summaryText: '林舟来到码头并找到旧怀表。' };
-const input = (task: PromptTask, protocol: ProviderProtocol): PromptPreviewInput => ({ task, protocol, templates: defaultPromptTemplates(), variables, runtime: {} });
+const input = (task: PromptTask, protocol: ProviderProtocol): PromptPreviewInput => ({ task, protocol, templates: withDramatronPresets(), variables, runtime: {} });
 
 describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s final prompt preview', protocol => {
+  it('uses only neutral as the fresh built-in framework and exposes its complete archive', async () => {
+    const templates = defaultPromptTemplates();
+    const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: { ...input('writing', protocol), templates } });
+    expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
+    expect(templates.general!.presets.map(preset => preset.id)).toEqual(['general-neutral-v1']);
+    expect(preview.tools.some(tool => tool.name === 'emit_complete_text' && tool.description.includes(variables.instruction))).toBe(true);
+    expect(preview.body).not.toMatch(/Dramatron|冬马和纱|FICTIONAL_TEXT_COMPLETION|Model Card - SoliUmbra/);
+  });
   it('shows the same post-tool review rule used by actual continuations', () => {
     const preview = ctx.engine.previewPrompt(input('writing', protocol));
     expect(preview.runtimeBlocks.find(block => block.name === '工具结果复核规则')?.content).toBe(TOOL_RESULT_REVIEW_INSTRUCTION);
@@ -31,7 +40,7 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     expect(preview.body).toContain('# 工具结果复核');
   });
   it.each<PromptTask>(['writing', 'extraction', 'compression'])('previews Reborn with cooperative %s v2 using real native roles without saving', async task => {
-    const draft = input(task, protocol); draft.templates.general!.selected = REBORN_PRESET_ID; draft.templates.selected[task] = TASK_V2_PRESET_IDS[task];
+    const draft = input(task, protocol); draft.templates = withLegacyPresets(); draft.templates.general!.selected = REBORN_PRESET_ID; draft.templates.selected[task] = TASK_V2_PRESET_IDS[task];
     const before = (await ctx.app.inject({ url: '/api/settings', cookies })).body;
     const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: draft });
     expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
@@ -49,7 +58,7 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     }
   });
   it.each<PromptTask>(['writing', 'extraction', 'compression'])('previews the v0.8 framework and its actual output transport for %s without saving', async task => {
-    const draft = input(task, protocol); draft.templates.general!.selected = V08_PRESET_ID;
+    const draft = input(task, protocol); draft.templates = withLegacyPresets(); draft.templates.general!.selected = V08_PRESET_ID;
     const before = (await ctx.app.inject({ url: '/api/settings', cookies })).body;
     const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: draft });
     expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
@@ -153,6 +162,16 @@ it('requires authentication, validates drafts, and never saves settings or creat
   expect((await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: draft })).statusCode).toBe(400);
   expect((await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: { ...payload, runtime: { surprise: 'hidden' } } })).statusCode).toBe(400);
   expect(ctx.settings.meta('settings')).toBe(before); expect(ctx.engine.listJobs()).toEqual([]);
+});
+
+it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s previews the original Reborn transform and image archive using the actual request builders', async protocol => {
+  const before = ctx.settings.meta('settings'); const draft = input('writing', protocol); draft.templates = withTavernPresets(); draft.templates.general!.selected = 'tavern-reborn-v23'; draft.templates.selected.writing = 'default-writing-v3';
+  const transformed = ctx.engine.previewPrompt(draft); expect(transformed.messages[0].content).toContain('<clear>'); expect(JSON.stringify(transformed.messages)).toContain('soliumbra'); expect(transformed.tools.some(tool => tool.name === 'game_content')).toBe(true);
+  expect(transformed.messages.some(message => message.role === 'system' && message.content.includes('# 故事资料使用规则'))).toBe(true);
+  const image = { ...draft, task: 'image' as const, variables: { imageInput: '{"material":"雾港灯塔"}', imageSystemPrompt: '水彩', maxCharacterReferences: '0' } }; image.templates.general!.selected = 'tavern-linux-v13';
+  const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: image }); expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
+  expect(preview.tools).toHaveLength(1); expect(preview.tools[0].name).toBe('dispatch_stream_payload'); expect(preview.tools[0].description).toContain('IMAGE_PROMPT_OPTIMIZATION'); expect(preview.tools[0].description).toContain('雾港灯塔');
+  expect(ctx.settings.meta('settings')).toBe(before);
 });
 
 it('keeps the extraction example valid under the real evidence and output validator', () => {

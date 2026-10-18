@@ -8,6 +8,8 @@ import { Store } from '../server/store.js';
 import { StoryEngine, type TextModels } from '../server/engine.js';
 import { generateText } from '../server/providers.js';
 import { buildApp } from '../server/app.js';
+import { defaultPromptTemplates } from '../shared/prompt-templates.js';
+import { withDramatronPresets } from './fixtures/prompt-presets.js';
 import type { ExtractionResult, Job, ModelRequest, ProviderConfig, RpgChapterChoice, Settings } from '../shared/types.js';
 
 const stores: Store[] = [], engines: StoryEngine[] = [], servers: Server[] = [];
@@ -36,7 +38,7 @@ async function upstream(reply: (body: any, response: ServerResponse, index: numb
   servers.push(server); await listenLocalServer(server);
   return { bodies, url: `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1` };
 }
-const settings = (url: string): Settings => ({ providers: [{ id: 'local', name: '本地协议模拟', protocol: 'openai-chat', baseUrl: url, model: 'writer', maxOutputTokens: 1000, contextTokens: 64000 }], writingProviderId: 'local', planningProviderId: 'local', extractionProviderId: 'local', taskSettings: { extraction: { autoRetry: false, maxRetries: 0, retryDelayMs: 0 }, planning: { enabled: false, mode: 'separate' } } });
+const settings = (url: string, archive = false): Settings => ({ promptTemplates: archive ? defaultPromptTemplates() : withDramatronPresets(), providers: [{ id: 'local', name: '本地协议模拟', protocol: 'openai-chat', baseUrl: url, model: 'writer', maxOutputTokens: 1000, contextTokens: 64000 }], writingProviderId: 'local', planningProviderId: 'local', extractionProviderId: 'local', taskSettings: { extraction: { autoRetry: false, maxRetries: 0, retryDelayMs: 0 }, planning: { enabled: false, mode: 'separate' } } });
 function engineFor(store: Store, config: Settings, start = true, extraction: () => ExtractionResult = extracted) {
   const requests: { budget?: ModelRequest['chapterBudget']; continuationRound?: number; continuationText?: string }[] = [];
   const models: TextModels = {
@@ -85,10 +87,10 @@ describe('RPG chapter budgets and durable chapter-boundary choices', () => {
     expect(() => ctx.engine.action(queued.id, 'resume')).toThrow(); expect(service.bodies).toHaveLength(2);
   });
 
-  it('persists a sealed choice and an accepted next-chapter action through engine restarts, then starts a fresh one-round chapter', async () => {
+  it.each([false, true])('persists a sealed choice and accepted next-chapter action through engine restarts, archive=%s', async archive => {
     const oldText = '旧'.repeat(120), nextText = '你按自己的选择先观察周围。';
     const service = await upstream((_body, reply, index) => respond(reply, index ? nextText : oldText, index ? undefined : ask('你准备如何应对守卫？')));
-    const store = makeStore(), config = settings(service.url), first = engineFor(store, config); const { queued } = start(store, first.engine);
+    const store = makeStore(), config = settings(service.url, archive), first = engineFor(store, config); const { queued } = start(store, first.engine);
     expect((await finished(first.engine, queued.id)).status).toBe('completed'); const original = await ready(store, first.engine, queued.branchId);
     await first.engine.close(); const offline = engineFor(store, config, false);
     expect(store.state(queued.branchId).rpg?.nextChoice).toEqual(original.rpg?.nextChoice);
@@ -102,7 +104,7 @@ describe('RPG chapter budgets and durable chapter-boundary choices', () => {
     expect(service.bodies).toHaveLength(1); await offline.engine.close();
     const restarted = engineFor(store, config); expect((await finished(restarted.engine, next.id)).status).toBe('completed'); const state = await ready(store, restarted.engine, queued.branchId, 2);
     expect(service.bodies).toHaveLength(2); expect(restarted.requests[0]).toEqual({ budget: { targetWords: 100 }, continuationRound: undefined, continuationText: undefined });
-    expect(JSON.stringify(service.bodies[1].messages)).toContain('你准备如何应对守卫？'); expect(JSON.stringify(service.bodies[1].messages)).toContain('我先观察周围，再决定是否回答守卫');
+    expect(JSON.stringify(service.bodies[1])).toContain('你准备如何应对守卫？'); expect(JSON.stringify(service.bodies[1])).toContain('我先观察周围，再决定是否回答守卫');
     expect(service.bodies[1].messages.some((message: any) => message.tool_calls || message.tool_call_id)).toBe(false);
     expect(store.chapter(queued.branchId, state.chapters[0].id).text).toBe(oldText); expect(store.chapter(queued.branchId, state.chapters[1].id).text).toBe(nextText);
     expect(job(restarted.engine, next.id)).toMatchObject({ inputTokens: 10, outputTokens: 5 });

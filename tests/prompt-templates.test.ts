@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import { withDramatronPresets } from './fixtures/prompt-presets.js';
 import type { PromptBlock, PromptTask } from '../shared/types.js';
 import { activePromptPreset, BASE_SYSTEM, COMPRESSION_SYSTEM, compilePrompt, compileTaskPrompt, defaultPromptTemplates, EXTRACT_SYSTEM, normalizePromptTemplates, WRITING_SYSTEM, promptPresetVariables, promptTasks, validatePromptTemplates } from '../shared/prompt-templates.js';
 import { legacyPromptTemplates } from '../shared/legacy-prompt-templates.js';
 import { previousPromptTemplates } from '../shared/previous-prompt-templates.js';
-import { STRUCTURED_OUTPUT_INSTRUCTION } from '../shared/prompt-runtime.js';
 
 const variables = {
   context: '完整上下文', instruction: '继续灯塔剧情', mode: 'continuation', maxWords: 2000,
-  chapterNumber: 3, endChapter: 6, writingTarget: '请写第 3 章。', chapterTitle: '灯塔', blockText: '[1] 林舟走进灯塔。', summaryText: '已发生的剧情摘要。',
+  chapterNumber: 3, endChapter: 6, writingTarget: '请写第 3 章。', chapterTitle: '灯塔', blockText: '[1] 林舟走进灯塔。', imageInput: '{}', imageSystemPrompt: '', maxCharacterReferences: 0, summaryText: '已发生的剧情摘要。',
 };
 const messageBlock = (id: string, role: PromptBlock['role'], content: string): PromptBlock => ({ id, name: id, role, content, enabled: true });
 
@@ -37,7 +37,7 @@ describe('editable task prompt templates', () => {
   });
 
   it('requires exactly one general slot, checks references and confines transport to writing', () => {
-    const settings = defaultPromptTemplates();
+    const settings = withDramatronPresets();
     settings.general!.presets[0].blocks.push({ ...messageBlock('extra-slot', 'system', ''), slot: 'task' });
     expect(() => validatePromptTemplates(settings)).toThrow('任务插槽'); settings.general!.presets[0].blocks.pop();
     settings.presets.writing[0].generalPresetId = 'missing'; expect(() => validatePromptTemplates(settings)).toThrow('通用预设不存在'); delete settings.presets.writing[0].generalPresetId;
@@ -64,12 +64,12 @@ describe('editable task prompt templates', () => {
     expect(requests.compression).toMatchObject({ system: expect.stringContaining(COMPRESSION_SYSTEM.replace(`${BASE_SYSTEM}\n\n`, '')), prompt: expect.stringContaining(variables.summaryText) });
     for (const task of promptTasks) for (const mode of ['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']) {
       const dialogue = compileTaskPrompt(undefined, task, { ...variables, mode }).messages.filter(message => message.role !== 'system');
-      expect(dialogue.map(message => message.role)).toEqual(task === 'compression' || task === 'extraction' ? ['user', 'assistant', 'user'] : ['user', 'assistant', 'user', 'assistant', 'user']);
-      expect(dialogue[0].content).toBe(second.general!.presets[0].blocks.find(value=>value.feature==='snow')!.content);
+      expect(dialogue.map(message => message.role)).toEqual(task === 'writing' ? ['user', 'assistant', 'user'] : task === 'extraction' ? ['user', 'user'] : ['user']);
+      expect(dialogue.some(message => message.content.includes('冬马和纱'))).toBe(false);
       if (task === 'extraction') {
-        expect(dialogue[2].content).toContain(variables.context);
-        expect(dialogue[2].content).toContain(`## 编号原文\n${variables.blockText}`);
-        expect(dialogue[2].content).not.toContain('已收到索引');
+        expect(dialogue[0].content).toContain(variables.context);
+        expect(dialogue[1].content).toContain(`## 编号原文\n${variables.blockText}`);
+        expect(dialogue[1].content).not.toContain('已收到索引');
       }
     }
     expect(validatePromptTemplates(second)).toEqual(second);
@@ -121,7 +121,7 @@ describe('editable task prompt templates', () => {
     expect(request.system).not.toContain('generate_scene_cg');
     expect(request.messages).not.toContainEqual(expect.objectContaining({ content: '未启用' }));
     expect(settings.presets.writing[0].blocks[0].content).toBe('{{context}}');
-    expect(compileTaskPrompt(undefined, 'extraction', variables).system).toContain(STRUCTURED_OUTPUT_INSTRUCTION);
+    expect(compileTaskPrompt(undefined, 'extraction', variables).system).toContain('完整 JSON 结果对象');
   });
 
   it('uses the selected preset and retains order, message roles and enabled blocks without recursive substitution', () => {
@@ -233,7 +233,7 @@ describe('editable task prompt templates', () => {
     expect(() => validatePromptTemplates(settings)).toThrow('20 个');
     settings.presets.compression = [{ id: 'default-compression', name: '预设', blocks: Array.from({ length: 81 }, (_, index) => messageBlock(`b${index}`, 'user', 'input')) }];
     expect(() => validatePromptTemplates(settings)).toThrow('80 个');
-    settings.presets.compression[0].blocks = Array.from({ length: 3 }, (_, index) => messageBlock(`b${index}`, 'user', '中'.repeat(90000)));
-    expect(() => validatePromptTemplates(settings)).toThrow('700000 字节');
+    settings.presets.compression[0].blocks = Array.from({ length: 4 }, (_, index) => messageBlock(`b${index}`, 'user', '中'.repeat(90000)));
+    expect(() => validatePromptTemplates(settings)).toThrow('1000000 字节');
   });
 });

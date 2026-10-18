@@ -1,4 +1,4 @@
-import type { PromptPreset } from './types.js';
+import type { PromptPreset } from '../../../shared/types.js';
 
 export const V08_PRESET_ID = 'default-general-v08';
 

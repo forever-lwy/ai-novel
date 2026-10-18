@@ -50,15 +50,19 @@ export interface ProviderConfig extends ModelParameters {
 /** Generation fields and model are accepted only when upgrading older settings. */
 export type ProviderConnection = Omit<ProviderConfig, keyof ModelParameters | 'model'> & Partial<ModelParameters> & { model?: string; hasUrlCredentials?: boolean };
 export interface ProviderModel { id: string; name?: string }
-export type PromptTask = 'writing' | 'extraction' | 'compression';
+export type PromptTask = 'writing' | 'extraction' | 'compression' | 'image';
 export type PromptScope = PromptTask | 'general';
 export type WritingOutputMode = 'text' | 'tool';
-export type PromptFeature = 'snow' | 'literal' | 'cot-three' | 'cot-single' | 'defense-normal' | 'defense-laoda' | 'defense-v08';
-export type PromptTextFilter = 'dramatron' | 'v08' | 'reborn';
-export interface PromptMessage { role: 'system' | 'user' | 'assistant'; content: string }
+export type PromptFeature = 'snow' | 'literal' | 'tavern' | 'cot-three' | 'cot-single' | 'defense-normal' | 'defense-laoda' | 'defense-v08';
+export type PromptTextFilter = 'dramatron' | 'v08' | 'reborn' | 'tavern';
+/** A result tool coexists with real tools; archive moves the initial text into its description. */
+export interface ResponseCarrier { name: string; field: string; archive?: boolean }
+export interface PromptMessage { role: 'system' | 'user' | 'assistant'; content: string; carrierPart?: 'guide' | 'description' | 'field'; tavernDialogue?: boolean }
 export interface PromptBlock extends PromptMessage { id: string; name: string; enabled: boolean; modes?: Mode[]; tasks?: (PromptTask | 'planning')[]; feature?: PromptFeature; slot?: 'task' }
-export interface PromptPreset { id: string; name: string; blocks: PromptBlock[]; variables?: Record<string, string>; useGeneral?: boolean; generalPresetId?: string; writingOutputMode?: WritingOutputMode; toolTransport?: boolean; textFilter?: PromptTextFilter }
-export interface PromptTemplateSettings { presets: Record<PromptTask, PromptPreset[]> & { planning?: PromptPreset[] }; selected: Record<PromptTask, string> & { planning?: string }; general?: { presets: PromptPreset[]; selected: string; catalogVersion?: number }; taskCatalogVersions?: Partial<Record<PromptTask, number>> }
+export interface PromptPreset { id: string; name: string; blocks: PromptBlock[]; variables?: Record<string, string>; useGeneral?: boolean; generalPresetId?: string; writingOutputMode?: WritingOutputMode; toolTransport?: boolean; textFilter?: PromptTextFilter; responseCarrier?: ResponseCarrier; messageTransform?: 'reborn' }
+export interface PromptTemplateSettings { presets: Record<PromptTask, PromptPreset[]> & { planning?: PromptPreset[] }; selected: Record<PromptTask, string> & { planning?: string }; general?: { presets: PromptPreset[]; selected: string; catalogVersion?: number }; taskCatalogVersions?: Partial<Record<PromptTask, number>>; catalogCleanupVersion?: number }
+/** Frozen catalog snapshots predate the image task. */
+export type LegacyPromptTemplateSettings = Omit<PromptTemplateSettings, 'presets' | 'selected'> & { presets: Record<Exclude<PromptTask, 'image'>, PromptPreset[]> & { planning?: PromptPreset[] }; selected: Record<Exclude<PromptTask, 'image'>, string> & { planning?: string } };
 export interface ImageSettings {
   providerId: string; model: string; protocol: 'openai-images' | 'gemini' | 'together-images'; size: string;
   quality: 'auto' | 'low' | 'medium' | 'high' | 'standard' | 'hd' | 'xhigh' | 'max'; stylePrompt: string; autoPortrait: boolean; autoCG: boolean; timeoutMs: number;
@@ -111,11 +115,13 @@ export interface ModelToolContinuation {
   inputTokens: number; outputTokens: number; round: number; callCount: number; usageEstimated?: boolean;
   writingOutputMode?: WritingOutputMode;
   textFilter?: PromptTextFilter;
+  responseCarrier?: ResponseCarrier;
+  messageTransform?: 'reborn';
   pending?: { data: Record<string, unknown>; calls: ModelToolCall[]; results: { call: ModelToolCall; output: string }[]; nextIndex: number };
 }
 /** A submission tool only returns data; it is never executed or continued. */
 export interface ModelStructuredOutput { mode: 'json_schema' | 'tool'; name: string; description: string; schema: Record<string, unknown> }
-export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; writingOutputMode?: WritingOutputMode; textFilter?: PromptTextFilter; structuredOutput?: ModelStructuredOutput; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
+export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; writingOutputMode?: WritingOutputMode; responseCarrier?: ResponseCarrier; messageTransform?: 'reborn'; presetMessageCount?: number; textFilter?: PromptTextFilter; structuredOutput?: ModelStructuredOutput; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
 export type OutputStage = 'planning' | 'compression' | 'writing' | 'chapter-title' | 'extraction';
 export interface OutputIssue { path: string; message: string; paragraph?: number; quote?: string; sourceText?: string }
 export interface ModelOutputRecord extends CapturedModelResponse {

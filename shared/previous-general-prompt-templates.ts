@@ -1,4 +1,4 @@
-import type { PromptTemplateSettings } from "./types.js";
+import type { LegacyPromptTemplateSettings as PromptTemplateSettings } from "./types.js";
 
 // Frozen first general-preset migration, retained for exact default upgrades.
 export const previousGeneralPromptTemplates: PromptTemplateSettings = {

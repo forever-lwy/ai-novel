@@ -51,7 +51,9 @@ export function createStreamEndDetector(protocol: ProviderProtocol): (chunk: str
 }
 
 /** Emit prose only; public thoughts and tool execution are recorded through separate activity events. */
-export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text: string) => void, writingTool = false): (chunk: string) => void {
+export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text: string) => void, writingTool: boolean | { name: string; field: string } = false): (chunk: string) => void {
+  const carrierName = typeof writingTool === 'object' ? writingTool.name : WRITING_RESPONSE_NAME;
+  const carrierField = typeof writingTool === 'object' ? writingTool.field : 'prose';
   let pending = '';
   const toolParts = new Map<string, { name: string; raw: string; sent: string }>();
   let plain = ''; let sent = '';
@@ -61,8 +63,8 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
     if (fragment) part.raw += fragment;
     if (snapshot !== undefined) part.raw = typeof snapshot === 'string' ? snapshot : JSON.stringify(snapshot);
     toolParts.set(id, part);
-    if (part.name !== WRITING_RESPONSE_NAME) return;
-    part.sent = partialWritingProse(part.raw);
+    if (part.name !== carrierName) return;
+    part.sent = partialWritingProse(part.raw, carrierField);
   };
   return chunk => {
     pending += chunk;
@@ -111,7 +113,7 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
       }
       if (writingTool) {
         plain += text;
-        const best = [plain, ...[...toolParts.values()].filter(part => part.name === WRITING_RESPONSE_NAME).map(part => part.sent)].reduce((longest, value) => value.length > longest.length ? value : longest, '');
+        const best = [plain, ...[...toolParts.values()].filter(part => part.name === carrierName).map(part => part.sent)].reduce((longest, value) => value.length > longest.length ? value : longest, '');
         // Two gateway channels can mirror the same output. Append only a
         // compatible suffix; the final capture selects the complete candidate.
         if (best.startsWith(sent) && best.length > sent.length) { emit(best.slice(sent.length)); sent = best; }

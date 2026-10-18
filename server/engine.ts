@@ -490,8 +490,10 @@ export class StoryEngine {
     const messages = protocol === 'openai-chat' ? native.messages : protocol === 'openai-responses' ? native.input : protocol === 'gemini'
       ? [...(native.systemInstruction ? [{ role: 'system', content: native.systemInstruction.parts.map((part: { text: string }) => part.text).join('\n\n') }] : []), ...native.contents.map((message: { role: string; parts: { text: string }[] }) => ({ role: message.role === 'model' ? 'assistant' : 'user', content: message.parts.map(part => part.text).join('\n\n') }))]
       : [...(native.system ? [{ role: 'system', content: native.system }] : []), ...native.messages.map((message: { role: string; content: string | { text: string }[] }) => ({ role: message.role, content: typeof message.content === 'string' ? message.content : message.content.map(part => part.text).join('\n\n') }))];
-    const previewTools: PromptPreviewResult['tools'] = compiled.writingOutputMode === 'tool' ? [writingResponseTool(tools)] : tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
-    if (compiled.structuredOutput?.mode === 'tool') previewTools.push({ name: compiled.structuredOutput.name, description: compiled.structuredOutput.description, parameters: compiled.structuredOutput.schema });
+    const previewTools: PromptPreviewResult['tools'] = protocol === 'openai-chat' ? (native.tools ?? []).map((tool: { function: { name: string; description: string; parameters: Record<string, unknown> } }) => tool.function)
+      : protocol === 'gemini' ? (native.tools?.[0]?.functionDeclarations ?? []).map((tool: { name: string; description: string; parameters?: Record<string, unknown>; parametersJsonSchema?: Record<string, unknown> }) => ({ name: tool.name, description: tool.description, parameters: tool.parametersJsonSchema ?? tool.parameters }))
+      : protocol === 'claude' ? (native.tools ?? []).map((tool: { name: string; description: string; input_schema: Record<string, unknown> }) => ({ name: tool.name, description: tool.description, parameters: tool.input_schema }))
+      : (native.tools ?? []).map(({ name, description, parameters }: { name: string; description: string; parameters: Record<string, unknown> }) => ({ name, description, parameters }));
     return { messages, runtimeBlocks: compiled.runtimeBlocks, tools: previewTools, body };
   }
   private compressionSegments(source: string, provider: ProviderConfig, job: Job): string[] {

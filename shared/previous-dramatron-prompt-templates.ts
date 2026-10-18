@@ -1,4 +1,4 @@
-import type { PromptTemplateSettings } from "./types.js";
+import type { LegacyPromptTemplateSettings as PromptTemplateSettings } from "./types.js";
 
 // Frozen Dramatron migration, used only to preserve and upgrade previous settings.
 export const previousDramatronPromptTemplates: PromptTemplateSettings = {

@@ -1,5 +1,5 @@
 // Exact pre-Markdown defaults, used only to upgrade untouched presets.
-import type { PromptTemplateSettings } from "./types.js";
+import type { LegacyPromptTemplateSettings as PromptTemplateSettings } from "./types.js";
 export const legacyPromptTemplates: PromptTemplateSettings = {
   "presets": {
     "writing": [

@@ -101,8 +101,15 @@ const modelServer = createServer(async (req, res) => {
   try {
     const chunks = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    const system = body.messages?.filter(message => message.role === 'system').map(message => message.content).join('\n') || '';
-    const prompt = body.messages?.filter(message => message.role === 'user').map(message => message.content).join('\n') || '';
+    // A real provider also receives the neutral framework's task archive in tools.
+    const archive = body.tools?.find(tool => tool.function?.description?.includes('【/workspace/archive/ 本地工作目录文件与历史章节归档】'))?.function.description;
+    const archivedMessages = archive?.split('\n\n---\n\n').flatMap(section => {
+      const match = section.match(/(?:^|\n)\[(system|user|assistant)\]\n([\s\S]*)/);
+      return match ? [{ role: match[1], content: match[2] }] : [];
+    });
+    const taskMessages = archivedMessages?.length ? archivedMessages : body.messages || [];
+    const system = taskMessages.filter(message => message.role === 'system').map(message => message.content).join('\n');
+    const prompt = taskMessages.filter(message => message.role === 'user').map(message => message.content).join('\n');
     if (/^e2e-image-prompts?/.test(body.model || '') || /生图提示词优化|IMAGE_PROMPT_OPTIMIZATION/.test(system)) {
       promptOptimizationRequests++; lastPromptOptimizationRequest = { model: body.model, system, prompt };
       if (body.model === 'e2e-image-prompt-failure') { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'Deliberate prompt optimization failure' })); return; }
@@ -147,6 +154,20 @@ const modelServer = createServer(async (req, res) => {
         ] }, 'tool_calls') + 'data: [DONE]\n\n'); }, 150);
       }
       return;
+    }
+    if (body.model === 'e2e-native-carrier') {
+      const hasResults = body.messages?.some(message => message.role === 'tool');
+      const sink = body.tools.find(tool => tool.function?.name === 'emit_complete_text').function;
+      const args = JSON.stringify({ content: `<draft>NATIVE_CHECK：核对本轮场景。</draft><game>${hasResults ? '林舟走进白石城，开始寻找新的线索。' : '林舟来到城门前。'}</game><summary>不得保存的辅助摘要</summary>` });
+      const frame = (delta, finish_reason = null) => `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }], usage: { prompt_tokens: 30, completion_tokens: 15 } })}\n\n`;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(frame({ tool_calls: [{ index: 0, id: `native-${hasResults ? 'final' : 'first'}`, type: 'function', function: { name: sink.name, arguments: args.slice(0, 40) } }] }));
+      setTimeout(() => {
+        if (res.destroyed) return;
+        const calls = [{ index: 0, function: { arguments: args.slice(40) } }];
+        if (!hasResults) calls.push({ index: 1, id: 'native-search', type: 'function', function: { name: 'search_story', arguments: JSON.stringify({ keywords: ['城门'], scope: 'chapters' }) } });
+        res.end(frame({ tool_calls: calls }, 'tool_calls') + 'data: [DONE]\n\n');
+      }, 100); return;
     }
     if (body.model === 'e2e-writing-envelope') {
       const hasResults = body.messages?.some(message => message.role === 'tool');
@@ -210,7 +231,7 @@ const modelServer = createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const frame = (delta, finish_reason = null) => { if (!res.destroyed) res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] })}\n\n`); };
       const done = finish_reason => { frame({}, finish_reason); if (!res.destroyed) res.end('data: [DONE]\n\n'); };
-      const actionMessage = body.messages?.find(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('# 上一章的待选问题与玩家已确认的行动\n'));
+      const actionMessage = taskMessages.find(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('# 上一章的待选问题与玩家已确认的行动\n'));
       const carried = actionMessage ? JSON.parse(actionMessage.content.split('# 上一章的待选问题与玩家已确认的行动\n')[1].split('\n')[0]) : undefined;
       if (carried) {
         frame({ content: `${carried.text || carried.customText || carried.optionId}\n\n你向守门人询问东门的路况，然后迈进城门。` });

@@ -1,5 +1,5 @@
 import { dramatronSource } from './dramatron-source.js';
-import type { PromptBlock, PromptFeature } from './types.js';
+import type { PromptBlock, PromptFeature } from '../../../shared/types.js';
 
 /** The helper script is not executed. Its prompt modules and switch semantics
  * are ported as request data; source macros are resolved before compilation.

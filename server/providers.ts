@@ -10,6 +10,8 @@ import { STRUCTURED_OUTPUT_INSTRUCTION, TOOL_JSON_INSTRUCTION, TOOL_RESULT_REVIE
 import { EXTRACTION_SUBMISSION_NAME, EXTRACTION_TOOL_INSTRUCTION } from '../shared/extraction-output.js';
 import { partialWritingProse, unpackWritingResponse, writingResponseTool, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
+import { archiveCarrierMessages, carrierInstruction, responseCarrierTool, unpackResponseCarrier } from '../shared/response-carrier.js';
+import { rebornMessages } from '../shared/reborn-messages.js';
 export { validateProviderOptions } from './provider-options.js';
 
 export const MODEL_TIMEOUT_MS = DEFAULT_MODEL_TIMEOUT_MS;
@@ -205,10 +207,17 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
   if (output && (request.tools?.length || request.continuation)) throw new Error('资料输出模式不能与检索工具或多轮续接同时使用。');
   const submission = output?.mode === 'tool' ? output : undefined;
   const schema = output?.mode === 'json_schema' ? output.schema : undefined;
-  const writingSubmission = writingTool ? writingResponseTool(request.tools ?? []) : undefined;
+  const carrier = writingTool ? request.responseCarrier : undefined;
+  const archive = carrier?.archive ? archiveCarrierMessages(request) : undefined;
+  const writingSubmission = writingTool && !carrier ? writingResponseTool(request.tools ?? []) : undefined;
   const forced = submission ?? writingSubmission;
-  const tools = submission ? [{ name: submission.name, description: submission.description, parameters: submission.schema }] : writingSubmission ? [writingSubmission] : request.tools ?? [];
-  const messages = request.messages?.length ? request.messages : undefined;
+  const tools = submission ? [{ name: submission.name, description: submission.description, parameters: submission.schema }] : writingSubmission ? [writingSubmission] : [...(request.tools ?? []), ...(carrier ? [responseCarrierTool(carrier, archive?.description, archive?.fieldDescription)] : [])];
+  if (carrier && (request.tools ?? []).some(tool => tool.name === carrier.name)) throw new Error('结果工具名称与实际工具重复。');
+  const sourceMessages = request.messages?.length ? request.messages : undefined;
+  const prefixLength = request.presetMessageCount ?? sourceMessages?.length ?? 0;
+  const messages = (archive?.messages ?? (request.messageTransform === 'reborn' && sourceMessages
+    ? [...rebornMessages(sourceMessages.slice(0, prefixLength)), ...sourceMessages.slice(prefixLength)]
+    : sourceMessages))?.map(({ role, content }) => ({ role, content }));
   const system = messages ? messages.filter(message => message.role === 'system').map(message => message.content).join('\n\n') : request.system;
   if (stream) headers.Accept = 'text/event-stream';
   switch (config.protocol) {
@@ -326,7 +335,7 @@ export function buildRequestSnapshot(config: ProviderConfig, request: ModelReque
   return requestSnapshot(config, continuationWire(config, request));
 }
 
-async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void, onContent?: () => void, writingTool = false): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
+async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void, onContent?: () => void, writingTool: boolean | { name: string; field: string } = false): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
   if (!response.body) return { raw: '', bytes: 0, incomplete: false };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -424,8 +433,9 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     let text = responseText(config.protocol, data);
     if (request.writingOutputMode === 'tool') {
       const calls = responseToolCalls(config.protocol, data);
-      if (calls.length === 1 && calls[0].name === WRITING_RESPONSE_NAME) {
-        const carrier = partialWritingProse(typeof calls[0].arguments === 'string' ? calls[0].arguments : JSON.stringify(calls[0].arguments) ?? '');
+      const output = calls.find(call => call.name === (request.responseCarrier?.name ?? WRITING_RESPONSE_NAME));
+      if (output) {
+        const carrier = partialWritingProse(typeof output.arguments === 'string' ? output.arguments : JSON.stringify(output.arguments) ?? '', request.responseCarrier?.field);
         if (carrier.length >= text.length) text = carrier;
       }
     }
@@ -504,7 +514,7 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     received = await readBody(response, { ...config, stream: snapshot.stream }, response.ok ? emitText : undefined, response.ok ? request.onActivity : undefined, streamingResponse ? () => {
       receivedContent = true;
       if (!controller.signal.aborted) timer.refresh();
-    } : undefined, request.writingOutputMode === 'tool');
+    } : undefined, request.writingOutputMode === 'tool' ? request.responseCarrier ?? true : false);
     transport = request.signal?.aborted ? 'cancelled' : timedOut ? 'timeout' : received.error === 'read' ? 'interrupted' : 'http';
     const { data, tokens, streamError } = capture();
     if (data && response.ok && !request.signal?.aborted && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) {
@@ -535,9 +545,10 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
         else { check.stop_reason = check.stop_reason === 'tool_use' ? 'end_turn' : check.stop_reason; check.content.push({ type: 'text', text: '工具调用' }); }
         parseResult(config.protocol, check);
         const plain = responseText(config.protocol, data);
-        const carrier = request.writingOutputMode === 'tool' ? unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name), Boolean(clean(plain).trim())).prose : plain;
+        const parsed = request.responseCarrier ? unpackResponseCarrier(responseToolCalls(config.protocol, data), request.responseCarrier) : undefined;
+        const carrier = parsed ? parsed.prose : request.writingOutputMode === 'tool' ? unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name), Boolean(clean(plain).trim())).prose : plain;
         const text = clean(redactPayload(request.writingOutputMode === 'tool' && plain.length > carrier.length ? plain : carrier, config.apiKey));
-        if (!text.trim() && request.writingOutputMode === 'tool' && !unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name)).calls.length) throw new Error('清理辅助标签后没有正文或工具调用，已保留原始响应。');
+        if (!text.trim() && request.writingOutputMode === 'tool' && !(parsed ?? unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name))).calls.length) throw new Error('清理辅助标签后没有正文或工具调用，已保留原始响应。');
         return { data, result: { text, ...responseUsage(config.protocol, data) } };
       }
       const result = parseResult(config.protocol, data);
@@ -679,7 +690,7 @@ function activityEmitter(config: ProviderConfig, request: ModelRequest, round: n
 /** Explicit tool continuations are new turns; failed billable requests are never retried. */
 export async function generateText(config: ProviderConfig, request: ModelRequest): Promise<ModelResult> {
   // A saved RPG conversation keeps its original transport even after preset edits.
-  if (request.continuation) request = { ...request, writingOutputMode: request.continuation.writingOutputMode ?? 'text', textFilter: request.continuation.textFilter };
+  if (request.continuation) request = { ...request, writingOutputMode: request.continuation.writingOutputMode ?? 'text', textFilter: request.continuation.textFilter, responseCarrier: request.continuation.responseCarrier, messageTransform: request.continuation.messageTransform };
   const wire = continuationWire(config, request);
   const body = wire.body as JsonObject;
   const tools = request.tools ?? [];
@@ -694,7 +705,7 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
   const complete = (): ModelResult => ({ text: text.trim(), ...tokens, ...(usageEstimated ? { usageEstimated: true } : {}) });
   const chapterComplete = () => Boolean(request.chapterBudget && chapterBudgetReached(text, request.chapterBudget.targetWords));
   const checkpoint = async () => {
-    if (request.onContinuation) await request.onContinuation(structuredClone({ protocol: config.protocol, model: config.model, body, text, ...tokens, round, callCount, ...(request.writingOutputMode ? { writingOutputMode: request.writingOutputMode } : {}), ...(request.textFilter ? { textFilter: request.textFilter } : {}), ...(usageEstimated ? { usageEstimated: true } : {}), ...(pending ? { pending } : {}) } satisfies ModelToolContinuation));
+    if (request.onContinuation) await request.onContinuation(structuredClone({ protocol: config.protocol, model: config.model, body, text, ...tokens, round, callCount, ...(request.writingOutputMode ? { writingOutputMode: request.writingOutputMode } : {}), ...(request.responseCarrier ? { responseCarrier: request.responseCarrier } : {}), ...(request.messageTransform ? { messageTransform: request.messageTransform } : {}), ...(request.textFilter ? { textFilter: request.textFilter } : {}), ...(usageEstimated ? { usageEstimated: true } : {}), ...(pending ? { pending } : {}) } satisfies ModelToolContinuation));
   };
   try {
     while (round < maxRounds || pending) {
@@ -725,7 +736,7 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         text += result.text;
         round++;
         const nativeCalls = responseToolCalls(config.protocol, data);
-        const calls = request.writingOutputMode === 'tool' && nativeCalls.length ? unpackWritingResponse(nativeCalls, tools.map(tool => tool.name), Boolean(result.text.trim())).calls : nativeCalls;
+        const calls = request.responseCarrier ? unpackResponseCarrier(nativeCalls, request.responseCarrier).calls : request.writingOutputMode === 'tool' && nativeCalls.length ? unpackWritingResponse(nativeCalls, tools.map(tool => tool.name), Boolean(result.text.trim())).calls : nativeCalls;
         if (!calls.length) return complete();
         callCount += calls.length;
         if ((round === maxRounds && !chapterComplete()) || callCount > maxRounds * 4) throw new Error('模型检索次数超过上限，请缩小本次写作范围后手动重试。');
@@ -762,7 +773,7 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         const error = object(result) && typeof result.error === 'string' && result.error.trim() ? result.error : undefined;
         emitActivity({ type: 'tool_result', id: activityId, name: call.name, result, ...(error ? { error } : {}) });
       }
-      const wireResults = request.writingOutputMode === 'tool' ? [{ call: responseToolCalls(config.protocol, data)[0], output: JSON.stringify({ toolResults: results.map(({ call, output }) => ({ id: call.id, name: call.name, result: JSON.parse(output) })) }) }] : results;
+      const wireResults = request.responseCarrier ? [...results, ...unpackResponseCarrier(responseToolCalls(config.protocol, data), request.responseCarrier).carriers.map(call => ({ call, output: JSON.stringify({ received: true }) }))] : request.writingOutputMode === 'tool' ? [{ call: responseToolCalls(config.protocol, data)[0], output: JSON.stringify({ toolResults: results.map(({ call, output }) => ({ id: call.id, name: call.name, result: JSON.parse(output) })) }) }] : results;
       if (config.protocol === 'openai-chat') {
         body.messages.push({ role: 'assistant', ...data.choices[0].message });
         body.messages.push(...wireResults.map(({ call, output }) => ({ role: 'tool', tool_call_id: call.id, content: output })));
@@ -901,7 +912,7 @@ export function parseStructuredText<T>(text: string, validate: (value: unknown) 
 
 /** Normalize before budgeting; repeated normalization never duplicates the output constraint. */
 export function structuredRequest(request: ModelRequest): ModelRequest {
-  const instruction = request.structuredOutput?.mode === 'tool' ? EXTRACTION_TOOL_INSTRUCTION : request.writingOutputMode === 'tool' ? TOOL_JSON_INSTRUCTION : STRUCTURED_OUTPUT_INSTRUCTION;
+  const instruction = request.structuredOutput?.mode === 'tool' ? EXTRACTION_TOOL_INSTRUCTION : request.responseCarrier ? carrierInstruction(request.responseCarrier, true) : request.writingOutputMode === 'tool' ? TOOL_JSON_INSTRUCTION : STRUCTURED_OUTPUT_INSTRUCTION;
   if (request.messages?.length) {
     if (request.messages.some(message => message.role === 'system' && message.content.includes(instruction))) return request;
     return { ...request, messages: [...request.messages, { role: 'system', content: instruction }] };

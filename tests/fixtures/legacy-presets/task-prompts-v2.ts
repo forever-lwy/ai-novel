@@ -1,6 +1,6 @@
-import type { PromptBlock, PromptPreset, PromptTask } from './types.js';
+import type { PromptBlock, PromptPreset, PromptTask } from '../../../shared/types.js';
 
-export const TASK_V2_PRESET_IDS: Record<PromptTask, string> = {
+export const TASK_V2_PRESET_IDS: Record<Exclude<PromptTask, 'image'>, string> = {
   writing: 'default-writing-v2', extraction: 'default-extraction-v2', compression: 'default-compression-v2',
 };
 const block = (id: string, name: string, role: PromptBlock['role'], content: string): PromptBlock => ({ id, name, role, enabled: true, content });
@@ -14,7 +14,7 @@ const delivery = `## 结果与提交
 不在普通文本重复已提交的结果，不附任务说明、检查过程或代码围栏。`;
 
 /** Fresh task editions; older presets and author edits remain separate. */
-export function taskPresetsV2(entityResolution: string, characterProfile: string): Record<PromptTask, PromptPreset> {
+export function taskPresetsV2(entityResolution: string, characterProfile: string): Record<Exclude<PromptTask, 'image'>, PromptPreset> {
   return {
     writing: { id: TASK_V2_PRESET_IDS.writing, name: '默认正文写作 v2 · 框架协作', blocks: [
       block('writing-v2-rules', '写作职责、文笔与连续性', 'system', `# 小说正文写作

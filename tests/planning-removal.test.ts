@@ -1,3 +1,4 @@
+import { withDramatronPresets } from './fixtures/prompt-presets.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,12 +21,12 @@ async function until(test:()=>boolean){for(let i=0;i<1000;i++){if(test())return;
 
 describe('three-task prompts without plot planning',()=>{
   it('keeps only transport protection in general and restores the exact original writing rules in the task',()=>{
-    const templates=defaultPromptTemplates();expect(promptTasks).toEqual(['writing','extraction','compression']);expect(templates.presets.planning).toBeUndefined();
+    const templates=withDramatronPresets();expect(promptTasks).toEqual(['writing','extraction','compression','image']);expect(templates.presets.planning).toBeUndefined();
     expect(templates.general!.presets[0].blocks.map(block=>block.id)).toEqual(['snow','clear','snow-ack','task-slot','cot-three','cot-single','defense-laoda','defense-normal','continue']);
     const general=templates.general!.presets[0].blocks.filter(block=>block.feature!=='snow').map(block=>block.content).join('\n');
     for(const marker of [BASE_SYSTEM,'DEEPMIND','<char_guide>','日式视觉小说','文风基调','墨守成规','小说作者助手'])expect(general).not.toContain(marker);
     expect(WRITING_SYSTEM).toBe(BASE_SYSTEM+'\n\n'+previousPromptTemplates.presets.writing[0].blocks.find(block=>block.id==='writing-rules')!.content);
-    for(const task of promptTasks){const request=compileTaskPrompt(templates,task,{context:'故事资料',summaryText:'剧情摘要',blockText:'[1] 正文。',mode:'original'});expect(request.system.split(BASE_SYSTEM)).toHaveLength(2);expect(request.system).not.toContain('日式视觉小说');}
+    for(const task of promptTasks){const request=compileTaskPrompt(templates,task,{context:'故事资料',summaryText:'剧情摘要',blockText:'[1] 正文。',imageInput:'{}',mode:'original'});if(task!=='image')expect(request.system.split(BASE_SYSTEM)).toHaveLength(2);expect(request.system).not.toContain('日式视觉小说');}
   });
   it('migrates previous defaults while retaining switches, transport settings, custom edits and archived planning presets',()=>{
     const old=structuredClone(previousDramatronPromptTemplates);old.presets.writing[0].writingOutputMode='tool';old.presets.writing[0].textFilter='dramatron';old.general!.presets[0].blocks.find(block=>block.feature==='snow')!.enabled=false;

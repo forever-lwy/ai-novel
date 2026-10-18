@@ -1,3 +1,4 @@
+import { withDramatronPresets } from './fixtures/prompt-presets.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,13 +9,14 @@ import { SettingsStore } from '../server/security.js';
 import { StoryEngine, type TextModels } from '../server/engine.js';
 import { buildRequestSnapshot, estimateModelRequestInputTokens } from '../server/providers.js';
 import { defaultPromptTemplates } from '../shared/prompt-templates.js';
+import { exportPromptTemplates, preparePromptImport } from '../shared/prompt-transfer.js';
 import { buildWritingContext } from '../server/writing-context.js';
 import type { ModelRequest, ProviderConfig, ProviderProtocol, Settings } from '../shared/types.js';
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 const engines: StoryEngine[] = []; const stores: Store[] = [];
 afterEach(async () => { for (const app of apps.splice(0)) await app.app.close(); for (const engine of engines.splice(0)) await engine.close(); for (const store of stores.splice(0)) store.close(); });
-const config = (): Settings => ({ providers: [{ id: 'mock', name: '本地模拟', protocol: 'openai-chat', baseUrl: 'http://unused.invalid', model: 'fixture', maxOutputTokens: 256, contextTokens: 64000 }], writingProviderId: 'mock', planningProviderId: 'mock', extractionProviderId: 'mock', promptTemplates: defaultPromptTemplates() });
+const config = (): Settings => ({ providers: [{ id: 'mock', name: '本地模拟', protocol: 'openai-chat', baseUrl: 'http://unused.invalid', model: 'fixture', maxOutputTokens: 256, contextTokens: 64000 }], writingProviderId: 'mock', planningProviderId: 'mock', extractionProviderId: 'mock', promptTemplates: withDramatronPresets() });
 async function terminal(engine: StoryEngine, id: string) {
   for (let attempt = 0; attempt < 1000; attempt++) {
     const job = engine.listJobs().find(value => value.id === id)!;
@@ -49,6 +51,17 @@ it('migrates old settings, persists editable presets and preserves them when an 
   }
   const reopened = new SettingsStore(ctx.store.db, ctx.dataDir);
   expect(reopened.get().promptTemplates).toEqual(settings.promptTemplates);
+});
+
+it('persists a valid escaped prompt backup larger than four MiB and reloads it intact', async () => {
+  const ctx = await buildApp({ initialPassword: 'prompt-test-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-prompt-large-')) }); apps.push(ctx);
+  const login = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'prompt-test-password' } }); const cookies = { session: login.cookies[0].value };
+  const templates = defaultPromptTemplates();
+  templates.presets.writing[0].blocks.push(...Array.from({ length: 8 }, (_, index) => ({ id: `escaped-${index}`, name: '已有文本', role: 'system' as const, enabled: false, content: '\u0001'.repeat(100000) })));
+  const imported = preparePromptImport(JSON.stringify(exportPromptTemplates(templates)), defaultPromptTemplates()); const settings = { ...config(), promptTemplates: imported.templates };
+  expect(Buffer.byteLength(JSON.stringify(settings))).toBeGreaterThan(4 * 1024 * 1024);
+  const saved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies, payload: settings }); expect(saved.statusCode).toBe(200);
+  expect(new SettingsStore(ctx.store.db, ctx.dataDir).get().promptTemplates).toEqual(templates); expect(ctx.engine.listJobs()).toEqual([]);
 });
 
 it('uses the selected message blocks and story variables for writing and background extraction', async () => {

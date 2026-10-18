@@ -57,7 +57,7 @@ const imageSettingsSchema = z.object({
 }).strict();
 const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional(), promptTemplates: z.unknown().optional(), imageSettings: imageSettingsSchema.optional(), taskSettings: z.unknown().optional() });
 const promptPreviewSchema = z.object({
-  task: z.enum(['writing', 'extraction', 'compression']), templates: z.unknown(), protocol: providerSchema.shape.protocol,
+  task: z.enum(['writing', 'extraction', 'compression', 'image']), templates: z.unknown(), protocol: providerSchema.shape.protocol,
   variables: z.record(z.string().max(100), z.string().max(200000)).refine(value => Object.keys(value).length <= 150, '示例变量过多'),
   runtime: z.object({ extractionOutputMode: z.enum(['prompt', 'structured', 'tool']).optional(), illustrations: z.object({ portrait: z.boolean(), cg: z.boolean() }).strict().optional(), chapterAnswer: z.string().max(20000).optional(), rpg: z.object({ character: z.object({ kind: z.enum(['original', 'existing']), name: z.string().max(300), description: z.string().max(20000) }).strict(), entryInstruction: z.string().max(20000) }).strict().optional() }).strict(),
 }).strict();
@@ -94,7 +94,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     else if (route.url.endsWith('/import')) route.bodyLimit = 32 * 1024 * 1024 + 4096;
     else if (/\/chapters(?:\/:chapterId)?$|\/outputs(?:\/:outputId\/apply)?$/.test(route.url) || route.url === '/api/sources/:id/confirm') route.bodyLimit = 64 * 1024 * 1024;
     else if (route.url.endsWith('/entities/:entityId')) route.bodyLimit = 16 * 1024 * 1024;
-    else if (['/api/settings', '/api/settings/prompt-preview'].includes(route.url)) route.bodyLimit = 4 * 1024 * 1024;
+    else if (['/api/settings', '/api/settings/prompt-preview'].includes(route.url)) route.bodyLimit = 8 * 1024 * 1024;
   });
   const deletionDir = join(dataDir, 'deleted-sources');
   // Originals move aside while SQLite commits. On restart, restore files if the

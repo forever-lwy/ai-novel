@@ -8,6 +8,8 @@ import { optimizeImagePrompt, resolveImageParameters, type ImagePromptInput, typ
 import type { ImageGenerator } from '../server/image-provider.js';
 import { defaultImageSettings } from '../shared/image-settings.js';
 import type { ImageSettings, Settings } from '../shared/types.js';
+import { defaultPromptTemplates } from '../shared/prompt-templates.js';
+import { withTavernPresets } from './fixtures/prompt-presets.js';
 
 const textModel = vi.hoisted(() => ({ generateStructured: vi.fn() }));
 vi.mock('../server/providers.js', async importOriginal => ({ ...await importOriginal<typeof import('../server/providers.js')>(), generateStructured: textModel.generateStructured }));
@@ -19,11 +21,23 @@ function structuredResult(value: unknown) { textModel.generateStructured.mockImp
 beforeEach(() => { textModel.generateStructured.mockReset(); structuredResult({ prompt: 'Two characters beneath a radiant sky, cinematic framing, coherent clothing and lighting', referenceEntityIds: ['moon', 'river'], parameters: {} }); });
 
 describe('image prompt model and parameter selection', () => {
+  it('uses the selected image edition and original carrier while preserving independent optimizer requirements', async () => {
+    const saved = settings(); saved.promptTemplates = withTavernPresets(); saved.promptTemplates.general!.selected = 'tavern-reborn-v23';
+    saved.promptTemplates.presets.image[0].blocks[0].content += '\nIMAGE_AUTHOR_RULE：保持水彩质感。'; const data = input(); data.config.promptSystemPrompt = '保留参考图中的衣服';
+    await optimizeImagePrompt(saved, data); const request = textModel.generateStructured.mock.calls[0][1];
+    expect(request.responseCarrier).toMatchObject({ name: 'game_content', field: 'content' }); expect(request.messageTransform).toBe('reborn');
+    expect(request.system).toContain('IMAGE_AUTHOR_RULE'); expect(request.system).toContain(data.config.promptSystemPrompt); expect(request.system).not.toContain('要写够1500字');
+    expect(request.messages.some((message: { content: string }) => message.content.includes(data.material))).toBe(true);
+  });
+  it('allows a standalone image task without inheriting its current general output carrier', async () => {
+    const saved = settings(); saved.promptTemplates = withTavernPresets(); saved.promptTemplates.general!.selected = 'tavern-linux-v13'; saved.promptTemplates.presets.image[0].useGeneral = false;
+    await optimizeImagePrompt(saved, input()); const request = textModel.generateStructured.mock.calls[0][1]; expect(request.responseCarrier).toBeUndefined(); expect(request.messageTransform).toBeUndefined(); expect(request.system).not.toContain('Linux_terminal_emulator');
+  });
   it('uses the independent text model and supplies structured art material and confirmed reference candidates', async () => {
     const data = input(); data.config.promptSystemPrompt = '优先使用中文画面描述'; const result = await optimizeImagePrompt(settings(), data);
     expect(result.prompt).not.toBe(data.material); expect(result.referenceEntityIds).toEqual(['moon', 'river']); expect(result.parameters).toEqual({ size: '1024x1024' });
     const [provider, request] = textModel.generateStructured.mock.calls[0]; expect(provider.model).toBe('image-prompt-model'); expect(provider.id).toBe('text'); expect(provider.stream).toBe(false);
-    expect(request.system).toContain('IMAGE_PROMPT_OPTIMIZATION'); expect(request.system).toContain('优先使用中文画面描述'); expect(JSON.parse(request.prompt)).toMatchObject({ material: data.material, instruction: data.instruction, characters: data.characters, config: { protocol: 'openai-images' } });
+    expect(request.system).toContain('IMAGE_PROMPT_OPTIMIZATION'); expect(request.system).toContain('优先使用中文画面描述'); expect(JSON.parse(request.messages.findLast((message: { role: string; content: string }) => message.role === 'user').content)).toMatchObject({ material: data.material, instruction: data.instruction, characters: data.characters, config: { protocol: 'openai-images' } });
   });
   it('falls back to planning without an explicit optimizer connection and fails clearly when text models are missing', async () => {
     const data = input(); data.config.promptProviderId = ''; data.config.promptModel = ''; await optimizeImagePrompt(settings(), data); expect(textModel.generateStructured.mock.calls[0][0].model).toBe('planner');

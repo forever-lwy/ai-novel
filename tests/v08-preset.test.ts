@@ -1,33 +1,14 @@
+import { withLegacyPresets } from './fixtures/prompt-presets.js';
 import { describe, expect, it } from 'vitest';
 import { compileTaskPrompt, defaultPromptTemplates, normalizePromptTemplates, validatePromptTemplates } from '../shared/prompt-templates.js';
-import { v08GeneralPreset, V08_PRESET_ID } from '../shared/v08-prompts.js';
+import { v08GeneralPreset, V08_PRESET_ID } from './fixtures/legacy-presets/v08-prompts.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
 import type { PromptTask } from '../shared/types.js';
 
 const variables = { mode: 'original', instruction: '继续故事 {{原样素材}}', context: '故事资料', storyMaterials: '故事资料', recentChapters: '前文', maxWords: 1000, writingTarget: '接着前文写', chapterTitle: '桥边', blockText: '[1] 林舟到达石桥。', summaryText: '林舟到达石桥。' };
-function settings() { const value = defaultPromptTemplates(); value.general!.selected = V08_PRESET_ID; return value; }
+function settings() { const value = withLegacyPresets(); value.general!.selected = V08_PRESET_ID; return value; }
 
 describe('v0.8 general protection preset', () => {
-  it('adds the built-in once while preserving selection, custom changes, deletion and input objects', () => {
-    const old = defaultPromptTemplates(); old.general!.presets = old.general!.presets.slice(0, 1); delete old.general!.catalogVersion;
-    old.general!.presets[0].name = '作者的框架'; old.general!.presets[0].blocks[0].content = '作者文本';
-    const original = structuredClone(old); const migrated = normalizePromptTemplates(old);
-    expect(old).toEqual(original); expect(migrated.general!.selected).toBe(old.general!.selected);
-    expect(migrated.general!.presets[0]).toEqual(old.general!.presets[0]);
-    expect(migrated.general!.presets[1].id).toBe(V08_PRESET_ID);
-    expect(normalizePromptTemplates(migrated)).toEqual(migrated);
-    migrated.general!.presets = migrated.general!.presets.filter(preset => preset.id !== V08_PRESET_ID);
-    expect(normalizePromptTemplates(migrated)).toEqual(migrated);
-  });
-  it('does not replace a colliding user preset or evict a full catalog', () => {
-    const value = settings(); delete value.general!.catalogVersion;
-    value.general!.presets[1].name = '作者已修改'; value.general!.presets[1].blocks[0].content = '作者填充';
-    expect(normalizePromptTemplates(value).general!.presets).toEqual(value.general!.presets);
-    const full = settings(); full.general!.presets = Array.from({ length: 20 }, (_, i) => ({ ...v08GeneralPreset(), id: `custom-${i}`, blocks: [{ id: 'slot', name: '插槽', role: 'system' as const, enabled: true, content: '', slot: 'task' as const }] }));
-    full.general!.selected = 'custom-0'; delete full.general!.catalogVersion;
-    expect(normalizePromptTemplates(full).general).toEqual(full.general);
-    full.general!.presets.pop(); expect(normalizePromptTemplates(full).general!.presets.at(-1)?.id).toBe(V08_PRESET_ID);
-  });
   it('retains literal padding and produces deterministic request data without roleplay modules', () => {
     const value = settings(); const builtin = value.general!.presets[1];
     expect(builtin.blocks[0]).toMatchObject({ enabled: false, feature: 'literal' });

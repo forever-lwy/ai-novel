@@ -31,7 +31,7 @@ const connectionSignature = (provider: ProviderConnection) => JSON.stringify([pr
 const sections = [
   { id: 'providers', label: '供应商连接', icon: KeyRound, description: '管理服务地址、接口协议和 API 密钥。密钥保存在服务端，作品备份不包含密钥。' },
   { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '为各类任务选择模型，设置资料提取输出方式与自动重试。每个任务独立保存参数，同模型用于不同任务也不共用。' },
-  { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '管理通用预设和三类任务提示词、调整消息顺序，并预览编排后的内容。' },
+  { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '管理通用预设和四类任务提示词、调整消息顺序，并预览编排后的内容。' },
   { id: 'images', label: '生图与自动插画', icon: Image, description: '选择图片模型，设置作品画风、新人物立绘与场景 CG 的自动生成。' },
   { id: 'account', label: '账号安全', icon: ShieldCheck, description: '修改登录密码，管理其他设备的登录。' },
 ] as const;

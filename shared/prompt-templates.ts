@@ -1,15 +1,15 @@
 import { z } from 'zod';
-import type { Mode, PromptBlock, PromptMessage, PromptPreset, PromptScope, PromptTask, PromptTemplateSettings, PromptTextFilter, WritingOutputMode } from './types.js';
+import type { Mode, PromptBlock, PromptMessage, PromptPreset, PromptScope, PromptTask, PromptTemplateSettings, PromptTextFilter, ResponseCarrier, WritingOutputMode } from './types.js';
 import { legacyPromptTemplates } from './legacy-prompt-templates.js';
 import { previousPromptTemplates } from './previous-prompt-templates.js';
 import { previousGeneralPromptTemplates } from './previous-general-prompt-templates.js';
 import { previousDramatronPromptTemplates } from './previous-dramatron-prompt-templates.js';
-import { dramatronGeneralBlocks, dramatronTailBlocks } from './dramatron-prompts.js';
 import { runtimePromptBlocks, type PromptRuntime } from './prompt-runtime.js';
 import { extractionOutputFormat } from './extraction-output.js';
-import { v08GeneralPreset } from './v08-prompts.js';
-import { rebornGeneralPreset } from './reborn-prompts.js';
-import { taskPresetsV2 } from './task-prompts-v2.js';
+import { taskPresetsV3 } from './task-prompts-v3.js';
+import { neutralGeneralPreset } from './neutral-preset.js';
+import { isRetiredDefault } from './retired-preset-fingerprints.js';
+import { createTavernMacroExpander } from './tavern-macros.js';
 
 export const ENTITY_RESOLUTION_INSTRUCTION = '同一个人物或地点只输出一个实体。先对照已有名称与别名，姓名、本名、旧名以及原文明确指向同一人的描述性称呼应统一到同一实体，优先用本名作为 name，其他称呼写入 aliases；比如原文确认“戴兜帽的旅人”名叫“林舟”，应以“林舟”为 name，把“戴兜帽的旅人”写入 aliases。描述性称呼在后续片段获得本名时，也要保留之前的称呼以便归并。只有原文足以确认同一身份时才建立别名，不凭外貌、职业相似或名字包含关系合并；“他”“少女”“队长”等无法唯一指向的泛称不要作为别名。别名对照仅辅助统一身份，不是事实证据，也不能据此提前揭晓身份秘密。';
 export const CHARACTER_PROFILE_INSTRUCTION = '人物资料要回答“这个人是谁、有什么特点和能力、目前处于什么状态”，不能写成逐段行动流水账。正文明确披露的姓名、性别、种族、血统、年龄、外貌、身份、所属势力、能力、性格、目标、弱点、当前状态与所在地分别使用稳定属性 name、gender、race、bloodline、age、appearance、identity、affiliation、ability、personality、goal、weakness、status、location；缺失资料不补造，也不按称呼、外貌推测性别、种族或血统。可并存的能力、性格等使用稳定子属性，例如 ability:archery、ability:fire_magic、personality:courage，同一项后续变化继续使用相同子属性。只有改变身份、能力、关系、命运或后续剧情的重大/关键经历才写为 attribute=major_event 的 past 事实；吃饭、走路、递物、普通对话等日常经过只保存在 summary，不放入人物 facts 或 description。description 是已明确资料的简洁介绍，不能塞进普通经历或尚未发生的规划。nameStatus=placeholder 表示正文未披露姓名、暂用唯一称呼定位；得知明确本名后使用本名作为 name、nameStatus=confirmed，并在 aliases 中保留正文明确对应的旧称呼，不能把本名仅写进 aliases。isMain 仅在作者指定或正文明确呈现持续核心视角/主线地位时设为 true；仅出现一次、参与一段对话或与主角相识不等于主要角色；不能确定时省略该字段。每条资料仍必须引用当前正文的精确证据，已有名称索引只辅助身份对照。';
@@ -88,9 +88,11 @@ relations 每条提供 from/to/label/paragraph/visibility，端点使用本次�
 
 输出：
 {"summary":"林舟来到灯塔，想起三年前住在石桥镇的生活。","entities":[{"kind":"character","name":"林舟","visibility":"public","facts":[{"text":"目前位于灯塔","attribute":"location","temporal":"current","certainty":"fact","visibility":"public","paragraph":12},{"text":"三年前住在石桥镇","attribute":"location","temporal":"past","certainty":"fact","visibility":"public","paragraph":13}]}],"relations":[],"foreshadows":[]}`;
-export const promptTasks = ['writing', 'extraction', 'compression'] as const satisfies readonly PromptTask[];
+const legacyTasks = ['writing', 'extraction', 'compression'] as const;
+export const promptTasks = [...legacyTasks, 'image'] as const satisfies readonly PromptTask[];
 export const promptScopes = ['general', ...promptTasks] as const satisfies readonly PromptScope[];
-export const promptTaskLabels: Record<PromptTask, string> = { writing: '正文写作', extraction: '资料提取', compression: '摘要压缩' };
+export const PROMPT_TEMPLATE_BYTE_LIMIT = 1000000;
+export const promptTaskLabels: Record<PromptTask, string> = { writing: '正文写作', extraction: '资料提取', compression: '摘要压缩', image: '生图提示词' };
 export const promptScopeLabels: Record<PromptScope, string> = { general: '通用预设', ...promptTaskLabels };
 const writingModes = ['original', 'continuation', 'fanfiction', 'rewrite', 'rpg'] as const satisfies readonly Mode[];
 // Older presets can restrict all four previous modes. Reuse their continuation
@@ -116,39 +118,37 @@ export const promptVariables: Record<PromptScope, PromptVariable[]> = {
   writing: [...commonVariables, ...contextVariables, { key: 'mode', label: '创作模式' }, { key: 'maxWords', label: '目标字数' }, { key: 'sourceText', label: '待改写原文' }, { key: 'writingTarget', label: '写作目标与范围' }],
   extraction: [...commonVariables, { key: 'context', label: '名称对照与未揭晓伏笔索引' }, { key: 'chapterTitle', label: '待整理章节标题' }, { key: 'blockText', label: '带段落编号的本次原文片段' }],
   compression: [...commonVariables, { key: 'summaryText', label: '待压缩剧情摘要片段' }],
+  image: [...commonVariables, { key: 'imageInput', label: '完整画面素材、人物参考与允许参数 JSON' }, { key: 'imageSystemPrompt', label: '作者对提示词优化的补充要求' }, { key: 'maxCharacterReferences', label: '最多可用人物参考数' }],
 };
 
 const block = (id: string, name: string, role: PromptBlock['role'], content: string): PromptBlock => ({ id, name, role, enabled: true, content });
 const extractionAcknowledgment = '已收到索引。新资料只依据接下来提供的编号片段；无法确认的身份、属性和关系不补造，每条事实与关系都核对本片段证据。';
 /** Each call returns independent objects so editing or reset cannot mutate shared defaults. */
 export function defaultPromptTemplates(): PromptTemplateSettings {
-  const v2 = taskPresetsV2(ENTITY_RESOLUTION_INSTRUCTION, CHARACTER_PROFILE_INSTRUCTION);
+  const v3 = taskPresetsV3(EXTRACT_SYSTEM, COMPRESSION_SYSTEM);
   return {
-    general: { selected: 'default-general', catalogVersion: 2, presets: [{ id: 'default-general', name: 'Dramatron 防截断与防空回', textFilter: 'dramatron', blocks: [
-      ...dramatronGeneralBlocks().slice(0, 2),
-      block('snow-ack', '前置文本结束', 'assistant', '前置填充文本已结束，以下按新任务的资料与要求执行。'),
-      { ...block('task-slot', '插入当前任务提示词', 'system', ''), slot: 'task' },
-      ...dramatronTailBlocks(),
-    ] }, v08GeneralPreset(), rebornGeneralPreset()] },
+    general: { selected: 'general-neutral-v1', catalogVersion: 7, presets: [neutralGeneralPreset()] },
     presets: {
       writing: [{ id: 'default-writing', name: '默认正文写作', blocks: [
         block('writing-rules', '文笔、逻辑与文风', 'system', WRITING_SYSTEM),
         block('context', '故事上下文', 'user', '# 故事设定与历史\n<info>\n{{storyMaterials}}\n</info>\n\n<interaction_history>\n{{recentChapters}}\n</interaction_history>'),
         block('context-ack', '上下文承接', 'assistant', '已收到故事资料。我会以本线已发生事实和锁定设定为基础，延续前文的叙述视角、人物口吻与文风，按接下来的具体要求写作。'),
         block('writing-request', '本次写作要求', 'user', '# 本次写作任务\n- 创作模式：{{mode}}\n- 目标长度：约 {{maxWords}} 字\n\n<interactive_input>\n## 作者要求\n{{instruction}}\n\n## 写作范围\n{{writingTarget}}\n</interactive_input>'),
-      ] }, v2.writing],
+      ] }, v3.writing],
       extraction: [{ id: 'default-extraction', name: '默认资料提取', blocks: [
         block('extraction-rules', '提取约定与输出格式', 'system', EXTRACT_SYSTEM),
         block('context', '已有名称与伏笔索引', 'user', '# 名称与伏笔索引\n以下仅辅助身份对照，不作为新事实的证据。\n{{context}}'),
         block('extraction-request', '本次提取原文', 'user', '# 本次提取任务\n待整理章节：{{chapterTitle}}\n仅提取以下片段，保留原段落编号。\n\n## 编号原文\n{{blockText}}\n\n## 提交要求\n返回 summary、entities、relations、foreshadows。没有依据的条目不填；仅输出合法 JSON 对象。'),
-      ] }, v2.extraction],
+      ] }, v3.extraction],
       compression: [{ id: 'default-compression', name: '默认摘要压缩', blocks: [
         block('compression-rules', '压缩约定与输出格式', 'system', COMPRESSION_SYSTEM),
         block('summary', '待压缩摘要', 'user', '# 待压缩的已发生剧情\n{{summaryText}}\n\n## 本次要求\n保留各章关键事件、因果和状态变化，合并重复信息，输出更短且连贯的 JSON 摘要。'),
-      ] }, v2.compression],
+      ] }, v3.compression],
+      image: [v3.image],
     },
-    selected: { writing: 'default-writing', extraction: 'default-extraction', compression: 'default-compression' },
-    taskCatalogVersions: { writing: 1, extraction: 1, compression: 1 },
+    selected: { writing: 'default-writing', extraction: 'default-extraction', compression: 'default-compression', image: v3.image.id },
+    taskCatalogVersions: { writing: 2, extraction: 2, compression: 2, image: 2 },
+    catalogCleanupVersion: 2,
   };
 }
 
@@ -158,24 +158,29 @@ const promptBlockSchema = z.object({
   id: identifier, name: nonEmptyName, role: z.enum(['system', 'user', 'assistant']), enabled: z.boolean(),
   content: z.string().max(100000, '单个提示词块最多 100000 字符'),
   modes: z.array(z.enum(writingModes)).max(5).refine(values => new Set(values).size === values.length, '创作模式不能重复').optional(),
-  tasks: z.array(z.enum(['writing', 'extraction', 'compression', 'planning'])).min(1).max(4).refine(values => new Set(values).size === values.length, '适用任务不能重复').optional(),
-  feature: z.enum(['snow', 'literal', 'cot-three', 'cot-single', 'defense-normal', 'defense-laoda', 'defense-v08']).optional(),
+  tasks: z.array(z.enum(['writing', 'extraction', 'compression', 'image', 'planning'])).min(1).max(5).refine(values => new Set(values).size === values.length, '适用任务不能重复').optional(),
+  feature: z.enum(['snow', 'literal', 'tavern', 'cot-three', 'cot-single', 'defense-normal', 'defense-laoda', 'defense-v08']).optional(),
+  carrierPart: z.enum(['guide', 'description', 'field']).optional(),
   slot: z.literal('task').optional(),
 }).strict();
-const promptPresetSchema = z.object({
+export const promptPresetSchema = z.object({
   id: identifier, name: nonEmptyName, blocks: z.array(promptBlockSchema).min(1).max(80, '每个预设最多 80 个提示词块'),
   variables: z.record(z.string().max(100).regex(/^[a-zA-Z][a-zA-Z0-9_]*$/, '变量名须以字母开头，仅包含字母、数字或下划线'), z.string().max(100000)).optional(),
   useGeneral: z.boolean().optional(), generalPresetId: identifier.optional(), writingOutputMode: z.enum(['text', 'tool']).optional(),
-  toolTransport: z.boolean().optional(), textFilter: z.enum(['dramatron', 'v08', 'reborn']).optional(),
+  toolTransport: z.boolean().optional(), textFilter: z.enum(['dramatron', 'v08', 'reborn', 'tavern']).optional(),
+  responseCarrier: z.object({ name: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/), field: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/), archive: z.boolean().optional() }).strict().optional(),
+  messageTransform: z.literal('reborn').optional(),
 }).strict();
 const presetList = z.array(promptPresetSchema).min(1, '每个任务至少保留一个预设').max(20, '每个任务最多 20 个预设');
 const templateShape = z.object({
-  presets: z.object({ writing: presetList, planning: presetList.optional(), extraction: presetList, compression: presetList }).strict(),
-  selected: z.object({ writing: identifier, planning: identifier.optional(), extraction: identifier, compression: identifier }).strict(),
-  general: z.object({ presets: presetList, selected: identifier, catalogVersion: z.number().int().min(0).max(2).optional() }).strict().optional(),
-  taskCatalogVersions: z.object({ writing: z.number().int().min(0).max(1).optional(), extraction: z.number().int().min(0).max(1).optional(), compression: z.number().int().min(0).max(1).optional() }).strict().optional(),
+  presets: z.object({ writing: presetList, planning: presetList.optional(), extraction: presetList, compression: presetList, image: presetList.default(() => defaultPromptTemplates().presets.image) }).strict(),
+  selected: z.object({ writing: identifier, planning: identifier.optional(), extraction: identifier, compression: identifier, image: identifier.default('default-image-v3') }).strict(),
+  general: z.object({ presets: presetList, selected: identifier, catalogVersion: z.number().int().min(0).max(7).optional() }).strict().optional(),
+  taskCatalogVersions: z.object({ writing: z.number().int().min(0).max(2).optional(), extraction: z.number().int().min(0).max(2).optional(), compression: z.number().int().min(0).max(2).optional(), image: z.number().int().min(0).max(2).optional() }).strict().optional(),
+  catalogCleanupVersion: z.number().int().min(0).max(2).optional(),
 }).strict();
-const builtInKeys = new Set([...promptTasks.flatMap(task => promptVariables[task].map(variable => variable.key)), 'currentChapterPlan']);
+const legacyBuiltInKeys = new Set([...legacyTasks.flatMap(task => promptVariables[task].map(variable => variable.key)), 'currentChapterPlan']);
+const builtInKeys = new Set([...legacyBuiltInKeys, ...promptVariables.image.map(variable => variable.key)]);
 const variablePattern = /\{\{([^{}]*)\}\}/g;
 const appliesToMode = (value: PromptBlock, mode: string | undefined) => !value.modes?.length || value.modes.includes(mode as Mode);
 
@@ -196,12 +201,14 @@ export const promptTemplateSchema = templateShape.superRefine((settings, context
       const customVariables = preset.variables ?? {};
       if (Object.keys(customVariables).length > 100) addIssue([...path, 'variables'], '每个预设最多 100 个自定义变量');
       for (const [key, value] of Object.entries(customVariables)) {
-        if (builtInKeys.has(key)) addIssue([...path, 'variables', key], '自定义变量不能覆盖内置变量');
+        if (legacyBuiltInKeys.has(key) || task === 'image' && builtInKeys.has(key)) addIssue([...path, 'variables', key], '自定义变量不能覆盖内置变量');
         countText(key); countText(value);
       }
       const validVariables = new Set([...promptVariables[task].map(variable => variable.key), ...Object.keys(customVariables), ...(task === 'writing' ? ['currentChapterPlan'] : [])]);
       if (task !== 'writing' && preset.writingOutputMode) addIssue([...path, 'writingOutputMode'], '正文输出通道只适用于正文写作');
       if (task !== 'general' && preset.toolTransport !== undefined) addIssue([...path, 'toolTransport'], '通用工具防截断开关只适用于通用预设');
+      if (task !== 'general' && preset.responseCarrier) addIssue([...path, 'responseCarrier'], '原生结果工具只适用于通用预设');
+      if (task !== 'general' && preset.messageTransform) addIssue([...path, 'messageTransform'], '预设消息重排只适用于通用预设');
       if (task === 'general' && preset.useGeneral !== undefined) addIssue([...path, 'useGeneral'], '通用预设不能再次嵌套通用预设');
       if (preset.generalPresetId && (task === 'general' || !settings.general?.presets.some(value => value.id === preset.generalPresetId))) addIssue([...path, 'generalPresetId'], '引用的通用预设不存在');
       const blockIds = new Set<string>();
@@ -212,7 +219,8 @@ export const promptTemplateSchema = templateShape.superRefine((settings, context
         if (task !== 'writing' && value.modes?.length) addIssue([...blockPath, 'modes'], '创作模式条件只适用于正文写作任务');
         if (task !== 'general' && value.tasks?.length) addIssue([...blockPath, 'tasks'], '适用任务条件只适用于通用预设');
         if (value.slot && (task !== 'general' || value.content.trim())) addIssue([...blockPath, 'slot'], '任务插槽只能位于通用预设，且不能包含文本');
-        for (const match of ['snow', 'literal'].includes(value.feature ?? '') ? [] : value.content.matchAll(variablePattern)) {
+        if (value.carrierPart && task !== 'general') addIssue([...blockPath, 'carrierPart'], '归档工具引导只适用于通用预设');
+        for (const match of ['snow', 'literal', 'tavern'].includes(value.feature ?? '') ? [] : value.content.matchAll(variablePattern)) {
           const key = match[1].trim();
           if (!validVariables.has(key)) addIssue([...blockPath, 'content'], `此任务没有变量 {{${key}}}`);
         }
@@ -229,7 +237,7 @@ export const promptTemplateSchema = templateShape.superRefine((settings, context
     }
     if (!ids.has(selected)) addIssue(task === 'general' ? ['general', 'selected'] : ['selected', task], '当前选中的提示词预设不存在');
   }
-  if (totalBytes > 700000) addIssue(['presets'], '全部提示词文本合计最多 700000 字节（按 UTF-8 计算）');
+  if (totalBytes > PROMPT_TEMPLATE_BYTE_LIMIT) addIssue(['presets'], `全部提示词文本合计最多 ${PROMPT_TEMPLATE_BYTE_LIMIT} 字节（按 UTF-8 计算）`);
 });
 
 export function validatePromptTemplates(value: unknown): PromptTemplateSettings {
@@ -266,18 +274,24 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
   const defaults = defaultPromptTemplates();
   const hadGeneral = Boolean(settings.general);
   settings.general ??= defaults.general;
-  settings.general!.presets = settings.general!.presets.map(preset => {
-    const previous = [previousGeneralPromptTemplates.general!.presets[0], previousDramatronPromptTemplates.general!.presets[0]];
-    const old = previous.find(other => preset.id === other.id && preset.name === other.name && JSON.stringify(preset.blocks.map(block => ({ ...block, enabled: true }))) === JSON.stringify(other.blocks.map(block => ({ ...block, enabled: true }))) && JSON.stringify(preset.variables ?? {}) === JSON.stringify(other.variables ?? {}));
-    if (!old) return preset;
-    const updated = structuredClone(defaults.general!.presets[0]);
-    updated.blocks.forEach(block => { const prior = preset.blocks.find(value => value.id === block.id); if (prior) block.enabled = prior.enabled; });
-    return { ...updated, textFilter: old.textFilter === undefined ? updated.textFilter : preset.textFilter };
-  });
+  // One-time cleanup recognizes only complete, untouched historical defaults.
+  // Explicit task bindings, edits and copies remain author-owned.
+  if ((settings.catalogCleanupVersion ?? 0) < 2) {
+    const referenced = new Set(Object.values(settings.presets).flat().map(preset => preset.generalPresetId));
+    const remaining = settings.general!.presets.filter(preset => referenced.has(preset.id) || !isRetiredDefault(preset));
+    settings.general!.presets = remaining.length ? remaining : [structuredClone(defaults.general!.presets[0])];
+    if (!settings.general!.presets.some(preset => preset.id === settings.general!.selected)) settings.general!.selected = settings.general!.presets.find(preset => preset.id === defaults.general!.selected)?.id ?? settings.general!.presets[0].id;
+    for (const task of legacyTasks) {
+      const list = settings.presets[task].filter(preset => !isRetiredDefault(preset));
+      settings.presets[task] = list.length ? list : [structuredClone(defaults.presets[task][0])];
+      if (!settings.presets[task].some(preset => preset.id === settings.selected[task])) settings.selected[task] = settings.presets[task].find(preset => preset.id === `default-${task}`)?.id ?? settings.presets[task][0].id;
+    }
+    settings.catalogCleanupVersion = 2;
+  }
   // Add the new built-in once, without selecting it or replacing author edits.
   // Keep a full catalog intact and retry when the author frees a slot.
-  for (const [index, builtin] of defaults.general!.presets.slice(1).entries()) {
-    const version = index + 1;
+  for (const builtin of defaults.general!.presets) {
+    const version = 7; // Neutral keeps its original catalog milestone.
     if ((settings.general!.catalogVersion ?? 0) >= version) continue;
     if (!settings.general!.presets.some(preset => preset.id === builtin.id)) {
       const candidate = { ...settings, general: { ...settings.general!, presets: [...settings.general!.presets, builtin] } };
@@ -288,7 +302,7 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
   }
   const oldExtraction = previousPromptTemplates.presets.extraction[0];
   const acknowledged: PromptPreset = { ...oldExtraction, blocks: [...oldExtraction.blocks.slice(0, 2), block('context-ack', '证据边界确认', 'assistant', extractionAcknowledgment), ...oldExtraction.blocks.slice(2)] };
-  for (const task of promptTasks) settings.presets[task] = settings.presets[task].map(preset => {
+  for (const task of legacyTasks) settings.presets[task] = settings.presets[task].map(preset => {
     const exact = (other: PromptPreset) => preset.id === other.id && preset.name === other.name && JSON.stringify(preset.blocks) === JSON.stringify(other.blocks) && JSON.stringify(preset.variables ?? {}) === JSON.stringify(other.variables ?? {});
     const comparable = { ...preset, blocks: preset.blocks.map((value, index) => ({ ...value, id: acknowledged.blocks[index]?.id ?? value.id })) };
     const oldAcknowledged = task === 'extraction' && JSON.stringify(comparable) === JSON.stringify(acknowledged);
@@ -298,15 +312,15 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
   });
   // Track each task independently so a full catalog cannot resurrect an edition
   // deliberately deleted from a different task. Never change current selections.
-  for (const task of promptTasks) {
-    if ((settings.taskCatalogVersions?.[task] ?? 0) >= 1) continue;
-    const builtin = defaults.presets[task][1];
+  for (const task of promptTasks) for (const builtin of defaults.presets[task]) {
+    const version = builtin.id.endsWith('-v3') ? 2 : 0;
+    if (!version || (settings.taskCatalogVersions?.[task] ?? 0) >= version) continue;
     if (!settings.presets[task].some(preset => preset.id === builtin.id)) {
       const candidate = { ...settings, presets: { ...settings.presets, [task]: [...settings.presets[task], builtin] } };
-      if (!promptTemplateSchema.safeParse(candidate).success) continue;
+      if (!promptTemplateSchema.safeParse(candidate).success) break;
       settings.presets = candidate.presets;
     }
-    settings.taskCatalogVersions = { ...settings.taskCatalogVersions, [task]: 1 };
+    settings.taskCatalogVersions = { ...settings.taskCatalogVersions, [task]: version };
   }
   return settings;
 }
@@ -328,7 +342,7 @@ export function promptPresetVariables(task: PromptScope, preset?: PromptPreset):
 }
 
 /** Replacement is one pass: braces inside story data or custom values remain literal. */
-export function compilePrompt(config: PromptTemplateSettings | undefined, task: PromptTask, variables: Record<string, string | number | undefined>, runtime: PromptRuntime = {}): { system: string; prompt: string; messages: PromptMessage[]; textFilter?: PromptTextFilter; writingOutputMode?: WritingOutputMode } {
+export function compilePrompt(config: PromptTemplateSettings | undefined, task: PromptTask, variables: Record<string, string | number | undefined>, runtime: PromptRuntime = {}): { system: string; prompt: string; messages: PromptMessage[]; textFilter?: PromptTextFilter; writingOutputMode?: WritingOutputMode; responseCarrier?: ResponseCarrier; messageTransform?: 'reborn' } {
   if (!promptTasks.includes(task)) throw new Error('剧情规划提示词已移除。');
   const settings = normalizePromptTemplates(config);
   const preset = activePromptPreset(settings, task);
@@ -337,13 +351,17 @@ export function compilePrompt(config: PromptTemplateSettings | undefined, task: 
   const inheritedTransport = preset.useGeneral !== false && general.toolTransport === true;
   const writingOutputMode = task === 'writing' ? preset.writingOutputMode ?? (inheritedTransport ? 'tool' : 'text') : inheritedTransport && !structured ? 'tool' : undefined;
   const textFilter = preset.textFilter ?? (preset.useGeneral === false ? undefined : general.textFilter);
+  const responseCarrier = inheritedTransport && !structured && writingOutputMode !== 'text' ? general.responseCarrier : undefined;
+  const messageTransform = preset.useGeneral !== false && !structured ? general.messageTransform : undefined;
+  const macroValues = { ...general.variables, ...variables, user: runtime.rpg?.character.name ?? '作者', char: '故事角色', lastUserMessage: variables.instruction ?? '', maxWords: variables.maxWords ?? '1500' };
+  const expandTavern = createTavernMacroExpander(macroValues, JSON.stringify(variables));
   const expand = (value: PromptBlock, owner: PromptPreset): PromptMessage => {
     const values: Record<string, string | number | undefined> = { ...owner.variables, ...variables, storyMaterials: variables.storyMaterials ?? variables.context, chapterNumber: task === 'writing' ? '待写章节' : '当前章节', chapterIndex: '', chapterCount: '', endChapter: '' };
     const content = value.content.replace(/第\s*\{\{\s*chapterNumber\s*\}\}\s*章/g, '{{chapterNumber}}');
-    return { role: value.role, content: ['snow', 'literal'].includes(value.feature ?? '') ? value.content : content.replace(variablePattern, (_match, key: string) => Object.hasOwn(values, key.trim()) ? String(values[key.trim()] ?? '') : '') };
+    return { role: value.role, ...(value.carrierPart ? { carrierPart: value.carrierPart } : {}), ...(value.feature === 'tavern' && /\|(?:用户[:：]?|小猫之神)\|?/.test(value.content) ? { tavernDialogue: true } : {}), content: value.feature === 'tavern' ? expandTavern(value.content) : ['snow', 'literal'].includes(value.feature ?? '') ? value.content : content.replace(variablePattern, (_match, key: string) => Object.hasOwn(values, key.trim()) ? String(values[key.trim()] ?? '') : '') };
   };
   const nativeSubmission = writingOutputMode === 'tool' || structured;
-  const applies = (value: PromptBlock) => value.enabled && (!value.tasks?.length || value.tasks.includes(task)) && (!value.feature?.startsWith('cot-') || task === 'writing') && (!value.feature?.startsWith('defense-') || !nativeSubmission);
+  const applies = (value: PromptBlock) => value.enabled && (!value.carrierPart || responseCarrier?.archive) && (!value.tasks?.length || value.tasks.includes(task)) && (!value.feature?.startsWith('cot-') || task === 'writing') && (!value.feature?.startsWith('defense-') || !nativeSubmission);
   const taskMessages = preset.blocks.filter(value => applies(value) && (task !== 'writing' || appliesToMode(value, presetMode(preset, String(variables.mode ?? 'original')))))
     .map(value => expand(value, preset));
   if (!taskMessages.some(message => message.role === 'user' && message.content.trim())) throw new Error(`${promptTaskLabels[task]}的提示词变量展开后没有非空 user 消息，请检查启用状态、模式条件和变量值。`);
@@ -354,7 +372,7 @@ export function compilePrompt(config: PromptTemplateSettings | undefined, task: 
     system: messages.filter(message => message.role === 'system').map(message => message.content).join('\n'),
     prompt: messages.filter(message => message.role === 'user').map(message => message.content).join('\n'),
     messages,
-    ...(textFilter ? { textFilter } : {}), ...(writingOutputMode ? { writingOutputMode } : {}),
+    ...(textFilter ? { textFilter } : {}), ...(writingOutputMode ? { writingOutputMode } : {}), ...(responseCarrier ? { responseCarrier } : {}), ...(messageTransform ? { messageTransform } : {}),
   };
 }
 
@@ -362,12 +380,12 @@ export function compilePrompt(config: PromptTemplateSettings | undefined, task: 
 export function compileTaskPrompt(config: PromptTemplateSettings | undefined, task: PromptTask, variables: Record<string, string | number | undefined>, runtime: PromptRuntime = {}) {
   const compiled = compilePrompt(config, task, variables, runtime);
   const writingOutputMode = compiled.writingOutputMode;
-  const runtimeBlocks = runtimePromptBlocks(task, variables, { ...runtime, writingOutputMode });
+  const runtimeBlocks = runtimePromptBlocks(task, variables, { ...runtime, writingOutputMode, responseCarrier: compiled.responseCarrier });
   const messages: PromptMessage[] = [];
   for (const message of [...compiled.messages, ...runtimeBlocks.filter(block => block.role === 'system'), ...runtimeBlocks.filter(block => block.role !== 'system')]) {
     const previous = message.role === 'system' ? undefined : [...messages].reverse().find(value => value.role !== 'system');
-    if (previous?.role === message.role && message.role !== 'system') previous.content += `\n\n${message.content}`;
-    else messages.push({ role: message.role, content: message.content });
+    if (!compiled.responseCarrier && !compiled.messageTransform && previous?.role === message.role && message.role !== 'system') previous.content += `\n\n${message.content}`;
+    else messages.push({ role: message.role, content: message.content, ...(message.carrierPart ? { carrierPart: message.carrierPart } : {}), ...(message.tavernDialogue ? { tavernDialogue: true } : {}) });
   }
-  return { system: messages.filter(message => message.role === 'system').map(message => message.content).join('\n'), prompt: messages.filter(message => message.role === 'user').map(message => message.content).join('\n'), messages, runtimeBlocks, ...(compiled.textFilter ? { textFilter: compiled.textFilter } : {}), ...(writingOutputMode ? { writingOutputMode } : {}), ...(task === 'extraction' ? { structuredOutput: extractionOutputFormat(runtime.extractionOutputMode) } : {}) };
+  return { system: messages.filter(message => message.role === 'system').map(message => message.content).join('\n'), prompt: messages.filter(message => message.role === 'user').map(message => message.content).join('\n'), messages, runtimeBlocks, ...(compiled.textFilter ? { textFilter: compiled.textFilter } : {}), ...(writingOutputMode ? { writingOutputMode } : {}), ...(compiled.responseCarrier ? { responseCarrier: compiled.responseCarrier } : {}), ...(compiled.messageTransform ? { messageTransform: compiled.messageTransform, presetMessageCount: compiled.messages.length } : {}), ...(task === 'extraction' ? { structuredOutput: extractionOutputFormat(runtime.extractionOutputMode) } : {}) };
 }

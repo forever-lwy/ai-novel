@@ -8,7 +8,7 @@ import { buildRequestSnapshot, estimateModelRequestInputTokens, generateStructur
 import { normalizeExtraction, splitExtractionBlocks } from '../server/extraction.js';
 import { StoryEngine } from '../server/engine.js';
 import { Store } from '../server/store.js';
-import { compileTaskPrompt } from '../shared/prompt-templates.js';
+import { compileTaskPrompt, defaultPromptTemplates } from '../shared/prompt-templates.js';
 import { extractionOutputSchema, EXTRACTION_SUBMISSION_NAME } from '../shared/extraction-output.js';
 import { defaultTaskSettings } from '../shared/task-settings.js';
 import type { ExtractionOutputMode, ProviderConfig, ProviderProtocol, Settings } from '../shared/types.js';
@@ -98,10 +98,19 @@ describe.each(protocols)('%s extraction output protocols', protocol => {
     expect(onResponse.mock.calls[0][0].rawResponse).toContain(protocol === 'openai-chat' ? 'choices' : protocol === 'openai-responses' ? 'output' : protocol === 'gemini' ? 'candidates' : 'content');
   });
 
-  it('keeps the default prompt mode free of schema and submission tools', () => {
-    const body = JSON.parse(buildRequestSnapshot(config(protocol, 'http://fixture.invalid'), prompt('prompt')).body);
+  it('keeps standalone prompt mode free of schema and submission tools', () => {
+    const templates = defaultPromptTemplates(); templates.presets.extraction[0].useGeneral = false;
+    const standalone = (mode: ExtractionOutputMode) => compileTaskPrompt(templates, 'extraction', { context: '名称对照：[]', chapterTitle: '入城', blockText: `[1] ${source}` }, { extractionOutputMode: mode });
+    const body = JSON.parse(buildRequestSnapshot(config(protocol, 'http://fixture.invalid'), standalone('prompt')).body);
     expect(body.tools).toBeUndefined(); expect(body.response_format).toBeUndefined(); expect(body.text?.format).toBeUndefined(); expect(body.output_config?.format).toBeUndefined(); expect(body.generationConfig?.responseJsonSchema).toBeUndefined();
-    expect(estimateModelRequestInputTokens(config(protocol, 'http://fixture.invalid'), prompt('structured'))).toBeGreaterThan(estimateModelRequestInputTokens(config(protocol, 'http://fixture.invalid'), prompt('prompt')) + 500);
+    expect(estimateModelRequestInputTokens(config(protocol, 'http://fixture.invalid'), standalone('structured'))).toBeGreaterThan(estimateModelRequestInputTokens(config(protocol, 'http://fixture.invalid'), standalone('prompt')) + 500);
+  });
+  it('carries default prompt JSON through the neutral result tool without enabling extraction schema', () => {
+    const body = JSON.parse(buildRequestSnapshot(config(protocol, 'http://fixture.invalid'), prompt('prompt')).body);
+    const tools = protocol === 'gemini' ? body.tools[0].functionDeclarations : protocol === 'openai-chat' ? body.tools.map((tool: any) => tool.function) : body.tools;
+    expect(tools.map((tool: any) => tool.name)).toEqual(['emit_complete_text']);
+    expect(body.response_format ?? body.text?.format ?? body.output_config?.format ?? body.generationConfig?.responseJsonSchema).toBeUndefined();
+    expect(JSON.stringify(body)).toContain(source); expect(JSON.stringify(body)).not.toContain(EXTRACTION_SUBMISSION_NAME);
   });
 });
 
