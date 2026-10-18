@@ -35,3 +35,5 @@ data/
 test-results/
 playwright-report/
 *.tsbuildinfo
+参考预设/
+presets/
