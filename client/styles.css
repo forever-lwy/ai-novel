@@ -559,7 +559,12 @@
 .workspace.reading-overlay .workspace-header-shell[hidden],.workspace.reading-overlay .workspace-toolbars[hidden]{display:block;visibility:hidden;pointer-events:none}
 .reading-overlay .manuscript-wrap{padding-top:calc(var(--workspace-header-height) + var(--workspace-toolbar-height));scroll-padding-top:calc(var(--workspace-header-height) + var(--workspace-toolbar-height) + 16px)}
 .reading-overlay .context-sidebar::before{content:"";display:block;height:calc(var(--workspace-header-height) + var(--workspace-toolbar-height))}
-@media(min-width:761px){.reading-overlay .chapter-sidebar::before{content:"";flex-shrink:0;height:var(--workspace-header-height)}}
+@media(min-width:761px){
+  .reading-overlay>.workspace-header-shell{position:relative}
+  .reading-overlay .workspace-toolbars{top:0}
+  .reading-overlay .manuscript-wrap{padding-top:var(--workspace-toolbar-height);scroll-padding-top:calc(var(--workspace-toolbar-height) + 16px)}
+  .reading-overlay .context-sidebar::before{height:var(--workspace-toolbar-height)}
+}
 @media(max-width:760px){
   .workspace{--workspace-header-height:62px;--workspace-toolbar-height:110px}
   .workspace-continue{margin:0 11px 0 6px;padding:9px 10px;font-size:11px;gap:5px}

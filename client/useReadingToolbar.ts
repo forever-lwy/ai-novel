@@ -5,6 +5,7 @@ const usesTouchLayout = () => window.matchMedia('(max-width: 760px), (pointer: c
 
 export function useReadingToolbar(enabled: boolean, scope: string) {
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileLayout, setMobileLayout] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
   const position = useRef({ top: 0, distance: 0, lastScroll: 0, userScrollUntil: 0 });
   const pointer = useRef<{ id: number; x: number; y: number; moved: boolean; started: number } | null>(null);
   const nearToolbar = useRef(false);
@@ -19,9 +20,10 @@ export function useReadingToolbar(enabled: boolean, scope: string) {
 
   useEffect(() => {
     const reveal = () => { setCollapsed(false); position.current.distance = 0; position.current.userScrollUntil = 0; };
-    window.addEventListener('resize', reveal);
+    const resize = () => { setMobileLayout(window.matchMedia('(max-width: 760px)').matches); reveal(); };
+    window.addEventListener('resize', resize);
     window.addEventListener('keydown', reveal);
-    return () => { window.removeEventListener('resize', reveal); window.removeEventListener('keydown', reveal); };
+    return () => { window.removeEventListener('resize', resize); window.removeEventListener('keydown', reveal); };
   }, []);
 
   function onReadingScroll(event: UIEvent<HTMLDivElement>) {
@@ -78,6 +80,7 @@ export function useReadingToolbar(enabled: boolean, scope: string) {
 
   return {
     toolbarHidden,
+    headerHidden: toolbarHidden && mobileLayout,
     onReadingScroll,
     readingEvents: {
       onPointerDownCapture: onPointerDown,

@@ -208,6 +208,8 @@ test('手机阅读工具栏随滚动收起，停下轻点中部展开，滑动�
     await mobile.getByRole('button', { name: '查看作者资料', exact: true }).tap();
     await expect(mobile.getByRole('button', { name: '返回阅读视图', exact: true })).toBeVisible();
     await swipe(); await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await expect(mobile.locator('.workspace-header')).toBeHidden();
+    await expect(mobile.locator('.workspace-toolbars')).toBeHidden();
     const authorBefore = await readingGeometry(mobile);
     await mobile.touchscreen.tap(160, 360);
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
@@ -216,11 +218,11 @@ test('手机阅读工具栏随滚动收起，停下轻点中部展开，滑动�
   } finally { await context.close(); }
 });
 
-test('桌面阅读下滚收起，上滚或移近顶部展开，编辑与其他页面保持操作栏', async ({ page }, testInfo) => {
+test('桌面阅读下滚只收起正文工具栏，Logo 栏常显，上滚或移近顶部展开', async ({ page }, testInfo) => {
   const project = await restoreToolbarStory(page, 'E2E 桌面阅读工具栏');
   await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
   const workspace = page.locator('.workspace'); const reader = page.locator('.manuscript-wrap');
-  for (const width of [1440, 1024]) {
+  for (const width of [1440, 1024, 768]) {
     await page.setViewportSize({ width, height: 900 });
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
     await reader.evaluate(element => { element.scrollTop += 80; });
@@ -228,9 +230,12 @@ test('桌面阅读下滚收起，上滚或移近顶部展开，编辑与其他�
     const beforeHide = await readingGeometry(page);
     await page.mouse.click(width / 2, 550); await page.mouse.wheel(0, 400);
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
-    await expect(page.locator('.workspace-header')).toBeHidden();
+    await expect(page.locator('.workspace-header')).toBeInViewport();
+    await expect(page.locator('.workspace-header-shell')).toHaveJSProperty('inert', false);
+    if (width === 1440) await expect(page.locator('.workspace-header .brand')).toBeVisible();
+    await expect(page.locator('.workspace-tabs')).toBeHidden();
     await expect(page.locator('.editor-toolbar')).toBeHidden();
-    expect(await reader.evaluate(element => element.getBoundingClientRect().top)).toBe(0);
+    expect(await reader.evaluate(element => element.getBoundingClientRect().top)).toBe(await page.locator('.workspace-header').evaluate(element => element.getBoundingClientRect().bottom));
     const beforeReveal = await readingGeometry(page);
     expect(beforeReveal).toMatchObject({ top: beforeHide.top, height: beforeHide.height, scrollHeight: beforeHide.scrollHeight, proseTop: beforeHide.proseTop });
     await page.screenshot({ path: testInfo.outputPath(`reading-toolbar-desktop-${width}-hidden.png`), animations: 'disabled' });
@@ -251,6 +256,7 @@ test('桌面阅读下滚收起，上滚或移近顶部展开，编辑与其他�
   await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
   await page.mouse.click(700, 550); await page.mouse.wheel(0, 300);
   await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+  await expect(page.locator('.workspace-header')).toBeInViewport();
   const authorBefore = await readingGeometry(page);
   await page.mouse.move(700, 20); await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
   expect(await readingGeometry(page)).toEqual(authorBefore);
