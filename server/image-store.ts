@@ -18,6 +18,7 @@ export const imageSchema = z.object({
   title: z.string().max(500), prompt: z.string().max(100000), entityId: z.string().optional(), chapterId: z.string().optional(), sourceText: z.string().max(2000000).optional(),
   selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), referenceImageId: z.string().optional(),
   material: z.string().max(100000).optional(), instruction: z.string().max(20000).optional(),
+  selectedReferenceImageIds: z.array(z.string().min(1)).max(16).optional(),
   referenceImageIds: z.array(z.string().min(1)).max(16).optional(), referenceEntityIds: z.array(z.string().min(1)).max(16).optional(),
   materialEntityIds: z.array(z.string().min(1)).max(10000).optional(),
   referenceCharacters: z.array(z.object({ entityId: z.string().min(1), imageId: z.string().min(1), name: z.string().max(300) })).max(16).optional(),
@@ -44,7 +45,7 @@ export function imageEntity(state: StoryState, entityId: string): Entity | undef
   while (entity?.mergedInto && !seen.has(entity.id)) { seen.add(entity.id); entity = state.entities.find(item => item.id === entity!.mergedInto); }
   return entity && !entity.mergedInto ? entity : undefined;
 }
-export function imageReferences(image: StoryImage): string[] { return [...new Set([...(image.referenceImageId ? [image.referenceImageId] : []), ...(image.referenceImageIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.imageId)])]; }
+export function imageReferences(image: StoryImage): string[] { return [...new Set([...(image.referenceImageId ? [image.referenceImageId] : []), ...(image.selectedReferenceImageIds ?? []), ...(image.referenceImageIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.imageId)])]; }
 function readerEntity(entity: Entity | undefined): boolean {
   return Boolean(entity && entity.visibility === 'public' && (entity.locked || entity.facts.some(fact => fact.visibility === 'public' && fact.temporal !== 'future')) && !entity.facts.some(fact => fact.visibility === 'secret' || fact.temporal === 'future'));
 }

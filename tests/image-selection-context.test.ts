@@ -261,6 +261,129 @@ describe('enabled images at the model context boundary', () => {
   });
 });
 
+describe('author-selected reference images', () => {
+  async function twoPortraits(ctx: ReturnType<typeof harness>) {
+    const state = ctx.store.state(ctx.branchId);
+    state.entities.push({ id: 'river', name: '程川', kind: 'character', aliases: [], description: '黑发白袍', visibility: 'public', locked: true, facts: [] });
+    ctx.store.commit(ctx.branchId, ctx.base(), state, '另一位人物');
+    const first = ctx.portrait(); await until(() => ctx.store.images.get(first.id)?.status === 'completed');
+    const second = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'portrait', entityId: 'river' }).image;
+    await until(() => ctx.store.images.get(second.id)?.status === 'completed');
+    return { first, second };
+  }
+  it('uses exactly the selected images in author order even when the optimizer suggests another identity', async () => {
+    const ctx = harness(undefined, async (...args) => ({ ...await defaultOptimizer(...args), referenceEntityIds: ['invented'] }));
+    // Portraits have no automatic reference candidates, so create them with the ordinary optimizer.
+    ctx.optimizer.mockImplementation(defaultOptimizer); const { first, second } = await twoPortraits(ctx);
+    ctx.optimizer.mockImplementation(async (...args) => ({ ...await defaultOptimizer(...args), referenceEntityIds: ['invented'] }));
+    ctx.settings.imageSettings!.useCharacterReferences = false;
+    const selected = [second.id, first.id];
+    const cg = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds: selected }).image;
+    selected.reverse(); // The queued task owns its selection, independent of caller mutations.
+    await until(() => ctx.store.images.get(cg.id)?.status === 'completed');
+    expect(ctx.store.images.get(cg.id)).toMatchObject({ selectedReferenceImageIds: [second.id, first.id], referenceImageIds: [second.id, first.id], referenceEntityIds: ['river', 'moon'], sourceText: ctx.store.chapter(ctx.branchId, ctx.chapter.id).text });
+    expect(cgInput(ctx)).toMatchObject({ referenceSelection: 'manual', references: [{ imageId: second.id }, { imageId: first.id }] });
+    expect(cgInput(ctx).characters.every(character => !character.imageId)).toBe(true);
+    expect(references(ctx)).toEqual([{ bytes: newPixels, mimeType: 'image/png' }, { bytes: oldPixels, mimeType: 'image/png' }]);
+    expect(ctx.store.images.get(cg.id)?.prompt).toContain('参考图 1：人物 程川');
+    expect(ctx.images.list(ctx.branchId).find(image => image.id === cg.id)?.selectedReferenceImageIds).toBeUndefined();
+  });
+  it('allows an existing CG as a selected reference and keeps the original image first during editing', async () => {
+    const ctx = harness(); const original = ctx.portrait(); await until(() => ctx.store.images.get(original.id)?.status === 'completed');
+    const source = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds: [] }).image;
+    await until(() => ctx.store.images.get(source.id)?.status === 'completed');
+    const edited = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'portrait', entityId: 'moon', referenceImageId: original.id, selectedReferenceImageIds: [source.id], instruction: '参考庭院光线，保留人物外貌。' }).image;
+    await until(() => ctx.store.images.get(edited.id)?.status === 'completed');
+    expect(ctx.store.images.get(edited.id)?.referenceImageIds).toEqual([original.id, source.id]);
+    expect(ctx.store.images.get(original.id)?.status).toBe('completed'); expect(references(ctx)).toHaveLength(2);
+  });
+  it('does not wait for pending portraits or send their bytes when the author chooses no references', async () => {
+    const gate = deferred<void>(); let started = false;
+    const ctx = harness(async (_provider, _config, prompt, signal) => { if (prompt === 'OPTIMIZED_portrait') { started = true; await abortable(gate.promise, signal); } return { bytes: png, mimeType: 'image/png' }; });
+    ctx.portrait(); await until(() => started);
+    try {
+      const cg = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds: [] }).image;
+      await until(() => ctx.store.images.get(cg.id)?.status === 'completed');
+      expect(ctx.store.images.get(cg.id)).toMatchObject({ selectedReferenceImageIds: [], referenceImageIds: [], referenceCharacters: [] });
+      expect(references(ctx)).toBeUndefined();
+    } finally { gate.resolve(); }
+  });
+  it('rejects unavailable, inactive, duplicate and excessive references before registering or calling models', async () => {
+    const ctx = harness(); const { old, newer } = await variants(ctx);
+    const base = ctx.base(); const calls = ctx.imageModel.mock.calls.length;
+    const generate = (selectedReferenceImageIds: string[]) => ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds });
+    expect(() => generate(['missing'])).toThrow('不包含'); expect(() => generate([newer.id])).toThrow('未启用');
+    expect(() => generate([old.id, old.id])).toThrow('重复');
+    ctx.settings.imageSettings = { ...ctx.settings.imageSettings!, protocol: 'together-images', model: 'black-forest-labs/FLUX.1-kontext-pro', aspectRatio: '1:1' };
+    expect(() => generate([old.id, newer.id])).toThrow('最多支持 1');
+    expect(() => ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'portrait', entityId: 'moon', referenceImageId: old.id, selectedReferenceImageIds: [newer.id], instruction: '调整光线' })).toThrow('最多支持 1');
+    ctx.settings.imageSettings = { ...ctx.settings.imageSettings!, protocol: 'openai-images', model: 'dall-e-3', quality: 'standard', aspectRatio: undefined };
+    expect(() => generate([old.id])).toThrow('最多支持 0');
+    expect(ctx.base()).toBe(base); expect(ctx.imageModel).toHaveBeenCalledTimes(calls); expect(ctx.optimizer).toHaveBeenCalledTimes(2);
+  });
+  it('rejects references belonging only to another story line or project', async () => {
+    const ctx = harness(); const fork = ctx.store.fork(ctx.branchId, { baseRevisionId: ctx.base(), name: '另一条故事线' });
+    const sibling = ctx.images.generate(fork.branch.id, { baseRevisionId: fork.branch.revisionId, kind: 'portrait', entityId: 'moon' }).image;
+    await until(() => ctx.store.images.get(sibling.id)?.status === 'completed');
+    const other = ctx.store.createProject({ title: '另一部作品' }); const state = ctx.store.state(other.mainBranchId); state.entities = ctx.store.state(ctx.branchId).entities;
+    ctx.store.commit(other.mainBranchId, ctx.store.getBranch(other.mainBranchId).revisionId, state, '其他作品人物');
+    const external = ctx.images.generate(other.mainBranchId, { baseRevisionId: ctx.store.getBranch(other.mainBranchId).revisionId, kind: 'portrait', entityId: 'moon' }).image;
+    await until(() => ctx.store.images.get(external.id)?.status === 'completed');
+    for (const id of [sibling.id, external.id]) expect(() => ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds: [id] })).toThrow('不包含');
+  });
+  it('invalidates selected references during optimization before any subsequent image request', async () => {
+    const gate = deferred<void>(); let started = false;
+    const ctx = harness(undefined, async (...args) => { if (args[1].kind === 'cg') { started = true; await abortable(gate.promise, args[2]); } return defaultOptimizer(...args); });
+    const source = ctx.portrait(); await until(() => ctx.store.images.get(source.id)?.status === 'completed');
+    const cg = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds: [source.id] }).image;
+    await until(() => started); ctx.images.setActive(ctx.branchId, source.id, ctx.base(), false); gate.resolve();
+    await until(() => ctx.store.images.get(cg.id)?.status === 'stale'); expect(ctx.imageModel).toHaveBeenCalledTimes(1);
+    expect(() => ctx.images.retry(ctx.branchId, cg.id, ctx.base())).toThrow('未启用');
+  });
+  it.each([false, true])('keeps explicit choices on pixel retry, including reoptimization after model change=%s', async changed => {
+    let calls = 0; const ctx = harness(async () => { if (++calls === 2) throw new Error('pixel fixture failed'); return { bytes: oldPixels, mimeType: 'image/png' }; });
+    const source = ctx.portrait(); await until(() => ctx.store.images.get(source.id)?.status === 'completed');
+    const cg = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds: [source.id] }).image;
+    await until(() => ctx.store.images.get(cg.id)?.status === 'failed'); ctx.settings.imageSettings!.useCharacterReferences = false;
+    if (changed) ctx.settings.imageSettings = { ...ctx.settings.imageSettings!, protocol: 'gemini', model: 'gemini-2.5-flash-image', size: 'auto', aspectRatio: '1:1' };
+    const retried = ctx.images.retry(ctx.branchId, cg.id, ctx.base()).image; await until(() => ctx.store.images.get(retried.id)?.status === 'completed');
+    expect(ctx.store.images.get(retried.id)).toMatchObject({ selectedReferenceImageIds: [source.id], referenceImageIds: [source.id] });
+    expect(references(ctx)).toEqual([{ bytes: oldPixels, mimeType: 'image/png' }]); expect(ctx.optimizer).toHaveBeenCalledTimes(changed ? 3 : 2);
+  });
+  it('preserves and remaps selected references and explicit empty choices in backups', async () => {
+    const ctx = harness(); const source = ctx.portrait(); await until(() => ctx.store.images.get(source.id)?.status === 'completed');
+    const cg = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds: [source.id] }).image;
+    await until(() => ctx.store.images.get(cg.id)?.status === 'completed');
+    const empty = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds: [] }).image;
+    await until(() => ctx.store.images.get(empty.id)?.status === 'completed');
+    const backup = ctx.store.exportProject(ctx.project.id); const restored = ctx.store.restoreProject(backup); const assets = ctx.store.images.all(restored.id);
+    const restoredSource = assets.find(image => image.kind === 'portrait')!; const chosen = assets.find(image => image.selectedReferenceImageIds?.length)!;
+    expect(chosen.selectedReferenceImageIds).toEqual([restoredSource.id]); expect(chosen.referenceImageIds).toEqual([restoredSource.id]); expect(restoredSource.id).not.toBe(source.id);
+    expect(assets.some(image => image.selectedReferenceImageIds?.length === 0)).toBe(true);
+    const retried = ctx.images.retry(restored.mainBranchId, chosen.id, ctx.store.getBranch(restored.mainBranchId).revisionId).image;
+    await until(() => ctx.store.images.get(retried.id)?.status === 'completed'); expect(ctx.store.images.get(retried.id)?.selectedReferenceImageIds).toEqual([restoredSource.id]);
+    const invalid = structuredClone(backup); invalid.images.find(asset => asset.image.id === cg.id)!.image.selectedReferenceImageIds = [source.id, source.id];
+    expect(() => ctx.store.restoreProject(invalid)).toThrow('关联无效');
+  });
+  it.each(['openai-images', 'gemini', 'together-images'] as const)('sends only the chosen reference pixels through real local HTTP for %s', async protocol => {
+    const bodies: Buffer[] = []; const paths: string[] = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk)); bodies.push(Buffer.concat(chunks)); paths.push(request.url!);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(protocol === 'gemini' ? { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: png.toString('base64') } }] } }] } : { data: [{ b64_json: png.toString('base64') }] }));
+    });
+    servers.push(server); await listenLocalServer(server); let wire = false; let count = 0;
+    const ctx = harness(async (...args) => wire ? generateImage(...args) : { bytes: ++count === 1 ? oldPixels : newPixels, mimeType: 'image/png' });
+    const { second } = await twoPortraits(ctx); ctx.settings.providers[0].baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+    ctx.settings.imageSettings = { ...ctx.settings.imageSettings!, protocol, model: protocol === 'gemini' ? 'gemini-2.5-flash-image' : protocol === 'together-images' ? 'black-forest-labs/FLUX.2-pro' : 'gpt-image-1', ...(protocol === 'gemini' ? { aspectRatio: '1:1' } : {}) };
+    wire = true; const cg = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selectedReferenceImageIds: [second.id] }).image;
+    await until(() => ctx.store.images.get(cg.id)?.status === 'completed');
+    expect(bodies).toHaveLength(1); expect(paths[0]).toBe(protocol === 'gemini' ? '/v1/models/gemini-2.5-flash-image:generateContent' : protocol === 'openai-images' ? '/v1/images/edits' : '/v1/images/generations');
+    expect(bodies[0].includes(protocol === 'openai-images' ? newPixels : Buffer.from(newPixels.toString('base64')))).toBe(true);
+    expect(bodies[0].includes(protocol === 'openai-images' ? oldPixels : Buffer.from(oldPixels.toString('base64')))).toBe(false);
+  });
+});
+
 describe('historical CG privacy and prose-context boundaries', () => {
   it.each(['disable', 'delete'] as const)('keeps a completed CG readable after its old public reference is %s while respecting later secrets', async action => {
     const ctx = harness(); const { old } = await variants(ctx); const cg = ctx.cg();

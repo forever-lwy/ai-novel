@@ -10,6 +10,7 @@ export interface ImagePromptInput {
   kind: StoryImageKind; material: string; instruction: string; stylePrompt: string; config: ImageSettings;
   characters: { entityId: string; name: string; description: string; imageId?: string }[];
   references: { label: string; entityId?: string; imageId: string }[];
+  referenceSelection?: 'manual';
 }
 export interface OptimizedImagePrompt { prompt: string; referenceEntityIds: string[]; parameters: ImageResolvedParameters }
 export type ImagePromptOptimizer = (settings: Settings, input: ImagePromptInput, signal?: AbortSignal) => Promise<OptimizedImagePrompt>;
@@ -48,10 +49,11 @@ export const optimizeImagePrompt: ImagePromptOptimizer = async (settings, input,
   if (!connection || !model) throw new HttpError('请配置生图提示词优化模型，或先设置摘要压缩／正文写作模型');
   const provider = { ...resolveModelConfig(normalized, connection, model, 'planning'), stream: false };
   const caps = imageModelCapabilities(input.config);
-  const prompt = JSON.stringify({ kind: input.kind, material: input.material, instruction: input.instruction, stylePrompt: input.stylePrompt, characters: input.characters, references: input.references, config: { protocol: input.config.protocol, model: input.config.model, size: input.config.size, aspectRatio: input.config.aspectRatio, imageSize: input.config.imageSize, width: input.config.width, height: input.config.height }, allowed: { dimensionMode: caps.dimensionMode, sizes: caps.sizes.filter(size => size !== 'auto'), aspectRatios: caps.aspectRatios, imageSizes: caps.imageSizes, customSize: caps.customSize, dimensionMultiple: caps.dimensionMultiple, minDimension: caps.minDimension, maxDimension: caps.maxDimension, minPixels: caps.minPixels, maxPixels: caps.maxPixels, maxAspectRatio: caps.maxAspectRatio, maxCharacterReferences: Math.max(0, Math.min(caps.maxCharacterReferences, caps.maxReferences - input.references.length)) } });
+  const maxCharacterReferences = input.referenceSelection === 'manual' ? 0 : Math.max(0, Math.min(caps.maxCharacterReferences, caps.maxReferences - input.references.length));
+  const prompt = JSON.stringify({ kind: input.kind, material: input.material, instruction: input.instruction, stylePrompt: input.stylePrompt, characters: input.characters, references: input.references, ...(input.referenceSelection === 'manual' ? { referenceSelection: 'manual', referenceInstruction: '作者已确定全部参考图片及顺序，只使用 references 中的图片，不增删或替换；没有图片时仅按文字绘制。referenceEntityIds 返回空数组。' } : {}), config: { protocol: input.config.protocol, model: input.config.model, size: input.config.size, aspectRatio: input.config.aspectRatio, imageSize: input.config.imageSize, width: input.config.width, height: input.config.height }, allowed: { dimensionMode: caps.dimensionMode, sizes: caps.sizes.filter(size => size !== 'auto'), aspectRatios: caps.aspectRatios, imageSizes: caps.imageSizes, customSize: caps.customSize, dimensionMultiple: caps.dimensionMultiple, minDimension: caps.minDimension, maxDimension: caps.maxDimension, minPixels: caps.minPixels, maxPixels: caps.maxPixels, maxAspectRatio: caps.maxAspectRatio, maxCharacterReferences } });
   const compiled = compileTaskPrompt(settings.promptTemplates, 'image', {
     imageInput: prompt, imageSystemPrompt: input.config.promptSystemPrompt?.trim() ?? '',
-    maxCharacterReferences: Math.max(0, Math.min(caps.maxCharacterReferences, caps.maxReferences - input.references.length)),
+    maxCharacterReferences,
     instruction: input.instruction,
   });
   const request = structuredRequest({ ...compiled, signal, maxOutputTokens: provider.maxOutputTokens });
@@ -59,6 +61,6 @@ export const optimizeImagePrompt: ImagePromptOptimizer = async (settings, input,
   if (inputTokens + provider.maxOutputTokens > provider.contextTokens) throw new HttpError(`生图提示词优化素材与完整输出上限超出模型上下文（输入约 ${inputTokens}，输出预留 ${provider.maxOutputTokens}，上下文 ${provider.contextTokens}），请精简素材或调整优化模型参数`);
   const response = await generateStructured(provider, request, value => resultSchema.parse(value));
   const available = new Set(input.characters.filter(character => character.imageId).map(character => character.entityId));
-  if (response.value.referenceEntityIds.some(id => !available.has(id))) throw new HttpError('提示词 AI 选择了不存在或没有立绘的人物参考，请手动重试');
-  return { prompt: response.value.prompt, referenceEntityIds: [...new Set(response.value.referenceEntityIds)].slice(0, caps.maxCharacterReferences), parameters: resolveImageParameters(input.config, response.value.parameters) };
+  if (input.referenceSelection !== 'manual' && response.value.referenceEntityIds.some(id => !available.has(id))) throw new HttpError('提示词 AI 选择了不存在或没有立绘的人物参考，请手动重试');
+  return { prompt: response.value.prompt, referenceEntityIds: input.referenceSelection === 'manual' ? [] : [...new Set(response.value.referenceEntityIds)].slice(0, caps.maxCharacterReferences), parameters: resolveImageParameters(input.config, response.value.parameters) };
 };

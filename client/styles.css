@@ -418,6 +418,16 @@
 .image-error{font-size:11px;line-height:1.8;color:#a45e45;overflow-wrap:anywhere;margin:8px 0}
 .story-image-full{display:block;max-width:100%;max-height:70vh;object-fit:contain;margin:0 auto 18px}
 .image-reference{display:block;max-width:100%;max-height:240px;object-fit:contain;align-self:center;border-radius:6px;background:#edf2e8}
+.image-reference-picker{display:flex;flex-direction:column;gap:12px;min-width:0}
+.image-reference-picker>.row{font-size:12px;color:#586b5e}
+.image-reference-options{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:10px;max-height:320px;overflow:auto;padding:3px}
+.form-stack .image-reference-option{display:flex;flex-direction:column;gap:8px;min-width:0;padding:8px;border:1px solid var(--line);border-radius:7px;background:var(--paper);cursor:pointer}
+.image-reference-option.is-selected{border-color:#678361;background:#eff5e9}
+.image-reference-option:focus-within{outline:2px solid #678361;outline-offset:1px}
+.image-reference-option>img{display:block;width:100%;height:100px;object-fit:contain;background:#edf2e8;border-radius:4px}
+.image-reference-option .checkbox{align-items:flex-start;line-height:1.5}.image-reference-option .checkbox>input{flex-shrink:0;margin-top:2px}
+.image-reference-option .checkbox>span{min-width:0;overflow-wrap:anywhere;font-size:12px}
+.image-reference-option>small{color:#788d70;font-size:10px}
 .image-source-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.9;background:#f0f4e9;border-left:3px solid #b5c5a4;padding:12px 15px;margin:0;max-height:180px;overflow:auto;color:#718664}
 .entity-image-preview{padding:0;display:block;width:100%;height:170px;background:#edf2e8;border-radius:6px;overflow:hidden;margin:16px 0 4px}
 .entity-image-preview>img{width:100%;height:100%;object-fit:contain;display:block}

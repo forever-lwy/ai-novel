@@ -2548,6 +2548,57 @@ test('生图取消的迟到响应不会跨阅读视图或故事线显示作者�
   await expect(page.locator('.story-image-card')).toHaveCount(0); await expect(page.locator('.workspace')).not.toContainText('SECRET_IMAGE');
 });
 
+for (const width of [1440, 390]) test(`手动生图与重新绘制选择参考图、明确不用参考图及模型限制 ${width}px`, async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  const previous = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-manual-reference-provider';
+  const imageSettings = { providerId, model: 'gpt-image-1', protocol: 'openai-images', size: '1024x1024', quality: 'auto', stylePrompt: '', autoPortrait: false, autoCG: false, timeoutMs: 120000, useCharacterReferences: true };
+  expect((await page.request.put('/api/settings', { data: { providers: [{ id: providerId, name: '手选参考图本地验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-image-prompt', extractionProviderId: providerId, extractionModel: 'e2e-fixture', imageSettings } })).ok()).toBeTruthy();
+  try {
+    await createProject(page, `E2E 手选参考图 ${width}`);
+    await page.getByRole('button', { name: '手动写第一章', exact: true }).click(); await page.getByLabel('章节标题', { exact: true }).fill('庭院相逢');
+    await page.getByLabel('章节正文', { exact: true }).fill('林舟与苏晴站在白石城的庭院里，一起望向天空。'); await page.getByRole('button', { name: '保存正文', exact: true }).click(); await completedJobs(page, 1);
+    const branchId = await currentBranchId(page); const imageList = async () => (await page.request.get(`/api/branches/${branchId}/images?view=author`)).json();
+    const stats = async () => (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json(); const modal = page.getByRole('dialog');
+    const changeModel = async (imageSettings: Record<string, unknown>) => { const saved = await (await page.request.get('/api/settings')).json(); const response = await page.request.put('/api/settings', { data: { ...saved, imageSettings } }); expect(response.ok(), await response.text()).toBeTruthy(); };
+    await tab(page, '世界资料'); await page.getByRole('button', { name: '新增资料', exact: true }).click();
+    await modal.getByLabel('名称', { exact: true }).fill('苏晴'); await modal.getByLabel('资料描述', { exact: true }).fill('马尾、蓝色旅行外套。'); await modal.getByRole('button', { name: '保存资料', exact: true }).click();
+    for (const [index, name] of ['林舟', '苏晴'].entries()) {
+      await page.locator('.entity-card').filter({ has: page.getByRole('heading', { name, exact: true }) }).getByRole('button', { name: '生成人物立绘', exact: true }).click();
+      await modal.getByRole('button', { name: '开始绘制', exact: true }).click(); await expect.poll(async () => (await imageList()).filter((image: any) => image.status === 'completed').length).toBe(index + 1);
+    }
+    const portraits = await imageList(); const first = portraits.find((image: any) => image.title.startsWith('林舟')); const second = portraits.find((image: any) => image.title.startsWith('苏晴'));
+    await page.setViewportSize({ width, height: width < 760 ? 844 : 1000 }); await tab(page, '正文');
+    await page.getByRole('button', { name: '生成本章 CG', exact: true }).click(); await expect(modal.getByLabel('参考图选择', { exact: true })).toHaveValue('auto');
+    await modal.getByLabel('参考图选择', { exact: true }).selectOption('manual'); await expect(modal.getByRole('checkbox')).toHaveCount(2);
+    await modal.getByLabel('查找参考图片', { exact: true }).fill('苏晴'); await expect(modal.getByRole('checkbox')).toHaveCount(1);
+    await modal.getByRole('checkbox', { name: `参考图片 ${second.title}`, exact: true }).check(); await modal.getByLabel('查找参考图片', { exact: true }).fill('');
+    await expect(modal).toContainText('已选 1 张 / 最多 16 张'); await expect(modal.locator(`[data-reference-image-id="${second.id}"] img`)).toBeVisible();
+    expect(await modal.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`manual-reference-picker-${width}.png`), animations: 'disabled' });
+    async function submit(expected?: string[]) {
+      const response = page.waitForResponse(value => new URL(value.url()).pathname === `/api/branches/${branchId}/images` && value.request().method() === 'POST');
+      await modal.getByRole('button', { name: '开始绘制', exact: true }).click(); const result = await response; expect(result.ok(), await result.text()).toBeTruthy();
+      const payload = result.request().postDataJSON(); if (expected === undefined) expect(payload).not.toHaveProperty('selectedReferenceImageIds'); else expect(payload.selectedReferenceImageIds).toEqual(expected);
+      const { image } = await result.json(); await expect(modal).toHaveCount(0); await expect.poll(async () => (await imageList()).find((item: any) => item.id === image.id)?.status).toBe('completed');
+      return (await imageList()).find((item: any) => item.id === image.id);
+    }
+    const cg = await submit([second.id]); expect(cg.referenceImageIds).toEqual([second.id]); expect(cg.referenceCharacters.map((item: any) => item.name)).toEqual(['苏晴']); expect((await stats()).lastImageRequest.referenceCount).toBe(1);
+    const redraw = async (id: string) => { await page.locator(`.chapter-images [data-image-id="${id}"]`).getByRole('button', { name: '重新绘制', exact: true }).click(); };
+    await redraw(cg.id); await expect(modal.getByLabel('参考图选择', { exact: true })).toHaveValue('manual'); await expect(modal.getByRole('checkbox', { name: `参考图片 ${second.title}`, exact: true })).toBeChecked();
+    await modal.getByRole('checkbox', { name: `参考图片 ${second.title}`, exact: true }).uncheck(); await modal.getByRole('checkbox', { name: `参考图片 ${first.title}`, exact: true }).check();
+    const changed = await submit([first.id]); expect(changed.referenceImageIds).toEqual([first.id]); expect(changed.active).toBe(false);
+    await redraw(changed.id); await modal.getByLabel('参考图选择', { exact: true }).selectOption('none'); const noReferences = await submit([]); expect(noReferences.referenceImageIds).toEqual([]); expect((await stats()).lastImageRequest.referenceCount).toBe(0);
+    await redraw(noReferences.id); await expect(modal.getByLabel('参考图选择', { exact: true })).toHaveValue('none'); await modal.getByLabel('参考图选择', { exact: true }).selectOption('auto'); const automatic = await submit(); expect(automatic.referenceImageIds).toHaveLength(2);
+    const beforeCancel = (await stats()).imageRequests;
+    await changeModel({ ...imageSettings, protocol: 'together-images', model: 'black-forest-labs/FLUX.1-kontext-pro', aspectRatio: '1:1' });
+    await redraw(cg.id); await expect(modal).toContainText('最多 1 张'); await expect(modal.getByRole('checkbox', { name: `参考图片 ${first.title}`, exact: true })).toBeDisabled();
+    await modal.getByRole('checkbox', { name: `参考图片 ${second.title}`, exact: true }).uncheck(); await modal.getByRole('checkbox', { name: `参考图片 ${first.title}`, exact: true }).check(); await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+    await changeModel({ ...imageSettings, model: 'dall-e-3', quality: 'standard' });
+    await redraw(noReferences.id); await modal.getByLabel('参考图选择', { exact: true }).selectOption('manual'); await expect(modal).toContainText('当前图片模型不支持参考图'); await expect(modal.getByRole('button', { name: '开始绘制', exact: true })).toBeDisabled();
+    await modal.getByLabel('参考图选择', { exact: true }).selectOption('none'); await expect(modal.getByRole('button', { name: '开始绘制', exact: true })).toBeEnabled(); await modal.getByRole('button', { name: '关闭对话框', exact: true }).click(); expect((await stats()).imageRequests).toBe(beforeCancel);
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
 test('专用生图提示词、AI 尺寸、两人物 CG 参考、Nano Banana 2 与 Together 参数及失败隔离', async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const auth = await (await page.request.get('/api/auth/status')).json();

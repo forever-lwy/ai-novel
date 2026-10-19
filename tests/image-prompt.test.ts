@@ -43,6 +43,14 @@ describe('image prompt model and parameter selection', () => {
     const data = input(); data.config.promptProviderId = ''; data.config.promptModel = ''; await optimizeImagePrompt(settings(), data); expect(textModel.generateStructured.mock.calls[0][0].model).toBe('planner');
     textModel.generateStructured.mockClear(); await expect(optimizeImagePrompt({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '' }, data)).rejects.toThrow('配置生图提示词'); expect(textModel.generateStructured).not.toHaveBeenCalled();
   });
+  it('tells the prompt model the author fixed all references and ignores its attempted reselection', async () => {
+    const data = input(); data.referenceSelection = 'manual'; data.references = [{ imageId: 'chosen-portrait', entityId: 'moon', label: '作者指定林月立绘' }];
+    structuredResult({ prompt: 'Use the author selected portrait.', referenceEntityIds: ['invented'], parameters: {} });
+    const result = await optimizeImagePrompt(settings(), data); expect(result.referenceEntityIds).toEqual([]);
+    const request = textModel.generateStructured.mock.calls[0][1]; const content = JSON.parse(request.messages.findLast((message: { role: string }) => message.role === 'user').content);
+    expect(content).toMatchObject({ referenceSelection: 'manual', references: data.references, allowed: { maxCharacterReferences: 0 } }); expect(content.referenceInstruction).toContain('不增删或替换');
+    expect(textModel.generateStructured).toHaveBeenCalledTimes(1);
+  });
   it('rejects invented reference IDs and invalid image parameters without a second model call', async () => {
     structuredResult({ prompt: 'Portrait illustration', referenceEntityIds: ['invented'], parameters: {} }); await expect(optimizeImagePrompt(settings(), input())).rejects.toThrow('不存在'); expect(textModel.generateStructured).toHaveBeenCalledTimes(1);
     structuredResult({ prompt: 'Portrait illustration', referenceEntityIds: [], parameters: { unknown: true } }); await expect(optimizeImagePrompt(settings(), input())).rejects.toThrow(); expect(textModel.generateStructured).toHaveBeenCalledTimes(2);

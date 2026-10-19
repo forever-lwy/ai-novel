@@ -46,6 +46,12 @@ describe('story illustration controls', () => {
     const reader = render(createElement(LocationPanel, { entities: [location], relations: [], onCitation: () => {}, onGenerateImage: () => {} }));
     expect(author).toContain('生成世界地图'); expect(reader).not.toContain('生成世界地图');
   });
+  it('shows explicit reference choices with thumbnails while excluding inactive and unfinished images', () => {
+    const html = render(createElement(ImageRequestDialog, { target: { kind: 'cg', chapterId: 'chapter', selectedReferenceImageIds: ['portrait'] }, title: '生成剧情 CG', images: [image(), image({ id: 'inactive', active: false, title: '未启用的另一版' }), image({ id: 'pending', status: 'running', title: '待完成图片' })], busy: false, error: '', onClose: () => {}, onSubmit: async () => {} }));
+    for (const text of ['自动选择', '自己选择', '不用参考图', '严格使用勾选的图片', '参考图片 林舟 · 立绘', '参考图 1']) expect(html).toContain(text);
+    expect(html).toMatch(/value="manual" selected/); expect(html).toMatch(/type="checkbox"[^>]*checked/); expect(html).not.toContain('未启用的另一版'); expect(html).not.toContain('待完成图片');
+    const none = render(createElement(ImageGenerationDetails, { image: image({ selectedReferenceImageIds: [] }) })); expect(none).toContain('由作者选择不用参考图');
+  });
 
   it('shows the optimized prompt, persisted parameters, and character reference snapshot in author details', () => {
     const html = render(createElement(ImageGenerationDetails, { image: image({ promptStatus: 'completed', prompt: 'Optimized scene lighting and character composition.', generationParameters: { protocol: 'gemini', model: 'gemini-3.1-flash-image-preview', aspectRatio: '16:9', imageSize: '2K', thinkingLevel: 'high', temperature: 0.7, systemInstruction: '保留人物外观。' }, referenceCharacters: [{ entityId: 'person', name: '林舟', imageId: 'portrait' }] }) }));
