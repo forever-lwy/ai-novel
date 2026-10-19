@@ -84,6 +84,22 @@ async function restoreToolbarStory(page: Page, title: string) {
   return await restored.json() as { title: string; mainBranchId: string };
 }
 
+async function readingGeometry(page: Page) {
+  return page.locator('.manuscript-wrap').evaluate(async element => {
+    let previous = element.scrollTop; let stable = 0;
+    const deadline = performance.now() + 8000;
+    while (performance.now() < deadline && stable < 6) {
+      await new Promise<void>(resolve => setTimeout(resolve, 50));
+      const top = element.scrollTop;
+      stable = Math.abs(top - previous) < 0.01 ? stable + 1 : 0; previous = top;
+    }
+    if (stable < 6) throw new Error('Reading scroll did not settle');
+    const bounds = element.getBoundingClientRect();
+    const paragraph = element.querySelector('.prose p')!.getBoundingClientRect();
+    return { top: bounds.top, height: bounds.height, width: bounds.width, scrollTop: element.scrollTop, scrollHeight: element.scrollHeight, proseTop: paragraph.top + element.scrollTop };
+  });
+}
+
 test('顶部继续创作在手机和桌面始终可见，阅读视图直接续写且不预建空章', async ({ page }, testInfo) => {
   const previous = await (await page.request.get('/api/settings')).json();
   const providerId = 'toolbar-local-provider';
@@ -139,20 +155,24 @@ test('手机阅读工具栏随滚动收起，停下轻点中部展开，滑动�
     await mobile.goto('/'); await mobile.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).tap();
     const workspace = mobile.locator('.workspace'); const reader = mobile.locator('.manuscript-wrap');
     await expect(mobile.locator('.manuscript h1')).toHaveText('长街');
-    const initialHeight = await reader.evaluate(element => element.clientHeight);
+    const initialGeometry = await readingGeometry(mobile);
     const touch = await context.newCDPSession(mobile);
     const swipe = async () => {
       await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 195, y: 650 }] });
-      for (const y of [600, 530, 450, 380, 330]) await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 195, y }] });
+      for (const y of [600, 530, 450, 380, 330]) {
+        await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 195, y }] });
+        await mobile.waitForTimeout(40); // Give the swipe a realistic touch velocity.
+      }
       await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     };
     await swipe();
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
     await expect(mobile.locator('.workspace-header')).toBeHidden(); await expect(mobile.locator('.workspace-toolbars')).toBeHidden();
-    expect(await reader.evaluate(element => element.clientHeight)).toBeGreaterThan(initialHeight + 100);
+    expect(await reader.evaluate(element => element.clientHeight)).toBe(initialGeometry.height);
     expect(await reader.evaluate(element => element.getBoundingClientRect().top)).toBe(0);
     await mobile.waitForTimeout(500); // Stopping alone must not reopen the bars.
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    expect(await readingGeometry(mobile)).toMatchObject({ top: initialGeometry.top, height: initialGeometry.height, scrollHeight: initialGeometry.scrollHeight, proseTop: initialGeometry.proseTop });
     await mobile.screenshot({ path: testInfo.outputPath('reading-toolbar-mobile-hidden.png'), animations: 'disabled' });
     await mobile.touchscreen.tap(30, 420); await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
     await reader.evaluate(element => { element.scrollTop -= 80; });
@@ -169,8 +189,10 @@ test('手机阅读工具栏随滚动收起，停下轻点中部展开，滑动�
     await reader.dispatchEvent('pointerup', { pointerType: 'touch', pointerId: 14, button: 0, clientX: 195, clientY: 420 });
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
     await mobile.evaluate(() => getSelection()!.removeAllRanges());
+    const beforeReveal = await readingGeometry(mobile);
     await mobile.touchscreen.tap(195, 420);
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    expect(await readingGeometry(mobile)).toEqual(beforeReveal);
     await expect(mobile.getByRole('button', { name: '继续创作', exact: true })).toBeInViewport();
     await mobile.screenshot({ path: testInfo.outputPath('reading-toolbar-mobile-visible.png'), animations: 'disabled' });
     await mobile.getByRole('button', { name: '打开章节目录', exact: true }).tap();
@@ -183,6 +205,14 @@ test('手机阅读工具栏随滚动收起，停下轻点中部展开，滑动�
     await mobile.setViewportSize({ width: 320, height: 720 });
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
     expect(await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
+    await mobile.getByRole('button', { name: '查看作者资料', exact: true }).tap();
+    await expect(mobile.getByRole('button', { name: '返回阅读视图', exact: true })).toBeVisible();
+    await swipe(); await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    const authorBefore = await readingGeometry(mobile);
+    await mobile.touchscreen.tap(160, 360);
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    expect(await readingGeometry(mobile)).toEqual(authorBefore);
+    await mobile.screenshot({ path: testInfo.outputPath('reading-toolbar-mobile-author-overlay.png'), animations: 'disabled' });
   } finally { await context.close(); }
 });
 
@@ -195,14 +225,18 @@ test('桌面阅读下滚收起，上滚或移近顶部展开，编辑与其他�
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
     await reader.evaluate(element => { element.scrollTop += 80; });
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    const beforeHide = await readingGeometry(page);
     await page.mouse.click(width / 2, 550); await page.mouse.wheel(0, 400);
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
     await expect(page.locator('.workspace-header')).toBeHidden();
     await expect(page.locator('.editor-toolbar')).toBeHidden();
     expect(await reader.evaluate(element => element.getBoundingClientRect().top)).toBe(0);
+    const beforeReveal = await readingGeometry(page);
+    expect(beforeReveal).toMatchObject({ top: beforeHide.top, height: beforeHide.height, scrollHeight: beforeHide.scrollHeight, proseTop: beforeHide.proseTop });
     await page.screenshot({ path: testInfo.outputPath(`reading-toolbar-desktop-${width}-hidden.png`), animations: 'disabled' });
     await page.mouse.move(width / 2, 20);
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    expect(await readingGeometry(page)).toEqual(beforeReveal);
     await expect(page.getByRole('button', { name: '继续创作', exact: true })).toBeInViewport();
     await page.mouse.move(width / 2, 550); await page.mouse.wheel(0, 160);
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
@@ -210,9 +244,16 @@ test('桌面阅读下滚收起，上滚或移近顶部展开，编辑与其他�
     await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
     await page.screenshot({ path: testInfo.outputPath(`reading-toolbar-desktop-${width}-visible.png`), animations: 'disabled' });
     await page.mouse.wheel(0, 180); await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    const beforeKeyboard = await readingGeometry(page);
     await page.keyboard.press('Tab'); await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    expect(await readingGeometry(page)).toEqual(beforeKeyboard);
   }
   await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await page.mouse.click(700, 550); await page.mouse.wheel(0, 300);
+  await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+  const authorBefore = await readingGeometry(page);
+  await page.mouse.move(700, 20); await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+  expect(await readingGeometry(page)).toEqual(authorBefore);
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   await page.getByLabel('章节正文', { exact: true }).fill('尚未保存的手机与桌面编辑草稿。\n\n' + '沿着长街继续前行。\n\n'.repeat(100));
   await reader.evaluate(element => { element.scrollTop = 600; });

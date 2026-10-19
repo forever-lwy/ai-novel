@@ -549,10 +549,20 @@
 .workspace-main.is-text{overflow:hidden}
 .workspace-main.is-text>.writing-layout{display:flex;flex:1;min-height:0;overflow:hidden}
 .workspace-main.is-text .manuscript-wrap{overflow:auto;overscroll-behavior-y:contain}
-.workspace[data-toolbar-state="hidden"] .workspace-notice,.workspace[data-toolbar-state="hidden"] .pending-strip{display:none}
+/* Reading chrome floats above a stable, full-height scroll area. Its initial
+   clearance scrolls away with the text, rather than changing on show/hide. */
+.workspace{--workspace-header-height:73px;--workspace-toolbar-height:125px}
+.workspace.reading-overlay{position:relative}
+.reading-overlay>.workspace-header-shell{position:absolute;top:0;left:0;right:0;z-index:30}
+.reading-overlay .workspace-main{position:relative}
+.reading-overlay .workspace-toolbars{position:absolute;top:var(--workspace-header-height);left:0;right:0;box-shadow:0 5px 14px #223b2812}
+.workspace.reading-overlay .workspace-header-shell[hidden],.workspace.reading-overlay .workspace-toolbars[hidden]{display:block;visibility:hidden;pointer-events:none}
+.reading-overlay .manuscript-wrap{padding-top:calc(var(--workspace-header-height) + var(--workspace-toolbar-height));scroll-padding-top:calc(var(--workspace-header-height) + var(--workspace-toolbar-height) + 16px)}
+.reading-overlay .context-sidebar::before{content:"";display:block;height:calc(var(--workspace-header-height) + var(--workspace-toolbar-height))}
+@media(min-width:761px){.reading-overlay .chapter-sidebar::before{content:"";flex-shrink:0;height:var(--workspace-header-height)}}
 @media(max-width:760px){
+  .workspace{--workspace-header-height:62px;--workspace-toolbar-height:110px}
   .workspace-continue{margin:0 11px 0 6px;padding:9px 10px;font-size:11px;gap:5px}
   .workspace-toolbar-row>.workspace-tabs{gap:16px}
   .workspace-tabs>.mobile-menu{position:sticky;left:0;z-index:1;background:#fffefa;flex-shrink:0}
-  .workspace[data-toolbar-state="hidden"] .chapter-sidebar{top:0}
 }
