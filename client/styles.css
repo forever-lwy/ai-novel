@@ -538,3 +538,21 @@
 .import-heading-selection{font-size:12px}.import-sample-chip{display:inline-flex;gap:8px;align-items:center;max-width:100%;border:1px solid #cad6c0;border-radius:6px;padding:6px 9px;margin:7px 7px 0 0;background:#eef4e8;color:#405c33;overflow-wrap:anywhere;text-align:left;cursor:pointer}.import-sample-chip span{flex:none}
 @media(max-width:600px){.import-rules{padding:12px}.import-rule-toolbar{gap:9px}.import-rule-toolbar>label{min-width:100%;width:100%}.import-rule-editor .form-grid{grid-template-columns:1fr}.import-heading-option{padding:8px}.import-heading-candidates{max-height:205px}}
 .title-repair-card{padding:16px;border:1px solid var(--line);border-radius:8px;background:#f8faf4;gap:12px}.title-repair-card .hint{margin:0}.title-repair-evidence{margin:0;border-left:3px solid #b8c9af;padding:9px 13px;color:#64745c;font-size:12px;line-height:1.8;white-space:pre-wrap;overflow-wrap:anywhere}.import-title-repair>summary{cursor:pointer;font-size:13px;color:var(--green);padding:10px 0}.import-title-repair>.title-repair{padding:14px;border:1px solid var(--line);border-radius:8px}.title-repair .form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.title-repair label.checkbox{flex-direction:row;align-items:flex-start;overflow-wrap:anywhere}
+
+/* Keep the writing shortcut visible while the tab list scrolls on narrow screens. */
+.workspace-header-shell,.workspace-toolbars{flex-shrink:0}
+.workspace-header-shell[hidden],.workspace-toolbars[hidden]{display:none}
+.workspace-toolbars{position:sticky;top:0;z-index:6;background:#fffefa}
+.workspace-toolbar-row{display:flex;align-items:stretch;min-width:0;border-bottom:1px solid #e8eadf}
+.workspace-toolbar-row>.workspace-tabs{flex:1;min-width:0;overflow-x:auto;scrollbar-width:none;border-bottom:0;position:static}
+.workspace-continue{flex-shrink:0;align-self:center;margin:0 20px 0 10px;min-height:36px}
+.workspace-main.is-text{overflow:hidden}
+.workspace-main.is-text>.writing-layout{display:flex;flex:1;min-height:0;overflow:hidden}
+.workspace-main.is-text .manuscript-wrap{overflow:auto;overscroll-behavior-y:contain}
+.workspace[data-toolbar-state="hidden"] .workspace-notice,.workspace[data-toolbar-state="hidden"] .pending-strip{display:none}
+@media(max-width:760px){
+  .workspace-continue{margin:0 11px 0 6px;padding:9px 10px;font-size:11px;gap:5px}
+  .workspace-toolbar-row>.workspace-tabs{gap:16px}
+  .workspace-tabs>.mobile-menu{position:sticky;left:0;z-index:1;background:#fffefa;flex-shrink:0}
+  .workspace[data-toolbar-state="hidden"] .chapter-sidebar{top:0}
+}

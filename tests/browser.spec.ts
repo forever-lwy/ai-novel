@@ -67,6 +67,165 @@ async function importNovel(page: Page) {
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
 }
 
+async function restoreToolbarStory(page: Page, title: string) {
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-toolbar-browser-')));
+  let backup: Buffer;
+  try {
+    const project = store.createProject({ title });
+    for (const name of ['起点', '长街']) {
+      const text = Array.from({ length: 90 }, (_, index) => `林舟沿着白石城的长街向前走，仔细观察沿途的门窗和路灯。他在路口停下，记住第${index + 1}处石墙上的纹路。`).join('\n\n');
+      const saved = store.saveChapter(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, title: name, text });
+      store.applyExtraction(project.mainBranchId, saved.branch.revisionId, saved.state.chapters.at(-1)!.id, { summary: '林舟沿着长街调查。', entities: [], relations: [], foreshadows: [] }, true);
+    }
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: store.exportProject(project.id), sources: [] }));
+  } finally { store.close(); }
+  const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'toolbar.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(restored.ok(), await restored.text()).toBeTruthy();
+  return await restored.json() as { title: string; mainBranchId: string };
+}
+
+test('顶部继续创作在手机和桌面始终可见，阅读视图直接续写且不预建空章', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json();
+  const providerId = 'toolbar-local-provider';
+  expect((await page.request.put('/api/settings', { data: { providers: [{ id: providerId, name: '工具栏本地验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: 'toolbar-fixture-key' }], writingProviderId: providerId, writingModel: 'e2e-fixture', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture', imageSettings: { ...previous.imageSettings, autoPortrait: false, autoCG: false } } })).ok()).toBeTruthy();
+  try {
+    const project = await restoreToolbarStory(page, 'E2E 顶部续写');
+    const path = `/api/branches/${project.mainBranchId}?view=author`;
+    const before = await (await page.request.get(path)).json();
+    let generationRequests = 0;
+    page.on('request', request => { if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/generate')) generationRequests++; });
+    for (const width of [320, 390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+      await expect(page.locator('.manuscript h1')).toHaveText('长街');
+      await expect(page.getByRole('button', { name: '查看作者资料', exact: true })).toBeVisible();
+      const button = page.locator('.workspace-toolbar-row').getByRole('button', { name: '继续创作', exact: true });
+      await expect(button).toBeInViewport();
+      await page.locator('.workspace-tabs').evaluate(element => { element.scrollLeft = element.scrollWidth; });
+      await expect(button).toBeInViewport();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
+      if (width === 390 || width === 1440) await page.screenshot({ path: testInfo.outputPath(`toolbar-continue-${width}.png`), animations: 'disabled' });
+      await button.click();
+      await expect(page.getByRole('dialog', { name: '让故事继续生长', exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: '返回阅读视图', exact: true })).toBeVisible();
+      expect((await (await page.request.get(path)).json()).state.chapters).toHaveLength(2);
+      expect(generationRequests).toBe(0);
+      await page.getByRole('button', { name: '关闭对话框', exact: true }).click();
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('button', { name: '打开章节目录', exact: true }).click();
+    await page.locator('.chapter-item').filter({ hasText: '起点' }).click();
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
+    await page.getByRole('button', { name: '继续创作', exact: true }).click();
+    const modal = page.getByRole('dialog');
+    await modal.getByLabel('章节标题（可选）', { exact: true }).fill('快捷续写');
+    const request = page.waitForRequest(value => value.method() === 'POST' && new URL(value.url()).pathname.endsWith('/generate'));
+    await modal.getByRole('button', { name: '开始生成', exact: true }).click();
+    expect((await request).postDataJSON()).toMatchObject({ baseRevisionId: before.branch.revisionId, mode: 'original', title: '快捷续写' });
+    expect((await request).postDataJSON()).not.toHaveProperty('chapterId');
+    await completedJobs(page, 2); await tab(page, '正文');
+    await expect(page.locator('.manuscript h1')).toHaveText('快捷续写');
+    const after = await (await page.request.get(path)).json();
+    expect(after.state.chapters.slice(0, 2).map((chapter: { id: string }) => chapter.id)).toEqual(before.state.chapters.map((chapter: { id: string }) => chapter.id));
+    expect(after.state.chapters).toHaveLength(3); expect(generationRequests).toBe(1);
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('手机阅读工具栏随滚动收起，停下轻点中部展开，滑动和选字不误触', async ({ page, browser }, testInfo) => {
+  const project = await restoreToolbarStory(page, 'E2E 手机阅读工具栏');
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, storageState: await page.context().storageState() });
+  try {
+    const mobile = await context.newPage();
+    await mobile.goto('/'); await mobile.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).tap();
+    const workspace = mobile.locator('.workspace'); const reader = mobile.locator('.manuscript-wrap');
+    await expect(mobile.locator('.manuscript h1')).toHaveText('长街');
+    const initialHeight = await reader.evaluate(element => element.clientHeight);
+    const touch = await context.newCDPSession(mobile);
+    const swipe = async () => {
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 195, y: 650 }] });
+      for (const y of [600, 530, 450, 380, 330]) await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: 195, y }] });
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    };
+    await swipe();
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await expect(mobile.locator('.workspace-header')).toBeHidden(); await expect(mobile.locator('.workspace-toolbars')).toBeHidden();
+    expect(await reader.evaluate(element => element.clientHeight)).toBeGreaterThan(initialHeight + 100);
+    expect(await reader.evaluate(element => element.getBoundingClientRect().top)).toBe(0);
+    await mobile.waitForTimeout(500); // Stopping alone must not reopen the bars.
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await mobile.screenshot({ path: testInfo.outputPath('reading-toolbar-mobile-hidden.png'), animations: 'disabled' });
+    await mobile.touchscreen.tap(30, 420); await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await reader.evaluate(element => { element.scrollTop -= 80; });
+    await reader.dispatchEvent('pointerdown', { pointerType: 'touch', pointerId: 12, button: 0, clientX: 195, clientY: 420 });
+    await reader.dispatchEvent('pointerup', { pointerType: 'touch', pointerId: 12, button: 0, clientX: 195, clientY: 420 });
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await mobile.waitForTimeout(300);
+    await reader.dispatchEvent('pointerdown', { pointerType: 'touch', pointerId: 13, button: 0, clientX: 195, clientY: 620 });
+    await reader.dispatchEvent('pointermove', { pointerType: 'touch', pointerId: 13, button: 0, clientX: 195, clientY: 420 });
+    await reader.dispatchEvent('pointerup', { pointerType: 'touch', pointerId: 13, button: 0, clientX: 195, clientY: 420 });
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await mobile.locator('.prose p').first().evaluate(element => { const range = document.createRange(); range.selectNodeContents(element); getSelection()!.removeAllRanges(); getSelection()!.addRange(range); });
+    await reader.dispatchEvent('pointerdown', { pointerType: 'touch', pointerId: 14, button: 0, clientX: 195, clientY: 420 });
+    await reader.dispatchEvent('pointerup', { pointerType: 'touch', pointerId: 14, button: 0, clientX: 195, clientY: 420 });
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await mobile.evaluate(() => getSelection()!.removeAllRanges());
+    await mobile.touchscreen.tap(195, 420);
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    await expect(mobile.getByRole('button', { name: '继续创作', exact: true })).toBeInViewport();
+    await mobile.screenshot({ path: testInfo.outputPath('reading-toolbar-mobile-visible.png'), animations: 'disabled' });
+    await mobile.getByRole('button', { name: '打开章节目录', exact: true }).tap();
+    await mobile.locator('.chapter-item').filter({ hasText: '起点' }).tap();
+    await expect(mobile.locator('.manuscript h1')).toHaveText('起点');
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    await expect(mobile.locator('.chapter-sidebar')).not.toBeInViewport();
+    await swipe();
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await mobile.setViewportSize({ width: 320, height: 720 });
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    expect(await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
+  } finally { await context.close(); }
+});
+
+test('桌面阅读下滚收起，上滚或移近顶部展开，编辑与其他页面保持操作栏', async ({ page }, testInfo) => {
+  const project = await restoreToolbarStory(page, 'E2E 桌面阅读工具栏');
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+  const workspace = page.locator('.workspace'); const reader = page.locator('.manuscript-wrap');
+  for (const width of [1440, 1024]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    await reader.evaluate(element => { element.scrollTop += 80; });
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    await page.mouse.click(width / 2, 550); await page.mouse.wheel(0, 400);
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await expect(page.locator('.workspace-header')).toBeHidden();
+    await expect(page.locator('.editor-toolbar')).toBeHidden();
+    expect(await reader.evaluate(element => element.getBoundingClientRect().top)).toBe(0);
+    await page.screenshot({ path: testInfo.outputPath(`reading-toolbar-desktop-${width}-hidden.png`), animations: 'disabled' });
+    await page.mouse.move(width / 2, 20);
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    await expect(page.getByRole('button', { name: '继续创作', exact: true })).toBeInViewport();
+    await page.mouse.move(width / 2, 550); await page.mouse.wheel(0, 160);
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await page.mouse.wheel(0, -100);
+    await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+    await page.screenshot({ path: testInfo.outputPath(`reading-toolbar-desktop-${width}-visible.png`), animations: 'disabled' });
+    await page.mouse.wheel(0, 180); await expect(workspace).toHaveAttribute('data-toolbar-state', 'hidden');
+    await page.keyboard.press('Tab'); await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+  }
+  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.getByLabel('章节正文', { exact: true }).fill('尚未保存的手机与桌面编辑草稿。\n\n' + '沿着长街继续前行。\n\n'.repeat(100));
+  await reader.evaluate(element => { element.scrollTop = 600; });
+  await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+  await expect(page.getByRole('button', { name: '保存正文', exact: true })).toBeInViewport();
+  await expect(page.getByRole('button', { name: '继续创作', exact: true })).toBeDisabled();
+  await tab(page, '世界资料');
+  await page.locator('.workspace-main').evaluate(element => { element.scrollTop = 500; });
+  await expect(workspace).toHaveAttribute('data-toolbar-state', 'visible');
+  await tab(page, '正文');
+  await expect(page.getByLabel('章节正文', { exact: true })).toHaveValue(/尚未保存的手机与桌面编辑草稿。/);
+});
+
 test('初始账号登录，一个供应商自动获取模型，三个任务各自选择或自定义且密钥不回显', async ({ page }, testInfo) => {
   const status = await page.request.get('/api/auth/status');
   expect(await status.json()).toEqual({ initialized: true, authenticated: false });
