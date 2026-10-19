@@ -264,11 +264,14 @@ export class Store {
     const state = this.rawRevisionState(revisionId);
     const projectId = this.getBranch(this.revision(revisionId).branchId, true).projectId;
     const outputs = this.db.prepare("SELECT data FROM model_outputs WHERE project_id=? AND stage='extraction' AND status='applied'").all(projectId).map(row => parse<import('../shared/types.js').ModelOutputRecord>(row.data));
-    if (!reader && !outputs.some(output => output.adjustments?.some(change => /^entities\[\d+\]\.visibility$/.test(change.path) && change.message === '省略字段已补为 "secret"'))) return state;
-    const lineage = this.materialHistory(revisionId); const positions = new Map(lineage.map((revision, index) => [revision.id, index]));
-    const included = outputs.filter(output => positions.has(output.baseRevisionId)).sort((a, b) => positions.get(b.baseRevisionId)! - positions.get(a.baseRevisionId)! || (a.blockIndex ?? 0) - (b.blockIndex ?? 0));
-    const { authorSecrets, authorEdits, authorSecretFacts } = this.authorEntityVisibility(lineage);
-    repairLegacyExtractionVisibility(state, included, authorSecrets, { cumulativePublic: reader, authorEdits, authorSecretFacts });
+    if (reader || outputs.some(output => output.adjustments?.some(change => /^entities\[\d+\]\.visibility$/.test(change.path) && change.message === '省略字段已补为 "secret"'))) {
+      const lineage = this.materialHistory(revisionId); const positions = new Map(lineage.map((revision, index) => [revision.id, index]));
+      const included = outputs.filter(output => positions.has(output.baseRevisionId)).sort((a, b) => positions.get(b.baseRevisionId)! - positions.get(a.baseRevisionId)! || (a.blockIndex ?? 0) - (b.blockIndex ?? 0));
+      const { authorSecrets, authorEdits, authorSecretFacts } = this.authorEntityVisibility(lineage);
+      repairLegacyExtractionVisibility(state, included, authorSecrets, { cumulativePublic: reader, authorEdits, authorSecretFacts });
+    }
+    // Ordinary snapshots need the same reuse as repaired legacy snapshots. Skip oversized entries.
+    if (JSON.stringify(state).length > 4 * 1024 * 1024) return state;
     if (this.legacyVisibilityCache.size >= 8) this.legacyVisibilityCache.delete(this.legacyVisibilityCache.keys().next().value!);
     this.legacyVisibilityCache.set(cacheKey, clone(state));
     return state;

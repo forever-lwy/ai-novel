@@ -1,16 +1,30 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Users, Plus, Search, LockKeyhole, FileText, Pencil, Link2, MapPin, EyeOff, Trash2, ImagePlus } from 'lucide-react';
 import type { Citation, Entity, Fact, KnowledgeKind, Relation, StoryImage } from '../shared/types';
 import { kindNames } from './api';
 import { Empty, Modal, Notice } from './ui';
-import { latestImage, StoryImageCards, type ImageAction, type ImageTarget } from './StoryImages';
+import { StoryImageCards, type ImageAction, type ImageTarget } from './StoryImages';
 
 export function WorldPanel({ entities, relations, author, busy, onSave, onMerge, onDelete, onCitation, revisionId, error, images = [], imageBusy = false, onGenerateImage, onImageAction, focusEntityId }: { revisionId: string; error: string; entities: Entity[]; relations: Relation[]; author: boolean; busy: boolean; onSave: (entity: Entity, revisionId: string) => Promise<boolean>; onMerge: (fromId: string, toId: string, revisionId: string) => Promise<boolean>; onDelete?: (entityId: string, revisionId: string) => Promise<boolean>; onCitation: (citation: Citation) => void; images?: StoryImage[]; imageBusy?: boolean; onGenerateImage?: (target: ImageTarget) => void; onImageAction?: (image: StoryImage, action: ImageAction) => void; focusEntityId?: string }) {
   const [filter, setFilter] = useState<KnowledgeKind | 'all'>('all'); const [search, setSearch] = useState(''); const [editing, setEditing] = useState<Entity | null>(null); const [merging, setMerging] = useState<Entity | null>(null); const [target, setTarget] = useState(''); const [editRevision, setEditRevision] = useState(revisionId); const [mergeRevision, setMergeRevision] = useState(revisionId);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<{ entity: Entity; revisionId: string } | null>(null);
   useEffect(() => { if (focusEntityId) setDetailId(focusEntityId); }, [focusEntityId]);
-  const available = entities.filter(e => !e.mergedInto); const filtered = available.filter(e => (filter === 'all' || e.kind === filter) && [e.name, ...e.aliases, e.description].join(' ').toLowerCase().includes(search.toLowerCase()));
+  const available = useMemo(() => entities.filter(entity => !entity.mergedInto), [entities]);
+  const filtered = useMemo(() => { const query = search.toLowerCase(); return available.filter(entity => (filter === 'all' || entity.kind === filter) && [entity.name, ...entity.aliases, entity.description].join(' ').toLowerCase().includes(query)); }, [available, filter, search]);
+  const connectionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const relation of relations) for (const id of new Set([relation.fromId, relation.toId])) counts.set(id, (counts.get(id) ?? 0) + 1);
+    return counts;
+  }, [relations]);
+  const entityImages = useMemo(() => {
+    const result = new Map<string, StoryImage>();
+    for (const image of images) if (image.entityId && image.active !== false && image.status === 'completed' && image.url) {
+      const previous = result.get(image.entityId);
+      if (!previous || image.createdAt.localeCompare(previous.createdAt) > 0) result.set(image.entityId, image);
+    }
+    return result;
+  }, [images]);
   const detail = available.find(entity => entity.id === detailId);
   const edit = (entity: Entity) => { setDetailId(null); setEditRevision(revisionId); setEditing({ ...structuredClone(entity), locked: true }); };
   const merge = (entity: Entity) => { setDetailId(null); setMerging(entity); setMergeRevision(revisionId); setTarget(''); };
@@ -20,15 +34,15 @@ export function WorldPanel({ entities, relations, author, busy, onSave, onMerge,
   return <section className="data-panel"><div className="panel-heading"><div><span className="eyebrow">WORLD ARCHIVE</span><h2>世界资料</h2><p>维护人物身份、血统、能力与性格等资料；经历只记录重大事件，普通经过保留在剧情摘要中。</p></div>{author && <button className="button primary small" onClick={newEntity}><Plus size={15} />新增资料</button>}</div>
     <div className="world-tools"><div className="filter-chips"><button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>全部 {available.length}</button>{Object.entries(kindNames).map(([key, name]) => <button className={filter === key ? 'active' : ''} key={key} onClick={() => setFilter(key as KnowledgeKind)}>{name} <span>{available.filter(e => e.kind === key).length}</span></button>)}</div><label className="search-input"><Search size={16} /><input aria-label="查找世界资料" value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索名字、别名、资料…" /></label></div>
     {!filtered.length ? <Empty icon={<Users size={30} />} title={available.length ? '没有找到匹配的资料' : '世界还在等待被发现'}>{available.length ? '试试其他名字，或切换资料分类。' : '导入并整理小说，或写下第一章。人物、地点与故事事件会在这里逐渐汇集。'}</Empty> : <div className="entity-grid">{filtered.map(entity => {
-      const connections = relations.filter(relation => relation.fromId === entity.id || relation.toId === entity.id);
+      const connections = connectionCounts.get(entity.id) ?? 0;
       const citation = entity.facts.find(fact => fact.citation)?.citation;
-      const image = latestImage(images, entity.id);
+      const image = entityImages.get(entity.id);
       return <article className="entity-card" key={entity.id} onClick={event => { if (!(event.target as Element).closest('button')) setDetailId(entity.id); }}>
         <div className="row between"><span className={`entity-type type-${entity.kind}`}>{kindNames[entity.kind]}{entity.kind === 'character' && entity.isMain ? ' · 主要角色' : ''}</span><div className="row">{entity.locked && <span title="用户锁定的资料"><LockKeyhole size={13} /></span>}{entity.visibility === 'secret' && <span title="作者秘密"><EyeOff size={14} /></span>}{author && <><button className="icon-button" title="编辑资料" aria-label={`编辑 ${entity.name}`} onClick={() => edit(entity)}><Pencil size={15} /></button><button className="icon-button" title="合并重复资料" aria-label={`合并 ${entity.name}`} onClick={() => merge(entity)}><Link2 size={15} /></button>{onDelete && <button className="icon-button danger-text" title="删除资料" aria-label={`删除 ${entity.name}`} disabled={busy} onClick={() => remove(entity)}><Trash2 size={15} /></button>}</>}</div></div>
         {image?.url && <button className={`entity-image-preview ${entity.kind === 'character' ? 'portrait' : ''}`} onClick={() => setDetailId(entity.id)} aria-label={`查看 ${entity.name} 的图片`}><img src={image.url} alt={`${entity.name} ${entity.kind === 'character' ? '立绘' : '图片'}`} loading="lazy" /></button>}
         <div className="entity-preview"><h3><button className="entity-name-button" onClick={() => setDetailId(entity.id)} title={entity.name}>{entity.name}</button></h3>{entity.aliases.length > 0 && <div className="alias-list" title={entity.aliases.join('、')}>{entity.aliases.map(alias => <span key={alias}>{alias}</span>)}</div>}<p className="entity-description">{entity.description || '暂无描述'}</p>{entity.facts.length > 0 && <ul className="entity-fact-preview">{entity.facts.slice(0, 2).map(fact => <li key={fact.id}>{fact.text}</li>)}</ul>}</div>
         {author && onGenerateImage && <button className="text-button entity-draw-button" disabled={imageBusy || busy} onClick={() => { setDetailId(null); onGenerateImage({ kind: entity.kind === 'character' ? 'portrait' : 'entity', entityId: entity.id }); }}><ImagePlus size={13} />{image ? '重新绘制' : entity.kind === 'character' ? '生成人物立绘' : '生成资料图片'}</button>}
-        <div className="entity-card-footer"><span>{entity.facts.length} 条事实{connections.length > 0 && ` · ${connections.length} 项关联`}</span>{citation && <button className="citation" onClick={() => showCitation(citation)} title={citation.quote}><FileText size={12} />原文第 {citation.paragraph} 段</button>}<button className="text-button" aria-label={`查看 ${entity.name} 的详细资料`} onClick={() => setDetailId(entity.id)}>查看详情</button></div>
+        <div className="entity-card-footer"><span>{entity.facts.length} 条事实{connections > 0 && ` · ${connections} 项关联`}</span>{citation && <button className="citation" onClick={() => showCitation(citation)} title={citation.quote}><FileText size={12} />原文第 {citation.paragraph} 段</button>}<button className="text-button" aria-label={`查看 ${entity.name} 的详细资料`} onClick={() => setDetailId(entity.id)}>查看详情</button></div>
       </article>;
     })}</div>}
     {detail && <Modal title={`世界资料 · ${detail.name}`} wide onClose={() => setDetailId(null)}><div className="entity-detail"><div className="row between"><span className={`entity-type type-${detail.kind}`}>{kindNames[detail.kind]}{detail.kind === 'character' && detail.isMain ? ' · 主要角色' : ''}</span>{author && <div className="row"><button className="button secondary small" onClick={() => edit(detail)}><Pencil size={14} />编辑资料</button><button className="button secondary small" onClick={() => merge(detail)}><Link2 size={14} />合并资料</button>{onDelete && <button className="button secondary small danger-text" disabled={busy} onClick={() => remove(detail)}><Trash2 size={14} />删除资料</button>}</div>}</div>{detail.aliases.length > 0 && <div className="alias-list">{detail.aliases.map(alias => <span key={alias}>{alias}</span>)}</div>}<p className="entity-description">{detail.description || '暂无描述'}</p><div className="entity-images"><div className="row between"><h3>{detail.kind === 'character' ? '人物立绘' : '资料图片'}</h3>{author && onGenerateImage && <button className="button secondary small" disabled={busy || imageBusy} onClick={() => { setDetailId(null); onGenerateImage({ kind: detail.kind === 'character' ? 'portrait' : 'entity', entityId: detail.id }); }}><ImagePlus size={14} />{images.some(image => image.entityId === detail.id && image.status === 'completed') ? '重新绘制' : '生成图片'}</button>}</div><StoryImageCards compact images={images.filter(image => image.entityId === detail.id)} author={author} busy={busy || imageBusy} onGenerate={onGenerateImage ? target => { setDetailId(null); onGenerateImage(target); } : undefined} onAction={onImageAction ? (image, action) => { if (action === 'activate' || action === 'deactivate') setDetailId(null); onImageAction(image, action); } : undefined} />{!images.some(image => image.entityId === detail.id) && <p className="hint">还没有关联图片。</p>}</div><EntityFacts facts={detail.facts} onCitation={showCitation} /><EntityRelations entity={detail} entities={available} relations={relations} /></div></Modal>}
@@ -54,22 +68,27 @@ function EntityEditor({ value, onChange, onSave, busy }: { value: Entity; onChan
 }
 
 export function LocationPanel({ entities, relations, onCitation, author = false, images = [], imageBusy = false, onGenerateImage, onImageAction }: { entities: Entity[]; relations: Relation[]; onCitation: (citation: Citation) => void; author?: boolean; images?: StoryImage[]; imageBusy?: boolean; onGenerateImage?: (target: ImageTarget) => void; onImageAction?: (image: StoryImage, action: ImageAction) => void }) {
-  const locations = entities.filter(entity => entity.kind === 'location' && !entity.mergedInto);
-  const locationIds = new Set(locations.map(entity => entity.id));
+  const locations = useMemo(() => entities.filter(entity => entity.kind === 'location' && !entity.mergedInto), [entities]);
+  const locationIds = useMemo(() => new Set(locations.map(entity => entity.id)), [locations]);
   const [selected, setSelected] = useState<string | null>(null);
   const selection = selected && locationIds.has(selected) ? selected : null;
-  const geographic = relations.filter(relation => locationIds.has(relation.fromId) && locationIds.has(relation.toId) && isGeographicRelation(relation.label));
-  const shownRelations = geographic.filter(relation => !selection || relation.fromId === selection || relation.toId === selection);
-  const display = selection ? locations.filter(entity => entity.id === selection || shownRelations.some(relation => relation.fromId === entity.id || relation.toId === entity.id)) : locations;
-  const { points, width, height } = locationLayout(display, shownRelations);
-  const characters = entities.filter(entity => entity.kind === 'character' && !entity.mergedInto);
+  const geographic = useMemo(() => relations.filter(relation => locationIds.has(relation.fromId) && locationIds.has(relation.toId) && isGeographicRelation(relation.label)), [relations, locationIds]);
+  const shownRelations = useMemo(() => geographic.filter(relation => !selection || relation.fromId === selection || relation.toId === selection), [geographic, selection]);
+  const display = useMemo(() => {
+    if (!selection) return locations;
+    const connected = new Set(shownRelations.flatMap(relation => [relation.fromId, relation.toId])); connected.add(selection);
+    return locations.filter(entity => connected.has(entity.id));
+  }, [locations, selection, shownRelations]);
+  const { points, width, height } = useMemo(() => locationLayout(display, shownRelations), [display, shownRelations]);
+  const pointById = useMemo(() => new Map(points.map(point => [point.entity.id, point])), [points]);
+  const characters = useMemo(() => entities.filter(entity => entity.kind === 'character' && !entity.mergedInto), [entities]);
   return <section className="data-panel">
     <div className="panel-heading"><div><span className="eyebrow">WORLD GEOGRAPHY</span><h2>地点关系</h2><p>地图只展示地理地点、区域归属与连接。已知方位用于相对排布，距离不按比例；没有方位记录的连接只表示关联，未连接的地点组仅按行排列。</p></div>{author && onGenerateImage && <button className="button secondary small" disabled={imageBusy || !locations.length} onClick={() => onGenerateImage({ kind: 'map' })}><ImagePlus size={15} />生成世界地图</button>}</div>
     {images.some(image => image.kind === 'map') && <div className="map-images"><h3>绘制的世界地图</h3><StoryImageCards compact images={images.filter(image => image.kind === 'map')} author={author} busy={imageBusy} onGenerate={onGenerateImage} onAction={onImageAction} /></div>}
     {!locations.length ? <Empty icon={<MapPin size={31} />} title="故事的版图，尚待展开">资料整理发现地点后，会在这里展示世界的地理关系。</Empty> : <>
       <label className="map-filter">查看范围<select value={selection || ''} onChange={event => setSelected(event.target.value || null)}><option value="">所有地理地点</option>{locations.map(entity => <option key={entity.id} value={entity.id}>{entity.name}</option>)}</select></label>
       <div className="map-canvas"><svg viewBox={`0 0 ${width} ${height}`} style={{ width }} role="img" aria-label="世界地理地点关系图"><defs><pattern id="mapDots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#d3ded6" /></pattern></defs><rect width={width} height={height} fill="url(#mapDots)" />{shownRelations.map(relation => {
-        const from = points.find(point => point.entity.id === relation.fromId); const to = points.find(point => point.entity.id === relation.toId);
+        const from = pointById.get(relation.fromId); const to = pointById.get(relation.toId);
         return from && to ? <g key={relation.id}><title>{`${from.entity.name} · ${relation.label} · ${to.entity.name}`}</title><line x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke="#8aa49a" strokeWidth="1.5" /><rect x={(from.x + to.x) / 2 - 48} y={(from.y + to.y) / 2 - 11} width="96" height="22" rx="11" fill="#fafbf6" /><text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 + 4} textAnchor="middle" fontSize="11" fill="#4d6a61">{relation.label.slice(0, 8)}</text></g> : null;
       })}{points.map(({ entity, x, y }) => <g key={entity.id} data-location-id={entity.id}><title>{entity.name}</title><circle cx={x} cy={y} r="32" fill="#214f44" stroke="#fafbf6" strokeWidth="5" /><text x={x} y={y + 5} textAnchor="middle" fontSize="15" fill="#fff">{entity.name.slice(0, 2)}</text><text x={x} y={y + 52} textAnchor="middle" fontSize="12" fill="#24473d">{entity.name}</text></g>)}</svg></div>
       <div className="map-relations">{shownRelations.map(relation => <div key={relation.id}><span>{locations.find(entity => entity.id === relation.fromId)?.name}</span><span className="relation-label">{relation.label}</span><span>{locations.find(entity => entity.id === relation.toId)?.name}</span>{relation.citation && <button className="citation" onClick={() => onCitation(relation.citation!)}><FileText size={12} />出处</button>}</div>)}</div>{!shownRelations.length && <p className="hint map-empty-relations">当前尚未记录这些地点之间的地理关系。</p>}
@@ -97,6 +116,10 @@ function direction(label: string): { x: number; y: number } | null {
 
 function locationLayout(entities: Entity[], relations: Relation[]) {
   const positions = new Map<string, { x: number; y: number }>();
+  const adjacency = new Map<string, Relation[]>();
+  for (const relation of relations) for (const id of new Set([relation.fromId, relation.toId])) {
+    const connected = adjacency.get(id) ?? []; connected.push(relation); adjacency.set(id, connected);
+  }
   let rowX = 0; let rowY = 0; let rowHeight = 0; let width = 0;
   for (const root of entities) {
     if (positions.has(root.id)) continue;
@@ -104,7 +127,7 @@ function locationLayout(entities: Entity[], relations: Relation[]) {
     const queue = [root.id];
     for (let index = 0; index < queue.length; index++) {
       const id = queue[index]; const origin = group.get(id)!;
-      const connections = relations.filter(relation => relation.fromId === id || relation.toId === id);
+      const connections = adjacency.get(id) ?? [];
       connections.forEach((relation, relationIndex) => {
         const neighbor = relation.fromId === id ? relation.toId : relation.fromId;
         if (group.has(neighbor)) return;

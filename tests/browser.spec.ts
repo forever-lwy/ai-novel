@@ -1195,7 +1195,8 @@ test('章节请求延迟返回时，切换到空故事线不会混入原故事�
     await intercepted.fulfill({ response }); fulfilled();
   });
   try {
-    await page.locator('.chapter-list').getByRole('button', { name: /第一章 旧响应/ }).click();
+    // Start with a cold workspace; revisiting an already cached chapter intentionally has no request.
+    await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 请求归属', exact: true }).click();
     await entered;
     await chooseBranch(page, { label: '尚无正文的分支' });
     await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(0);
@@ -3007,6 +3008,9 @@ test('阅读资料随章节累积，人物位置与物品状态同步，迟到�
   await tab(page, '故事图册'); await expect(page.locator('.story-image-card')).toHaveCount(2);
 
   // Hold an earlier response until a later chapter has already rendered.
+  // Reopen the work so this checks an uncached request, alongside the cache-hit coverage below.
+  await page.reload(); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+  await expect(page.locator('.manuscript h1')).toHaveText('第三章 灯塔');
   let release!: () => void; let started!: () => void; let delivered!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const held = new Promise<void>(resolve => { started = resolve; });
@@ -3037,6 +3041,99 @@ test('阅读资料随章节累积，人物位置与物品状态同步，迟到�
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect((await (await page.request.get(`/api/branches/${branchId}?chapterId=${secondId}`)).json()).readingChapterId).toBe(secondId);
   expect((await (await page.request.get(`/api/branches/${branchId}?chapterId=${thirdId}`)).json()).readingChapterId).toBe(thirdId);
+});
+
+test('视图和章节往返复用正文与章末资料，保留滚动且空闲轮询不重绘', async ({ page }, testInfo) => {
+  const project = await restoreToolbarStory(page, 'E2E 章节与视图缓存');
+  const chapterRequests = new Map<string, number>(); const materialRequests = new Map<string, number>();
+  page.on('request', request => {
+    if (request.method() !== 'GET') return; const url = new URL(request.url());
+    if (url.pathname.startsWith(`/api/branches/${project.mainBranchId}/chapters/`)) chapterRequests.set(url.pathname, (chapterRequests.get(url.pathname) ?? 0) + 1);
+    if (url.pathname === `/api/branches/${project.mainBranchId}` && url.searchParams.get('view') === 'reader') materialRequests.set(url.search, (materialRequests.get(url.search) ?? 0) + 1);
+  });
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+  await expect(page.locator('.manuscript h1')).toHaveText('长街');
+  for (const title of ['起点', '长街', '起点', '长街']) {
+    await page.locator('.chapter-item').filter({ hasText: title }).click(); await expect(page.locator('.manuscript h1')).toHaveText(title);
+    await expect(page.locator('.context-note')).toHaveText(`截至《${title}》的资料`);
+  }
+  expect([...chapterRequests.values()]).toEqual([1, 1]);
+  expect([...materialRequests.values()]).toEqual([1, 1]);
+  // Keep the exact DOM node, not merely an equivalent new copy of the prose.
+  await page.locator('.manuscript-wrap').evaluate(element => { element.scrollTop = 500; (window as any).__cachedManuscript = element.querySelector('.manuscript'); });
+  await expect.poll(() => page.locator('.manuscript-wrap').evaluate(element => element.scrollTop)).toBe(500);
+  await tab(page, '世界资料'); await expect(page.getByRole('heading', { name: '世界资料', exact: true })).toBeVisible();
+  await expect(page.locator('.writing-layout')).toBeHidden();
+  await tab(page, '地点关系'); await tab(page, '正文');
+  expect(await page.locator('.manuscript').evaluate(element => element === (window as any).__cachedManuscript)).toBe(true);
+  await expect.poll(() => page.locator('.manuscript-wrap').evaluate(element => element.scrollTop)).toBe(500);
+  await page.locator('.chapter-item').filter({ hasText: '起点' }).click(); await expect(page.locator('.manuscript h1')).toHaveText('起点');
+  await expect.poll(() => page.locator('.manuscript-wrap').evaluate(element => element.scrollTop)).toBe(0);
+  await page.locator('.chapter-item').filter({ hasText: '长街' }).click(); await expect(page.locator('.manuscript h1')).toHaveText('长街');
+  await expect.poll(() => page.locator('.manuscript-wrap').evaluate(element => element.scrollTop)).toBe(500);
+  await page.evaluate(() => {
+    (window as any).__proseMutations = 0;
+    const observer = new MutationObserver(records => { (window as any).__proseMutations += records.length; });
+    observer.observe(document.querySelector('.writing-layout')!, { subtree: true, childList: true, characterData: true });
+    (window as any).__proseObserver = observer;
+  });
+  await page.waitForTimeout(2300); // Observe a complete two-second polling interval.
+  expect(await page.evaluate(() => { (window as any).__proseObserver.disconnect(); return (window as any).__proseMutations; })).toBe(0);
+  expect([...chapterRequests.values()]).toEqual([1, 1]); expect([...materialRequests.values()].every(count => count === 1)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('navigation-cache-desktop.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await expect(page.getByRole('button', { name: '编辑', exact: true })).toBeVisible();
+  let release!: () => void; let reached!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }); const held = new Promise<void>(resolve => { reached = resolve; });
+  await page.route(url => url.pathname === `/api/branches/${project.mainBranchId}` && url.searchParams.get('view') === 'reader', async route => {
+    const response = await route.fetch(); reached(); await gate; await route.fulfill({ response });
+  });
+  try {
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await held;
+    await expect(page.locator('.manuscript h1')).toBeVisible(); await expect(page.locator('.manuscript h1')).toHaveText('长街');
+    await expect(page.getByText('正在打开故事世界…', { exact: true })).toHaveCount(0);
+  } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await tab(page, '世界资料'); await tab(page, '正文'); await expect(page.locator('.manuscript h1')).toHaveText('长街');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('navigation-cache-mobile.png'), animations: 'disabled' });
+});
+
+test('首次切章先显示正文，资料迟到仍隔离；保存新版本后不复用旧资料', async ({ page }) => {
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-cache-browser-'))); let backup: Buffer;
+  try {
+    const { project } = readingProgressStory(store); const data = store.exportProject(project.id); data.project.title = 'E2E 缓存版本与边界';
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: data, sources: [] }));
+  } finally { store.close(); }
+  const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'cached.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(restored.ok()).toBeTruthy(); const project = await restored.json();
+  const branch = await (await page.request.get(`/api/branches/${project.mainBranchId}?view=author`)).json(); const first = branch.state.chapters[0];
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await expect(page.locator('.manuscript h1')).toHaveText('第三章 灯塔');
+  let release!: () => void; let started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }); const held = new Promise<void>(resolve => { started = resolve; });
+  await page.route(url => url.pathname === `/api/branches/${project.mainBranchId}` && url.searchParams.get('chapterId') === first.id, async route => {
+    const response = await route.fetch(); started(); await gate; await route.fulfill({ response });
+  });
+  try {
+    await page.locator('.chapter-item').filter({ hasText: first.title }).click(); await held;
+    await expect(page.locator('.manuscript h1')).toHaveText(first.title); await expect(page.locator('.context-sidebar')).not.toContainText('阿岚');
+    release(); await expect(page.locator('.context-sidebar')).toContainText('林舟');
+  } finally { release(); await page.unrouteAll({ behavior: 'wait' }); }
+  await page.locator('.chapter-item').filter({ hasText: '第三章 灯塔' }).click(); await expect(page.locator('.manuscript h1')).toHaveText('第三章 灯塔');
+  await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await tab(page, '世界资料');
+  const person = page.locator('.entity-card').filter({ has: page.getByRole('button', { name: '林舟', exact: true }) });
+  await person.getByRole('button', { name: '编辑 林舟', exact: true }).click();
+  const modal = page.getByRole('dialog'); await modal.getByLabel('仅作者可见', { exact: true }).check(); await modal.getByRole('button', { name: '保存资料', exact: true }).click(); await expect(modal).toHaveCount(0);
+  await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
+  await expect(page.locator('.entity-card').filter({ has: page.getByRole('button', { name: '林舟', exact: true }) })).toHaveCount(0);
+  await tab(page, '正文'); await expect(page.locator('.context-sidebar')).not.toContainText('林舟');
+  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await page.locator('.chapter-item').filter({ hasText: first.title }).click(); await expect(page.locator('.manuscript h1')).toHaveText(first.title);
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  await page.getByLabel('章节标题', { exact: true }).fill('河岸修订'); await page.getByRole('button', { name: '保存正文', exact: true }).click();
+  await expect(page.locator('.manuscript h1')).toHaveText('河岸修订');
+  await page.locator('.chapter-item').filter({ hasText: '第三章 灯塔' }).click(); await page.locator('.chapter-item').filter({ hasText: '河岸修订' }).click();
+  await expect(page.locator('.manuscript h1')).toHaveText('河岸修订');
 });
 
 test('旧提取省略档案可见性时公开资料仍按章继承，原始快照与秘密不被改写', async ({ page }, testInfo) => {

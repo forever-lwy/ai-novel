@@ -557,6 +557,7 @@
 .workspace-toolbar-row>.workspace-tabs{flex:1;min-width:0;overflow-x:auto;scrollbar-width:none;border-bottom:0;position:static}
 .workspace-continue{flex-shrink:0;align-self:center;margin:0 20px 0 10px;min-height:36px}
 .workspace-main.is-text{overflow:hidden}
+.workspace .writing-layout[hidden]{display:none}
 .workspace-main.is-text>.writing-layout{display:flex;flex:1;min-height:0;overflow:hidden}
 .workspace-main.is-text .manuscript-wrap{overflow:auto;overscroll-behavior-y:contain}
 /* Reading chrome floats above a stable, full-height scroll area. Its initial
