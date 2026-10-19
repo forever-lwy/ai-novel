@@ -9,8 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { Store } from '../server/store';
-import { readingProgressStory, legacyReadingProgressStory } from './fixtures/reading-progress';
-import type { Entity } from '../shared/types';
+import { readingProgressStory, legacyReadingProgressStory, mixedVisibilityStory, readingPng } from './fixtures/reading-progress';
+import type { Entity, StoryImage } from '../shared/types';
 
 // These tests exercise the real UI/server against a local HTTP model fixture.
 // Passing them is not evidence of real-provider acceptance.
@@ -2907,6 +2907,50 @@ test('任务控制设置保留数字草稿，校验重试范围并保存秒到�
     await settings.getByRole('button', { name: '任务模型', exact: true }).click();
     await expect(retries).toHaveValue('3'); await expect(delay).toHaveValue('1.25');
   } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+test('同章公开人物和后补插画在阅读视图一致显示，秘密素材仍隔离', async ({ page }, testInfo) => {
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-mixed-reader-browser-'))); let backup: Buffer;
+  try {
+    const { project, branchId, chapters, allyId } = mixedVisibilityStory(store, true); const stamp = new Date().toISOString();
+    const state = store.readingState(branchId, chapters[1]);
+    const common = { projectId: project.id, branchId, baseRevisionId: store.getBranch(branchId).revisionId, chapterId: chapters[1], status: 'completed' as const, prompt: '作者提示词不进入阅读视图', automatic: false, visibility: 'public' as const, publicMaterial: true, mimeType: 'image/png' as const, createdAt: stamp, updatedAt: stamp };
+    const assets: StoryImage[] = [
+      { ...common, id: 'mixed-portrait', kind: 'portrait', entityId: allyId, title: '阿岚公开立绘', materialFactIds: state.entities.find(entity => entity.id === allyId)!.facts.filter(fact => fact.visibility === 'public').map(fact => fact.id) },
+      { ...common, id: 'mixed-cg', kind: 'cg', title: '同章公开场景', sourceText: store.chapter(branchId, chapters[1]).text },
+      { ...common, id: 'mixed-private', kind: 'cg', title: '作者私密插画', visibility: 'secret', publicMaterial: undefined, selection: { start: 0, end: 5 }, sourceText: store.chapter(branchId, chapters[1]).text.slice(0, 5) },
+    ];
+    for (const image of assets) store.images.insert(image, { bytes: readingPng, mimeType: 'image/png' });
+    store.updateImageReferences(branchId, store.getBranch(branchId).revisionId, chapters[1], state => {
+      state.imageIds = [...(state.imageIds ?? []), ...assets.map(image => image.id)]; state.activeImageIds = [...(state.activeImageIds ?? []), ...assets.map(image => image.id)];
+    }, '后补同章插画', revisionId => { for (const image of assets) store.images.update({ ...image, baseRevisionId: revisionId }); });
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: store.exportProject(project.id), sources: [] }));
+  } finally { store.close(); }
+  const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'mixed-reader.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(restored.ok(), await restored.text()).toBeTruthy(); const project = await restored.json();
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+  await page.locator('.chapter-item').filter({ hasText: '同章会面' }).click();
+  await expect(page.locator('.manuscript h1')).toHaveText('同章会面');
+  await expect(page.locator('.context-sidebar')).toContainText('林舟'); await expect(page.locator('.context-sidebar')).toContainText('阿岚');
+  await tab(page, '世界资料');
+  await expect(page.locator('.entity-card').filter({ has: page.getByRole('button', { name: '林舟', exact: true }) })).toHaveCount(1);
+  await expect(page.locator('.entity-card').filter({ has: page.getByRole('button', { name: '阿岚', exact: true }) })).toHaveCount(1);
+  await expect(page.locator('.workspace')).not.toContainText('未揭晓称号'); await expect(page.locator('.workspace')).not.toContainText('幕后身份答案');
+  await tab(page, '故事图册'); await expect(page.locator('.story-image-card')).toHaveCount(2);
+  await expect(page.locator('.story-image-grid')).toContainText('阿岚公开立绘'); await expect(page.locator('.story-image-grid')).toContainText('同章公开场景');
+  await expect(page.locator('.story-image-grid')).not.toContainText('作者私密插画');
+  for (const image of await (await page.request.get(`/api/branches/${project.mainBranchId}/images?chapterId=${(await (await page.request.get(`/api/branches/${project.mainBranchId}?view=author`)).json()).state.chapters[1].id}`)).json()) expect((await page.request.get(image.url)).status()).toBe(200);
+  await page.screenshot({ path: testInfo.outputPath('same-chapter-reader-desktop.png'), fullPage: true, animations: 'disabled' });
+  await page.setViewportSize({ width: 390, height: 844 }); await expect(page.locator('.story-image-card')).toHaveCount(2);
+  await page.screenshot({ path: testInfo.outputPath('same-chapter-reader-mobile.png'), fullPage: true, animations: 'disabled' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await expect(page.locator('.story-image-card')).toHaveCount(3);
+  const authorImages = await (await page.request.get(`/api/branches/${project.mainBranchId}/images?view=author`)).json();
+  const privateImage = authorImages.find((image: StoryImage) => image.visibility === 'secret');
+  expect((await page.request.get(`/api/branches/${project.mainBranchId}/images/${privateImage.id}/content`)).status()).toBe(404);
+  await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await expect(page.locator('.story-image-card')).toHaveCount(2);
+  await page.locator('.chapter-item').filter({ hasText: '河岸初遇' }).click(); await expect(page.locator('.story-image-card')).toHaveCount(0);
 });
 
 test('阅读资料随章节累积，人物位置与物品状态同步，迟到响应不覆盖当前进度', async ({ page }, testInfo) => {

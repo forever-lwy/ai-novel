@@ -717,7 +717,7 @@ export class StoryEngine {
       let lastFailure: unknown;
       for (;;) {
         job = this.live(jobId); const provider = this.provider('extraction'); const state = this.store.state(job.branchId);
-        const context = extractionContext(this.store.readingState(job.branchId, chapterId), blocks[blockIndex]);
+        const context = extractionContext(this.store.readingState(job.branchId, chapterId, false), blocks[blockIndex]);
         const retry = job.payload.extractionRetry as { chapterId?: string; blockIndex?: number; failedAttempts?: number } | undefined;
         const failedAttempts = retry?.chapterId === chapterId && retry.blockIndex === blockIndex ? Number(retry.failedAttempts ?? 0) : 0;
         const retryConfig = normalizeTaskSettings(this.getSettings().taskSettings).extraction;

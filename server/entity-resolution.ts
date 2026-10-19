@@ -98,14 +98,17 @@ export function reconcileExtractionEntities(state: StoryState, input: ExtractedE
   const entities = plans.map(({ indices, records, target }) => {
     const candidates = indices.map(index => source[index]);
     const allNames = [...new Map([...records, ...candidates].flatMap(namesOf).map(name => [normalizeEntityName(name), name])).values()];
+    const publicCandidates = candidates.filter(entity => entity.visibility === 'public');
+    const publicRecord = records.some(entity => entity.visibility === 'public');
+    const disclosedNames = new Set([...records.filter(entity => entity.visibility === 'public'), ...publicCandidates].flatMap(namesOf).map(normalizeEntityName));
     // Upgrade an unnamed person's descriptive label only after an explicit alias bridge to a new personal name.
     if (target && !target.locked && target.kind === 'character' && placeholderName(target)) {
       const knownNames = new Set(namesOf(target).map(normalizeEntityName));
-      const named = candidates.find(candidate => confirmedName(candidate) && (candidate.nameStatus === 'confirmed' || !knownNames.has(normalizeEntityName(candidate.name))) && candidate.aliases.some(alias => normalizeEntityName(alias) === normalizeEntityName(target.name)));
+      const named = (publicRecord ? publicCandidates : candidates).find(candidate => confirmedName(candidate) && (candidate.nameStatus === 'confirmed' || !knownNames.has(normalizeEntityName(candidate.name))) && candidate.aliases.some(alias => normalizeEntityName(alias) === normalizeEntityName(target.name)));
       if (named) { target.name = named.name.trim(); target.nameStatus = 'confirmed'; }
     }
     const canonical = target?.name ?? (candidates[0].kind === 'character' ? candidates.find(candidate => candidate.nameStatus === 'confirmed')?.name ?? candidates.find(confirmedName)?.name : undefined) ?? candidates[0].name.trim();
-    const aliases = allNames.filter(name => normalizeEntityName(name) !== normalizeEntityName(canonical));
+    const aliases = allNames.filter(name => normalizeEntityName(name) !== normalizeEntityName(canonical) && (!publicRecord && !publicCandidates.length || disclosedNames.has(normalizeEntityName(name))));
     if (target) {
       for (const record of records) {
         if (record.id === target.id) continue;
@@ -117,7 +120,7 @@ export function reconcileExtractionEntities(state: StoryState, input: ExtractedE
         }
         if (!target.locked) {
           if (!target.description) target.description = record.description;
-          if (record.visibility === 'secret') target.visibility = 'secret';
+          if (record.visibility === 'public') target.visibility = 'public';
           if (target.isMainSource !== 'author') {
             if (record.isMainSource === 'author' && record.isMain !== undefined) { target.isMain = record.isMain; target.isMainSource = 'author'; }
             else if (record.isMain) { target.isMain = true; target.isMainSource = 'extraction'; }
@@ -133,7 +136,7 @@ export function reconcileExtractionEntities(state: StoryState, input: ExtractedE
     const isMain = target?.locked || target?.isMainSource === 'author' ? target.isMain : (target?.isMain || candidates.some(candidate => candidate.isMain)) ? true : target?.isMain ?? candidates.find(candidate => candidate.isMain !== undefined)?.isMain;
     return {
       kind: candidates[0].kind, name: canonical, aliases, description: latestDescription, ...(nameStatus !== undefined ? { nameStatus } : {}), ...(isMain !== undefined ? { isMain } : {}),
-      visibility: candidates.some(entity => entity.visibility === 'secret') ? 'secret' as const : 'public' as const,
+      visibility: publicCandidates.length ? 'public' as const : 'secret' as const,
       facts: [...new Map(candidates.flatMap(entity => entity.facts.map(fact => ({ ...fact, visibility: entity.visibility === 'secret' ? 'secret' as const : fact.visibility }))).map(fact => [factKey(fact), fact])).values()],
     };
   });

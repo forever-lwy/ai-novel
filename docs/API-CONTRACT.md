@@ -45,6 +45,9 @@
 
 ## 图片接口
 
+- 公开插画使用与阅读卡片相同的公开事实投影，按关联章节过滤秘密、未来事实和后章状态。内部 `StoryImage.publicMaterial` 标记此素材边界，`materialFactIds/materialRelationIds` 保存实际使用的依据；公开图不会因后来新增的无关秘密事实消失，但已用依据被隐藏或资料实体不再公开时仍不可读取。新字段随完整备份校验和重映射，阅读响应隐藏这些内部字段。旧图缺少标记时沿用保守检查，明确的秘密图、作者补充要求及私密参考不自动公开。
+- 绑定 `chapterId` 的图片登记、启用、停用和删除会新增该章及后续的章末快照，与当前图册原子保存；早章阅读不因图片在后续章节写完后才生成而遗漏。更早章节、已有分支与旧快照保留；缺少匹配正文的章末记录时拒绝操作，不拼入最新世界资料。
+
 - `StoryState.activeImageIds?:string[]` 为当前版本的图片选择，必须是 `imageIds` 的无重复子集；缺省为旧作品兼容选择，按明确关联对象取最新成功图，显式空数组表示全部停用。`StoryImage.active` 为当前故事线投影，不修改历史图片资产。人物／实体按合并后的明确实体 ID 分组，地图一组，CG 按章节及准确选段范围分组，同组最多启用一张。新变体保留旧选择；首次对象的待生成图成功后启用。
 - `PUT /branches/:id/images/:imageId/active?view=author {baseRevisionId,active:boolean} -> {view:BranchView,images:StoryImage[]}`：启用／停用当前故事线图片，启用一张会停用同组其他图片；调用方替换整份图片列表并更新版本。新图片须生成完成才能手动启用；不调用任何模型。
 - `DELETE /branches/:id/images/:imageId?view=author {baseRevisionId} -> {view:BranchView,images:StoryImage[]}`：从当前版本的图册及启用列表移除；历史及其他故事线引用保留像素，不跨版本破坏资料。删除当前图片不自动换用其他图片。排队／运行任务按所属故事线处理取消与迟到输出，删除后不能通过当前线内容 URL 读取。
@@ -88,6 +91,9 @@
 - `POST /branches/:id/chapter-titles/apply?view=author {baseRevisionId,changes:[{chapterId,originalTitle,title}]} -> BranchView`：一次应用1～20条作者选择的改名；作者可编辑建议。验证当前版本、原标题、归属、无重复且标题有实际变化，再事务提交。只改当前线章节引用中的 title，并同步受影响的章末快照；不可变正文、资料、摘要、原文件及其他线不改。可回退，完整备份保留。版本冲突或未结束任务返回409。
 
 ## 文字与作品接口
+
+- 阅读投影按同一路径的成功公开提取累计出场，修复档案被后续秘密更新持续隐藏的问题；必须匹配唯一实体和一致的公开非未来事实，不使用失败／跨线输出，不改写作者原始档案。新提取在公开事实出现时提升非人工秘密档案，不因秘密更新降低此前公开状态；秘密来源的事实、称呼和关系仍单独隐藏。
+- `Revision.restoredFromRevisionId?` 记录回退实际恢复的历史版本，完整审计父链仍保留；阅读章末快照与公开提取证据沿恢复来源读取，避免删除图片、人工秘密等被回退操作继续影响恢复后的阅读资料。完整备份重映射该关联，来源必须属于正常父链中的历史版本，非法或循环来源拒绝恢复。
 
 - 认证接口见上文“登录与安全边界”，初始密码由服务器环境提供；改密与会话撤销不进入作品备份。
 - GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],branchTree:BranchTreeEntry[],sources:Source[]}。GET 默认隐藏 premise（初始作者设定），显式 ?view=author 返回。

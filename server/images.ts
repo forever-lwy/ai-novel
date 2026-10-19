@@ -8,6 +8,7 @@ import { imageEntity, imageReferences, type ImageContent, validateImageContent }
 import { Store, HttpError } from './store.js';
 import { imageModelCapabilities } from '../shared/image-capabilities.js';
 import { optimizeImagePrompt, resolveImageParameters, type ImagePromptOptimizer, type ImagePromptInput } from './image-prompts.js';
+import { readerEntityMaterial } from './reader-materials.js';
 
 const stamp = () => new Date().toISOString();
 const entityText = (entity: Entity) => `${entity.kind}：${entity.name}\n${entity.description}\n${entity.facts.map(fact => `${fact.temporal === 'future' ? '未来设定：' : ''}${fact.text}`).join('\n')}`;
@@ -52,7 +53,7 @@ export class ImageService {
     const entityId = image.entityId ? imageEntity(state, image.entityId)?.id : undefined;
     const referenceCharacters = image.referenceCharacters?.map(character => { const current = imageEntity(state, character.entityId); return { ...character, entityId: current?.id ?? character.entityId, name: current?.name ?? character.name }; });
     const active = this.store.images.active(image, state);
-    return author ? { ...image, entityId, referenceCharacters, active, url } : { ...image, entityId, active, prompt: '', sourceText: undefined, selection: undefined, referenceImageId: undefined, selectedReferenceImageIds: undefined, error: undefined, material: undefined, instruction: undefined, materialEntityIds: undefined, referenceImageIds: undefined, referenceEntityIds: undefined, referenceCharacters: undefined, generationParameters: undefined, promptStatus: undefined, optimizedAt: undefined, url };
+    return author ? { ...image, entityId, referenceCharacters, active, url } : { ...image, entityId, active, prompt: '', sourceText: undefined, selection: undefined, referenceImageId: undefined, selectedReferenceImageIds: undefined, error: undefined, material: undefined, instruction: undefined, materialEntityIds: undefined, materialFactIds: undefined, materialRelationIds: undefined, publicMaterial: undefined, referenceImageIds: undefined, referenceEntityIds: undefined, referenceCharacters: undefined, generationParameters: undefined, promptStatus: undefined, optimizedAt: undefined, url };
   }
   list(branchId: string, author = false, chapterId?: string): StoryImage[] {
     const branch = this.store.getBranch(branchId); const state = author ? this.store.state(branchId) : this.store.readingState(branchId, chapterId);
@@ -65,16 +66,19 @@ export class ImageService {
   setActive(branchId: string, imageId: string, baseRevisionId: string, active: boolean): { view: BranchView; images: StoryImage[] } {
     this.available(branchId, baseRevisionId); const image = this.find(branchId, imageId, true);
     if (active && image.status !== 'completed') throw new HttpError('图片完成后才能启用', 409);
-    const state = this.store.state(branchId); this.store.images.hydrate(state); const group = this.store.images.groupKey(image, state);
-    state.activeImageIds = state.activeImageIds!.filter(id => { const selected = this.store.images.get(id); return id !== imageId && (!active || !selected || this.store.images.groupKey(selected, state) !== group); });
-    if (active) state.activeImageIds.push(imageId);
-    const view = this.store.commit(branchId, baseRevisionId, state, `${active ? '启用' : '停用'}图片：${image.title}`); this.stopInvalidRuns(branchId); this.pump();
+    const view = this.store.updateImageReferences(branchId, baseRevisionId, image.chapterId, state => {
+      if (!state.imageIds?.includes(imageId)) return;
+      this.store.images.hydrate(state); const group = this.store.images.groupKey(image, state);
+      state.activeImageIds = state.activeImageIds!.filter(id => { const selected = this.store.images.get(id); return id !== imageId && (!active || !selected || this.store.images.groupKey(selected, state) !== group); });
+      if (active) state.activeImageIds.push(imageId);
+    }, `${active ? '启用' : '停用'}图片：${image.title}`); this.stopInvalidRuns(branchId); this.pump();
     return { view, images: this.list(branchId, true) };
   }
   delete(branchId: string, imageId: string, baseRevisionId: string): { view: BranchView; images: StoryImage[] } {
-    this.available(branchId, baseRevisionId); const image = this.find(branchId, imageId, true); const state = this.store.state(branchId); this.store.images.hydrate(state);
-    state.imageIds = (state.imageIds ?? []).filter(id => id !== imageId); state.activeImageIds = state.activeImageIds!.filter(id => id !== imageId);
-    const view = this.store.commit(branchId, baseRevisionId, state, `删除当前故事线图片：${image.title}`); this.stopInvalidRuns(branchId); this.pump();
+    this.available(branchId, baseRevisionId); const image = this.find(branchId, imageId, true);
+    const view = this.store.updateImageReferences(branchId, baseRevisionId, image.chapterId, state => {
+      this.store.images.hydrate(state); state.imageIds = (state.imageIds ?? []).filter(id => id !== imageId); state.activeImageIds = state.activeImageIds!.filter(id => id !== imageId);
+    }, `删除当前故事线图片：${image.title}`); this.stopInvalidRuns(branchId); this.pump();
     return { view, images: this.list(branchId, true) };
   }
   private stopInvalidRuns(branchId: string) {
@@ -89,20 +93,27 @@ export class ImageService {
     if (input.selection && input.kind !== 'cg') throw new HttpError('正文选区只能用于生成 CG');
     if (input.entityId && (input.kind === 'cg' || input.kind === 'map')) throw new HttpError('CG 和地图不能绑定单个资料实体');
     let title = '', material = '', visibility: StoryImage['visibility'] = input.instruction?.trim() || extraDescription.trim() ? 'secret' : 'public';
+    const publicState = visibility === 'public' ? this.store.readingState(branchId, input.chapterId) : undefined;
+    const publicEntities = publicState?.entities.flatMap(entity => readerEntityMaterial(entity, publicState.chapters) ?? []) ?? [];
+    let materialEntityIds: string[] | undefined; const materialFactIds: string[] = []; const materialRelationIds: string[] = [];
     let sourceText: string | undefined;
     if (input.kind === 'portrait' || input.kind === 'entity') {
       const entity = state.entities.find(item => item.id === input.entityId && !item.mergedInto);
       if (!entity || input.kind === 'portrait' && entity.kind !== 'character') throw new HttpError('请选择当前故事线中对应的人物或资料');
-      title = `${entity.name} · ${input.kind === 'portrait' ? '立绘' : '资料图'}`; material = entityText(entity);
-      if (!publicEntity(entity)) visibility = 'secret';
+      const disclosed = publicEntities.find(item => item.id === entity.id);
+      title = `${disclosed?.name ?? entity.name} · ${input.kind === 'portrait' ? '立绘' : '资料图'}`; material = entityText(disclosed ?? entity);
+      materialFactIds.push(...(disclosed?.facts.map(fact => fact.id) ?? []));
+      if (!disclosed) visibility = 'secret';
     } else if (input.kind === 'map') {
-      const locations = state.entities.filter(entity => entity.kind === 'location' && !entity.mergedInto);
+      const locations = (publicEntities.some(entity => entity.kind === 'location') ? publicEntities : state.entities).filter(entity => entity.kind === 'location' && !entity.mergedInto);
       if (!locations.length) throw new HttpError('请先添加地点资料再生成地图');
       title = '世界地图'; material = locations.map(entityText).join('\n\n');
       const locationIds = new Set(locations.map(entity => entity.id));
-      const relations = state.relations.filter(relation => locationIds.has(relation.fromId) && locationIds.has(relation.toId));
+      const relations = (publicState ?? state).relations.filter(relation => locationIds.has(relation.fromId) && locationIds.has(relation.toId) && (!publicState || relation.visibility === 'public' && (!relation.citation || publicState.chapters.some(chapter => chapter.id === relation.citation!.chapterId))));
       material += '\n地点关系：\n' + relations.map(relation => `${locations.find(entity => entity.id === relation.fromId)!.name} — ${relation.label} — ${locations.find(entity => entity.id === relation.toId)!.name}`).join('\n');
-      if (locations.some(entity => !publicEntity(entity)) || relations.some(relation => relation.visibility === 'secret')) visibility = 'secret';
+      materialEntityIds = locations.map(entity => entity.id);
+      materialFactIds.push(...locations.flatMap(entity => entity.facts.map(fact => fact.id))); materialRelationIds.push(...relations.map(relation => relation.id));
+      if (!publicState || locations.some(entity => !publicEntities.some(disclosed => disclosed.id === entity.id))) visibility = 'secret';
     } else {
       if (!input.chapterId) throw new HttpError('请选择用于生成 CG 的章节');
       const chapter = this.store.chapter(branchId, input.chapterId); sourceText = chapter.text;
@@ -123,7 +134,7 @@ export class ImageService {
       const referenceEntityId = reference.entityId ? imageEntity(state, reference.entityId)?.id : undefined;
       if (reference.kind !== input.kind || referenceEntityId !== input.entityId) throw new HttpError('参考图片必须属于同一种图片及对应资料');
       if (input.kind === 'cg' && (reference.chapterId !== input.chapterId || reference.sourceText !== sourceText)) throw new HttpError('参考 CG 必须绑定相同章节和剧情范围');
-      if (reference.visibility === 'secret') visibility = 'secret';
+      if (reference.visibility === 'secret' || publicState && !this.store.images.visible(reference, publicState, false, new Set(), true)) visibility = 'secret';
     }
     if (input.selectedReferenceImageIds !== undefined) {
       const ids = input.selectedReferenceImageIds; const caps = imageModelCapabilities(config);
@@ -133,25 +144,27 @@ export class ImageService {
         const reference = this.find(branchId, id, true);
         if (reference.status !== 'completed' || !this.store.images.content(id)) throw new HttpError('所选参考图片尚未完成或内容不存在');
         if (!this.store.images.active(reference, state)) throw new HttpError('所选参考图片未启用，请先在故事图册启用');
-        if (reference.visibility === 'secret') visibility = 'secret';
+        if (reference.visibility === 'secret' || publicState && !this.store.images.visible(reference, publicState, false, new Set(), true)) visibility = 'secret';
       }
     }
     const task = input.kind === 'portrait' ? '生成人物全身立绘，突出人物外貌、服装与气质。' : input.kind === 'map' ? '依据地点与地理关系生成地图，不要擅自增加未确认的城市或地点。' : input.kind === 'cg' ? '将已发生的剧情绘制为场景 CG，保持人物与环境一致。' : '依据资料生成对应实体的插画。';
     const description = [task, material, extraDescription && `写作模型对画面的要求：${extraDescription}`].filter(Boolean).join('\n\n');
     if (description.length > 100000) throw new HttpError('生图素材过长，请选择较短的剧情或精简资料');
-    return { id: randomUUID(), projectId: branch.projectId, branchId, baseRevisionId: input.baseRevisionId, kind: input.kind, status: 'queued', title, prompt: '', material: description, instruction: input.instruction?.trim() || '', promptStatus: 'pending', entityId: input.entityId, chapterId: input.chapterId, selection: input.selection, sourceText, referenceImageId: input.referenceImageId, selectedReferenceImageIds: input.selectedReferenceImageIds?.slice(), automatic, visibility, createdAt: stamp(), updatedAt: stamp() };
+    return { id: randomUUID(), projectId: branch.projectId, branchId, baseRevisionId: input.baseRevisionId, kind: input.kind, status: 'queued', title, prompt: '', material: description, instruction: input.instruction?.trim() || '', promptStatus: 'pending', entityId: input.entityId, chapterId: input.chapterId, selection: input.selection, sourceText, referenceImageId: input.referenceImageId, selectedReferenceImageIds: input.selectedReferenceImageIds?.slice(), automatic, visibility, publicMaterial: visibility === 'public', materialEntityIds, materialFactIds, materialRelationIds, createdAt: stamp(), updatedAt: stamp() };
   }
-  private register(branchId: string, baseRevisionId: string, state: StoryState, prepared: StoryImage[], checkpoint?: (revisionId: string) => void, retryOf?: string): { view: BranchView; images: StoryImage[] } {
-    this.store.images.hydrate(state); const previousImages = (state.imageIds ?? []).flatMap(id => this.store.images.get(id) ?? []);
-    const groups = new Set(previousImages.map(image => this.store.images.groupKey(image, state)));
-    for (const image of prepared) {
-      const group = this.store.images.groupKey(image, state);
-      const transferIntent = retryOf && state.activeImageIds!.includes(retryOf) && !previousImages.some(old => this.store.images.groupKey(old, state) === group && old.status === 'completed');
-      if (!groups.has(group) || transferIntent) { state.activeImageIds = state.activeImageIds!.filter(id => { const old = this.store.images.get(id); return !old || this.store.images.groupKey(old, state) !== group; }); state.activeImageIds.push(image.id); }
-      groups.add(group);
-    }
-    state.imageIds = [...(state.imageIds ?? []), ...prepared.map(image => image.id)];
-    const view = this.store.commit(branchId, baseRevisionId, state, prepared.length === 1 ? `生成图片：${prepared[0].title}` : '生成本章插画', revisionId => {
+  private register(branchId: string, baseRevisionId: string, prepared: StoryImage[], checkpoint?: (revisionId: string) => void, retryOf?: string): { view: BranchView; images: StoryImage[] } {
+    const registerInto = (state: StoryState) => {
+      this.store.images.hydrate(state); const previousImages = (state.imageIds ?? []).flatMap(id => this.store.images.get(id) ?? []);
+      const groups = new Set(previousImages.map(image => this.store.images.groupKey(image, state)));
+      for (const image of prepared) {
+        const group = this.store.images.groupKey(image, state);
+        const transferIntent = retryOf && state.activeImageIds!.includes(retryOf) && !previousImages.some(old => this.store.images.groupKey(old, state) === group && old.status === 'completed');
+        if (!groups.has(group) || transferIntent) { state.activeImageIds = state.activeImageIds!.filter(id => { const old = this.store.images.get(id); return !old || this.store.images.groupKey(old, state) !== group; }); state.activeImageIds.push(image.id); }
+        groups.add(group);
+      }
+      state.imageIds = [...(state.imageIds ?? []), ...prepared.map(image => image.id)];
+    };
+    const view = this.store.updateImageReferences(branchId, baseRevisionId, prepared[0]?.chapterId, registerInto, prepared.length === 1 ? `生成图片：${prepared[0].title}` : '生成本章插画', revisionId => {
       for (const image of prepared) { image.baseRevisionId = revisionId; this.store.images.insert(image); }
       checkpoint?.(revisionId);
     });
@@ -160,7 +173,7 @@ export class ImageService {
   }
   generate(branchId: string, input: ImageGenerateInput): { view: BranchView; image: StoryImage } {
     this.available(branchId, input.baseRevisionId); this.configuration(); const state = this.store.state(branchId);
-    const result = this.register(branchId, input.baseRevisionId, state, [this.prepare(branchId, input, false, state)]); return { view: result.view, image: result.images[0] };
+    const result = this.register(branchId, input.baseRevisionId, [this.prepare(branchId, input, false, state)]); return { view: result.view, image: result.images[0] };
   }
   retry(branchId: string, imageId: string, baseRevisionId: string): { view: BranchView; image: StoryImage } {
     this.available(branchId, baseRevisionId); this.configuration(); const previous = this.find(branchId, imageId, true);
@@ -175,7 +188,7 @@ export class ImageService {
       if (this.sameStoryMaterial(previous, branchId) && previous.material !== undefined) { image.material = previous.material; image.instruction = previous.instruction ?? image.instruction; }
       image.material ??= previous.prompt; image.prompt = ''; image.promptStatus = 'pending';
     }
-    const result = this.register(branchId, baseRevisionId, this.store.state(branchId), [image], undefined, previous.id); return { view: result.view, image: result.images[0] };
+    const result = this.register(branchId, baseRevisionId, [image], undefined, previous.id); return { view: result.view, image: result.images[0] };
   }
   cancel(branchId: string, imageId: string): StoryImage {
     const image = this.find(branchId, imageId, true);
@@ -209,7 +222,7 @@ export class ImageService {
     }
     if (configured.config.autoPortrait) for (const entityId of newCharacterIds) addPortrait(entityId);
     if (!prepared.length) return undefined;
-    return this.register(branchId, baseRevisionId, state, prepared, checkpoint);
+    return this.register(branchId, baseRevisionId, prepared, checkpoint);
   }
   private pump() {
     while (!this.closed && this.runs.size < 2 && this.queue.length) {
@@ -229,11 +242,11 @@ export class ImageService {
   private waitingForPortrait(image: StoryImage) {
     if (image.selectedReferenceImageIds !== undefined) return false;
     const configured = this.configuration(true); if (!configured || image.kind !== 'cg' || configured.config.useCharacterReferences === false || imageModelCapabilities(configured.config).referenceMode === 'none') return false;
-    const state = this.store.state(image.branchId); const candidates = new Set(this.sceneCharacters(image, state).map(entity => entity.id));
+    const state = this.promptState(image); const candidates = new Set(this.sceneCharacters(image, state).map(entity => entity.id));
     return this.store.images.activeIds(state).some(id => { const portrait = this.store.images.get(id); return portrait?.kind === 'portrait' && portrait.entityId && candidates.has(imageEntity(state, portrait.entityId)?.id ?? '') && ['queued', 'running'].includes(portrait.status); });
   }
   private promptInput(image: StoryImage, config: NonNullable<Settings['imageSettings']>): ImagePromptInput {
-    const state = this.store.revisionState(image.baseRevisionId); const caps = imageModelCapabilities(config);
+    const state = this.promptState(image); const caps = imageModelCapabilities(config);
     const current = this.store.state(image.branchId);
     const references: ImagePromptInput['references'] = image.referenceImageId ? [{ label: '待修改的原图', imageId: image.referenceImageId }] : [];
     for (const id of image.selectedReferenceImageIds ?? []) {
@@ -242,7 +255,7 @@ export class ImageService {
       references.push({ imageId: id, entityId: entity?.id, label });
     }
     const characters = this.sceneCharacters(image, state).map(entity => {
-      const portraits = (state.imageIds ?? []).map(id => this.store.images.get(id)).filter((asset): asset is StoryImage => Boolean(asset && asset.kind === 'portrait' && this.store.images.active(asset, state) && this.store.images.active(asset, current) && asset.entityId && imageEntity(state, asset.entityId)?.id === entity.id));
+      const portraits = (state.imageIds ?? []).map(id => this.store.images.get(id)).filter((asset): asset is StoryImage => Boolean(asset && asset.kind === 'portrait' && this.store.images.active(asset, state) && this.store.images.active(asset, current) && (!image.publicMaterial || this.store.images.visible(asset, this.store.readingState(image.branchId, image.chapterId), false)) && asset.entityId && imageEntity(state, asset.entityId)?.id === entity.id));
       const asset = portraits.find(portrait => this.store.images.content(portrait.id));
       return { entityId: entity.id, name: entity.name, description: entityText(entity), imageId: image.selectedReferenceImageIds === undefined && config.useCharacterReferences !== false && caps.referenceMode !== 'none' ? asset?.id : undefined };
     });
@@ -252,6 +265,12 @@ export class ImageService {
       material += `\n\n仅用于辨认代词所指人物的前文，不作为绘制场景：\n${chapter.text.slice(Math.max(0, image.selection.start - 2000), image.selection.start)}`;
     }
     return { kind: image.kind, material, instruction: image.instruction ?? '', stylePrompt: config.stylePrompt, config, characters, references, ...(image.selectedReferenceImageIds !== undefined ? { referenceSelection: 'manual' as const } : {}) };
+  }
+  private promptState(image: StoryImage): StoryState {
+    if (!image.publicMaterial) return this.store.revisionState(image.baseRevisionId);
+    const state = this.store.readingState(image.branchId, image.chapterId);
+    state.entities = state.entities.flatMap(entity => readerEntityMaterial(entity, state.chapters) ?? []);
+    return state;
   }
   private current(image: StoryImage, branchId = image.branchId) {
     const state = this.store.state(branchId);
@@ -273,7 +292,9 @@ export class ImageService {
       const { provider, config } = this.configuration()!;
       image.status = 'running'; this.save(image);
       if (image.promptStatus !== 'completed') {
-        const input = this.promptInput(image, config); image.materialEntityIds = input.characters.map(character => character.entityId); this.save(image);
+        const input = this.promptInput(image, config); image.materialEntityIds = [...new Set([...(image.materialEntityIds ?? []), ...input.characters.map(character => character.entityId)])];
+        if (image.publicMaterial) image.materialFactIds = [...new Set([...(image.materialFactIds ?? []), ...this.promptState(image).entities.filter(entity => image.materialEntityIds!.includes(entity.id)).flatMap(entity => entity.facts.map(fact => fact.id))])];
+        this.save(image);
         const result = await this.optimizer(this.getSettings(), input, signal);
         const stored = this.store.images.get(image.id);
         if (!stored || stored.status !== 'running' || signal.aborted || this.closed || this.deletingProjects.has(image.projectId)) return;
@@ -286,7 +307,7 @@ export class ImageService {
         }) : result.referenceEntityIds.flatMap(id => { const character = input.characters.find(character => character.entityId === id && character.imageId); return character ? [{ entityId: character.entityId, imageId: character.imageId!, name: character.name }] : []; }).slice(0, Math.max(0, Math.min(caps.maxCharacterReferences, caps.maxReferences - input.references.length)));
         image.referenceCharacters = referenceCharacters; image.referenceEntityIds = referenceCharacters.map(character => character.entityId);
         image.referenceImageIds = [...input.references.map(reference => reference.imageId), ...(!manual ? referenceCharacters.map(character => character.imageId) : [])];
-        if (image.referenceImageIds.some(id => this.store.images.get(id)?.visibility === 'secret') || input.characters.some(character => !publicEntity(imageEntity(this.store.revisionState(image.baseRevisionId), character.entityId)!))) image.visibility = 'secret';
+        if (image.referenceImageIds.some(id => this.store.images.get(id)?.visibility === 'secret') || !image.publicMaterial && input.characters.some(character => !publicEntity(imageEntity(this.store.revisionState(image.baseRevisionId), character.entityId)!))) image.visibility = 'secret';
         const labels = [...input.references.map(reference => reference.label), ...(!manual ? referenceCharacters.map(character => `人物 ${character.name} 的已有立绘，保持该人物外貌与服装特征`) : [])];
         image.prompt = result.prompt + (labels.length ? '\n\n参考图片按发送顺序对应：\n' + labels.map((label, index) => `参考图 ${index + 1}：${label}`).join('\n') : '');
         image.generationParameters = resolveImageParameters(config, result.parameters); image.promptStatus = 'completed'; image.optimizedAt = stamp(); this.save(image);

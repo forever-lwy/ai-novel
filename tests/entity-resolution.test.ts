@@ -84,7 +84,8 @@ describe('entity identity resolution', () => {
     state.foreshadows.push({ id: 'hint', title: '绿色斗篷', detail: '', status: 'planted', revealCondition: '', relatedEntityIds: ['unnamed', 'named'] });
     const result = reconcileExtractionEntities(state, [extracted('琥珀', ['混血精灵少女'])]);
     expect(result.issues).toEqual([]); expect(result.redirects.get('unnamed')).toBe('named'); expect(anonymous.mergedInto).toBe('named');
-    expect(named.facts.map(item => item.id)).toEqual(['newer', 'older']); expect(named.visibility).toBe('secret');
+    expect(named.facts.map(item => item.id)).toEqual(['newer', 'older']); expect(named.visibility).toBe('public');
+    expect(named.facts.find(item => item.id === 'older')!.visibility).toBe('secret'); expect(state.relations[0].visibility).toBe('secret');
     expect(state.relations[0].fromId).toBe('named'); expect(state.foreshadows[0].relatedEntityIds).toEqual(['named']);
     expect(state.entities[2].mergedInto).toBe('named'); expect(findEntitiesByName(state, '林间旅人')[0].id).toBe('named');
   });

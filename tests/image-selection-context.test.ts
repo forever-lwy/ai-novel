@@ -405,9 +405,9 @@ describe('historical CG privacy and prose-context boundaries', () => {
     expect(ctx.images.list(ctx.branchId).some(image => image.id === cg.id)).toBe(true);
     const planned = ctx.store.state(ctx.branchId); planned.entities[0].facts.push({ id: 'future-identity', text: '林月将在下一章公布身份', visibility: 'public', temporal: 'future', certainty: 'fact' });
     ctx.store.commit(ctx.branchId, ctx.base(), planned, '新增未来身份资料');
-    expect(ctx.images.list(ctx.branchId).some(image => image.id === cg.id)).toBe(false);
-    expect(ctx.store.view(ctx.branchId).state.imageIds).toEqual([]);
-    expect(() => ctx.images.content(ctx.branchId, cg.id)).toThrow('不包含');
+    expect(ctx.images.list(ctx.branchId).some(image => image.id === cg.id)).toBe(true);
+    expect(ctx.store.view(ctx.branchId).state.imageIds).toEqual([cg.id]);
+    expect(ctx.images.content(ctx.branchId, cg.id).bytes).toEqual(png);
   });
 
   it('never serializes inactive gallery metadata or pixels into prose context or story lookup results', async () => {

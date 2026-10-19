@@ -77,6 +77,14 @@ describe('compatibility for omitted entity visibility in saved extraction result
     expect(store.view(branchId, false, chapters[0]).state.entities).toHaveLength(3);
   });
 
+  it('preserves an explicitly private author fact even when it remains unlocked', () => {
+    const { store, branchId, chapters } = make();
+    const view = store.view(branchId, true); const person = view.state.entities.find(entity => entity.name === '林夏')!;
+    store.updateEntity(branchId, view.branch.revisionId, { ...person, facts: person.facts.map(fact => ({ ...fact, visibility: 'secret', locked: false })) });
+    expect(store.view(branchId).state.entities.some(entity => entity.id === person.id)).toBe(false);
+    expect(store.view(branchId, false, chapters[3]).state.entities.some(entity => entity.id === person.id)).toBe(true);
+  });
+
   it('does not use failed outputs, another lineage, missing provenance or changed citations as recovery evidence', () => {
     for (const scenario of ['not-applied', 'foreign-lineage', 'no-provenance', 'changed-citation']) {
       const { store, branchId, chapters, outputIds } = make(); const output = store.outputs.get(outputIds[0])!;

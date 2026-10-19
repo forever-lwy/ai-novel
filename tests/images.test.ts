@@ -85,11 +85,13 @@ describe('durable story illustrations', () => {
     expect(ctx.service.list(ctx.branchId, true)[0].entityId).toBe('other-character'); expect(ctx.store.images.get(image.image.id)?.entityId).toBe('character-1');
     ctx.store.rollback(ctx.branchId, { baseRevisionId: ctx.base(), revisionId: beforeMerge }); expect(ctx.service.list(ctx.branchId, true)[0].entityId).toBe('character-1');
   });
-  it('hides existing public portraits and maps when current materials gain secrets', async () => {
+  it('keeps public illustrations when unrelated secret facts are added, but respects secret source entities', async () => {
     const ctx = setup(); const state = ctx.store.state(ctx.branchId); state.entities.push({ ...character('town', '山城'), kind: 'location' }); ctx.store.commit(ctx.branchId, ctx.base(), state, '地点');
     const portrait = ctx.service.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'portrait', entityId: 'character-1' }); const map = ctx.service.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'map' });
     await until(() => [portrait.image.id, map.image.id].every(id => ctx.store.images.get(id)?.status === 'completed')); expect(ctx.service.list(ctx.branchId)).toHaveLength(2);
     const changed = ctx.store.state(ctx.branchId); changed.entities[0].facts.push({ id: 'secret-fact', text: '她将背叛同伴', temporal: 'future', certainty: 'fact', visibility: 'secret' }); changed.relations.push({ id: 'secret-route', fromId: 'town', toId: 'town', label: '城下密道', visibility: 'secret' }); ctx.store.commit(ctx.branchId, ctx.base(), changed, '秘密资料');
+    expect(ctx.service.list(ctx.branchId)).toHaveLength(2); expect(ctx.service.content(ctx.branchId, map.image.id).bytes).toEqual(png);
+    const privateSources = ctx.store.state(ctx.branchId); privateSources.entities[0].visibility = 'secret'; privateSources.entities[1].visibility = 'secret'; ctx.store.commit(ctx.branchId, ctx.base(), privateSources, '素材档案设为秘密');
     expect(ctx.service.list(ctx.branchId)).toEqual([]); expect(ctx.store.view(ctx.branchId).state.imageIds).toEqual([]); expect(() => ctx.service.content(ctx.branchId, map.image.id)).toThrow('不包含');
   });
   it('schedules a single automatic batch using explicit names, new characters and actual prose', async () => {

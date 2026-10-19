@@ -8,6 +8,7 @@ import { modelOutputSchema, OutputStore } from './output-store.js';
 import { findEntitiesByName, reconcileExtractionEntities } from './entity-resolution.js';
 import { rebuildCharacterProfileDescription, normalizeProfileAttribute } from './extraction.js';
 import { repairLegacyExtractionVisibility } from './legacy-extraction-visibility.js';
+import { readerEntityMaterial } from './reader-materials.js';
 import { clearChapterMaterials, removeEntities } from './chapter-maintenance.js';
 import { ImageStore, imageBackupSchema, imageEntity, imageReferences, validateImageContent } from './image-store.js';
 import { emptyState, type Branch, type BranchTreeEntry, type BranchView, type Chapter, type ChapterRef, type Entity, type ExtractionResult, type Foreshadow, type Job, type Mode, type Outline, type OutputIssue, type Project, type Revision, type StoryState, type WritingActivity, type ModelActivityEvent, type RpgSetup, type StoryReference, type OriginalReferenceData } from '../shared/types.js';
@@ -73,7 +74,7 @@ const sourceReferenceSchema = z.object({ branchId: z.string().min(1), revisionId
 const stateSchema = z.object({ sourceReference: sourceReferenceSchema.optional(), rpg: rpgSessionSchema.optional(), activeImageIds: z.array(z.string().min(1)).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
 const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
 const writingActivitySchema = z.object({ id: z.string().min(1), kind: z.enum(['thinking', 'tool']), text: z.string().optional(), thinkingSource: z.enum(['native', 'preset']).optional(), thinkingTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), name: z.string().optional(), arguments: z.record(z.string(), z.unknown()).optional(), result: z.unknown().optional(), status: z.enum(['running', 'completed', 'failed']), error: z.string().optional(), proseOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() });
-const backupSchema = z.object({ images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), forkChapterTitle: z.string().max(500).optional(), createdAt: z.string(), deletedAt: z.string().datetime().optional() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: z.unknown().optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1).max(RESTORE_MAX_REVISIONS), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
+const backupSchema = z.object({ images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), forkChapterTitle: z.string().max(500).optional(), createdAt: z.string(), deletedAt: z.string().datetime().optional() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), restoredFromRevisionId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: z.unknown().optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1).max(RESTORE_MAX_REVISIONS), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
 
 /** Decode each historical state once, sharing one cumulative expansion budget. */
 export function readBackupStates(entries: readonly { state?: unknown; snapshot?: string }[], overrides: Partial<RestoreLimits> = {}): StoryState[] {
@@ -255,28 +256,37 @@ export class Store {
   }
   revision(revisionId: string): Revision { const row = this.db.prepare('SELECT data FROM revisions WHERE id=?').get(revisionId); if (!row) throw new HttpError('版本不存在', 404); return parse(row.data); }
   private rawRevisionState(revisionId: string): StoryState { const row = this.db.prepare('SELECT state FROM revisions WHERE id=?').get(revisionId); if (!row) throw new HttpError('版本不存在', 404); return unpack(row.state); }
-  revisionState(revisionId: string): StoryState {
+  revisionState(revisionId: string, reader = false): StoryState {
     const version = `${this.db.prepare('SELECT total_changes() AS changes').get()!.changes}:${this.db.prepare('PRAGMA data_version').get()!.data_version}`;
     if (version !== this.legacyVisibilityVersion) { this.legacyVisibilityVersion = version; this.legacyVisibilityCache.clear(); }
-    const cached = this.legacyVisibilityCache.get(revisionId); if (cached) return clone(cached);
+    const cacheKey = `${revisionId}:${reader}`;
+    const cached = this.legacyVisibilityCache.get(cacheKey); if (cached) return clone(cached);
     const state = this.rawRevisionState(revisionId);
     const projectId = this.getBranch(this.revision(revisionId).branchId, true).projectId;
     const outputs = this.db.prepare("SELECT data FROM model_outputs WHERE project_id=? AND stage='extraction' AND status='applied'").all(projectId).map(row => parse<import('../shared/types.js').ModelOutputRecord>(row.data));
-    if (!outputs.some(output => output.adjustments?.some(change => /^entities\[\d+\]\.visibility$/.test(change.path) && change.message === '省略字段已补为 "secret"'))) return state;
-    const lineage: Revision[] = []; const positions = new Map<string, number>(); let current: string | undefined = revisionId;
-    while (current && !positions.has(current)) { positions.set(current, lineage.length); const revision = this.revision(current); lineage.push(revision); current = revision.parentId; }
+    if (!reader && !outputs.some(output => output.adjustments?.some(change => /^entities\[\d+\]\.visibility$/.test(change.path) && change.message === '省略字段已补为 "secret"'))) return state;
+    const lineage = this.materialHistory(revisionId); const positions = new Map(lineage.map((revision, index) => [revision.id, index]));
     const included = outputs.filter(output => positions.has(output.baseRevisionId)).sort((a, b) => positions.get(b.baseRevisionId)! - positions.get(a.baseRevisionId)! || (a.blockIndex ?? 0) - (b.blockIndex ?? 0));
-    const authorSecrets = new Set<string>();
+    const { authorSecrets, authorEdits, authorSecretFacts } = this.authorEntityVisibility(lineage);
+    repairLegacyExtractionVisibility(state, included, authorSecrets, { cumulativePublic: reader, authorEdits, authorSecretFacts });
+    if (this.legacyVisibilityCache.size >= 8) this.legacyVisibilityCache.delete(this.legacyVisibilityCache.keys().next().value!);
+    this.legacyVisibilityCache.set(cacheKey, clone(state));
+    return state;
+  }
+  private authorEntityVisibility(lineage: Revision[]) {
+    const authorSecrets = new Set<string>(); const authorEdits = new Set<string>(); const authorSecretFacts = new Set<string>();
     for (const revision of [...lineage].reverse()) if (revision.label === '人工修改资料与锁定状态') {
       const after = this.rawRevisionState(revision.id); const before = revision.parentId ? this.rawRevisionState(revision.parentId) : emptyState();
       for (const entity of after.entities) if (JSON.stringify(entity) !== JSON.stringify(before.entities.find(previous => previous.id === entity.id))) {
+        authorEdits.add(entity.id);
         if (entity.visibility === 'secret') authorSecrets.add(entity.id); else authorSecrets.delete(entity.id);
+        const previous = before.entities.find(previous => previous.id === entity.id);
+        for (const fact of entity.facts) if (JSON.stringify(fact) !== JSON.stringify(previous?.facts.find(old => old.id === fact.id))) {
+          if (fact.visibility === 'secret') authorSecretFacts.add(fact.id); else authorSecretFacts.delete(fact.id);
+        }
       }
     }
-    repairLegacyExtractionVisibility(state, included, authorSecrets);
-    if (this.legacyVisibilityCache.size >= 8) this.legacyVisibilityCache.delete(this.legacyVisibilityCache.keys().next().value!);
-    this.legacyVisibilityCache.set(revisionId, clone(state));
-    return state;
+    return { authorSecrets, authorEdits, authorSecretFacts };
   }
   state(branchId: string): StoryState { return this.revisionState(this.getBranch(branchId).revisionId); }
   assertVersion(branchId: string, base: string): Branch { const branch = this.getBranch(branchId); if (!base || branch.revisionId !== base) throw new HttpError('故事线已有新版本，请刷新后重试；当前草稿不会被覆盖', 409); return branch; }
@@ -299,14 +309,20 @@ export class Store {
     while (current && !visited.has(current)) { visited.add(current); const revision = this.revision(current); output.push(revision); current = revision.parentId; }
     return output;
   }
+  /** Keep audit history intact while reading canon from the version restored by a rollback. */
+  private materialHistory(revisionId: string): Revision[] {
+    const output: Revision[] = []; const visited = new Set<string>(); let current: string | undefined = revisionId;
+    while (current && !visited.has(current)) { visited.add(current); const revision = this.revision(current); output.push(revision); current = revision.restoredFromRevisionId ?? revision.parentId; }
+    return output;
+  }
   /** Keep the historical state, including old names, merges and current attributes, intact. */
-  readingState(branchId: string, chapterId?: string): StoryState {
+  readingState(branchId: string, chapterId?: string, reader = true): StoryState {
     const current = this.state(branchId);
-    if (!chapterId) return current;
+    if (!chapterId) return this.revisionState(this.getBranch(branchId).revisionId, reader);
     const index = current.chapters.findIndex(chapter => chapter.id === chapterId);
     if (index < 0) throw new HttpError('阅读进度章节不属于当前故事线', 404);
-    if (index === current.chapters.length - 1) return current;
-    return this.atBoundary(branchId, index + 1, '显示阅读资料');
+    if (index === current.chapters.length - 1) return this.revisionState(this.getBranch(branchId).revisionId, reader);
+    return this.atBoundary(branchId, index + 1, '显示阅读资料', reader);
   }
   view(branchId: string, author = false, chapterId?: string): BranchView {
     const branch = this.getBranch(branchId); const state = author ? this.state(branchId) : this.readingState(branchId, chapterId);
@@ -316,14 +332,8 @@ export class Store {
       delete state.sourceReference;
       const visibleImageIds = (state.imageIds ?? []).filter(imageId => { const image = this.images.get(imageId); return image && this.images.visible(image, state, false); });
       const included = new Set(state.chapters.map(chapter => chapter.id));
-      const publicFact = (fact: Entity['facts'][number]) => fact.visibility === 'public' && fact.temporal !== 'future' && (!fact.citation || included.has(fact.citation.chapterId));
       state.outline = emptyState().outline; state.foreshadows = [];
-      state.entities = state.entities.filter(e => e.visibility === 'public' && !e.mergedInto && (e.locked || e.facts.some(publicFact))).map(e => {
-        const facts = e.facts.filter(publicFact).sort((a, b) => Number(b.temporal === 'current') - Number(a.temporal === 'current'));
-        const profile = facts.filter(fact => fact.temporal !== 'past' || fact.attribute && normalizeProfileAttribute(fact.attribute) === 'major_event');
-        const description = e.facts.length ? rebuildCharacterProfileDescription({ ...e, locked: false, facts, description: (profile.length ? profile : facts).map(fact => fact.text).join('；') }) : e.locked ? e.description : '';
-        return { ...e, description, facts };
-      });
+      state.entities = state.entities.flatMap(entity => readerEntityMaterial(entity, state.chapters) ?? []);
       const visible = new Set(state.entities.map(e => e.id)); state.relations = state.relations.filter(r => r.visibility === 'public' && visible.has(r.fromId) && visible.has(r.toId) && (!r.citation || included.has(r.citation.chapterId)));
       // Navigation still includes later prose, but its materials never enter this reader snapshot.
       state.chapters = this.state(branchId).chapters.map(c => ({ ...c, summary: '' }));
@@ -359,11 +369,11 @@ export class Store {
     return { ...ref, summary: '', text: String(row.text) };
   }
   /** Revisions are chapter-boundary snapshots; never reconstruct earlier canon from the latest world. */
-  private atBoundary(branchId: string, count: number, purpose = '创建分支'): StoryState {
+  private atBoundary(branchId: string, count: number, purpose = '创建分支', reader = false): StoryState {
     const current = this.state(branchId);
-    for (const revision of this.history(branchId)) {
+    for (const revision of this.materialHistory(this.getBranch(branchId).revisionId)) {
       if (revision.chapterCount !== count) continue;
-      const state = this.revisionState(revision.id);
+      const state = this.revisionState(revision.id, reader);
       if (state.chapters.length === count && state.chapters.every((chapter, index) => chapter.id === current.chapters[index]?.id)) return state;
     }
     throw new HttpError(`未找到该章节的历史状态，不能安全${purpose}`, 409);
@@ -371,7 +381,7 @@ export class Store {
   /** Collect the newest snapshot of each unchanged prose prefix in one history scan. */
   private chapterTimeline(branchId: string, fromCount: number): StoryState[] {
     const current = this.state(branchId); const byCount = new Map<number, StoryState>([[current.chapters.length, current]]);
-    for (const revision of this.history(branchId)) {
+    for (const revision of this.materialHistory(this.getBranch(branchId).revisionId)) {
       if (revision.chapterCount < fromCount || byCount.has(revision.chapterCount)) continue;
       const state = this.revisionState(revision.id);
       if (state.chapters.every((chapter, index) => chapter.id === current.chapters[index]?.id)) byCount.set(state.chapters.length, state);
@@ -383,6 +393,15 @@ export class Store {
       states.push(state);
     }
     return states;
+  }
+  /** Illustrations added for an older chapter also belong to its later reading boundaries. */
+  updateImageReferences(branchId: string, base: string, chapterId: string | undefined, update: (state: StoryState) => void, label: string, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
+    this.assertVersion(branchId, base); const current = this.state(branchId);
+    const index = chapterId ? current.chapters.findIndex(chapter => chapter.id === chapterId) : current.chapters.length - 1;
+    if (chapterId && index < 0) throw new HttpError('图片关联章节不属于当前故事线', 404);
+    const states = index >= 0 && index < current.chapters.length - 1 ? this.chapterTimeline(branchId, index + 1) : [current];
+    for (const state of states) update(state);
+    return this.commit(branchId, base, states.at(-1)!, label, checkpoint, states.slice(0, -1));
   }
   clearChapterExtraction(branchId: string, base: string, chapterId: string, checkpoint?: (revisionId: string, branchId: string) => void): BranchView {
     return this.changeChapterMaterials(branchId, base, chapterId, false, checkpoint);
@@ -633,7 +652,10 @@ export class Store {
   rollback(branchId: string, input: { baseRevisionId: string; revisionId: string }): BranchView {
     this.assertVersion(branchId, input.baseRevisionId);
     if (!this.history(branchId).some(r => r.id === input.revisionId)) throw new HttpError('只能回退到本故事线的历史版本');
-    return this.commit(branchId, input.baseRevisionId, this.revisionState(input.revisionId), '回退正文与世界资料');
+    return this.commit(branchId, input.baseRevisionId, this.revisionState(input.revisionId), '回退正文与世界资料', revisionId => {
+      const revision = { ...this.revision(revisionId), restoredFromRevisionId: input.revisionId };
+      this.db.prepare('UPDATE revisions SET data=? WHERE id=?').run(JSON.stringify(revision), revisionId);
+    });
   }
   updateOutline(branchId: string, base: string, outline: Outline): BranchView {
     this.assertVersion(branchId, base); const state = this.state(branchId);
@@ -710,10 +732,15 @@ export class Store {
     }
     for (const clue of current.foreshadows) identities.set(`clue:${normalize(clue.title)}`, clue.id);
     const lines = paragraphs(this.chapter(branchId, chapterId).text);
-    for (const state of states) this.extractIntoState(state, chapterId, result, complete, lines, allocate);
+    const lineage = this.materialHistory(this.getBranch(branchId).revisionId);
+    for (const state of states) {
+      const boundary = lineage.findIndex(revision => revision.chapterCount === state.chapters.length && this.rawRevisionState(revision.id).chapters.every((chapter, index) => chapter.id === state.chapters[index]?.id));
+      const { authorSecrets } = this.authorEntityVisibility(lineage.slice(boundary));
+      this.extractIntoState(state, chapterId, result, complete, lines, allocate, authorSecrets);
+    }
     return this.commit(branchId, base, states.at(-1)!, `${complete ? '完成资料整理' : '整理章节片段'}：${current.chapters[index].title}`, checkpoint, states.slice(0, -1));
   }
-  private extractIntoState(state: StoryState, chapterId: string, result: ExtractionResult, complete: boolean, lines: string[], allocate: (key: string) => string) {
+  private extractIntoState(state: StoryState, chapterId: string, result: ExtractionResult, complete: boolean, lines: string[], allocate: (key: string) => string, authorSecrets: Set<string>) {
     const ref = state.chapters.find(chapter => chapter.id === chapterId)!;
     const citation = (paragraph: number, quote: string) => ({ chapterId, paragraph, quote });
     const issues: OutputIssue[] = [];
@@ -739,7 +766,16 @@ export class Store {
       if (!entity) { entity = { id: allocate(`entity:${extracted.kind}:${normalize(extracted.name)}`), kind: extracted.kind, name: extracted.name, aliases: extracted.aliases, description: '', visibility: extracted.visibility, locked: false, facts: [], nameStatus: extracted.nameStatus, isMain: extracted.isMain, isMainSource: extracted.isMain !== undefined ? 'extraction' : undefined }; state.entities.push(entity); }
       // Locked records retain human prose and aliases; evidence may be appended, never overwritten.
       const laterEvidence = entity.facts.some(fact => state.chapters.findIndex(chapter => chapter.id === fact.citation?.chapterId) > state.chapters.findIndex(chapter => chapter.id === chapterId));
-      if (!entity.locked) { entity.aliases = [...new Set([...entity.aliases, ...extracted.aliases])].filter(alias => alias !== entity.name); if (!laterEvidence && extracted.description.trim() && extracted.facts.some(f => f.temporal === 'current')) entity.description = extracted.description; if (extracted.visibility === 'secret') entity.visibility = 'secret'; if (!laterEvidence && (extracted.nameStatus === 'confirmed' || !entity.nameStatus)) entity.nameStatus = extracted.nameStatus; if (!laterEvidence && entity.isMainSource !== 'author' && extracted.isMain !== undefined) { entity.isMain = extracted.isMain; entity.isMainSource = 'extraction'; } }
+      if (!entity.locked) {
+        if (authorSecrets.has(entity.id)) entity.visibility = 'secret';
+        if (extracted.visibility === 'public' || entity.visibility === 'secret') {
+          entity.aliases = [...new Set([...entity.aliases, ...extracted.aliases])].filter(alias => alias !== entity.name);
+          if (!laterEvidence && extracted.description.trim() && extracted.facts.some(f => f.temporal === 'current')) entity.description = extracted.description;
+          if (!laterEvidence && (extracted.nameStatus === 'confirmed' || !entity.nameStatus)) entity.nameStatus = extracted.nameStatus;
+          if (!laterEvidence && entity.isMainSource !== 'author' && extracted.isMain !== undefined) { entity.isMain = extracted.isMain; entity.isMainSource = 'extraction'; }
+        }
+        if (!authorSecrets.has(entity.id) && extracted.visibility === 'public' && extracted.facts.some(fact => fact.visibility === 'public' && fact.temporal !== 'future')) entity.visibility = 'public';
+      }
       for (const fact of [...extracted.facts].sort((a, b) => a.paragraph - b.paragraph)) {
         if (entity.facts.some(f => f.text === fact.text && f.attribute === fact.attribute && f.citation?.chapterId === chapterId && f.citation.paragraph === fact.paragraph && f.citation.quote === fact.quote)) continue;
         let conflict = ambiguous || (entity.locked && fact.temporal === 'current');
@@ -752,7 +788,7 @@ export class Store {
       }
     }
     for (const entity of state.entities.filter(entity => !entity.mergedInto)) { reconcileCurrentAttributes(entity, state.chapters); entity.description = rebuildCharacterProfileDescription(entity); }
-    const secretIds = new Set(reconciled.entities.filter(entity => entity.visibility === 'secret').flatMap(entity => resolve(entity.name, entity.kind).map(match => match.id)));
+    const secretIds = new Set(result.entities.filter(entity => entity.visibility === 'secret').flatMap(entity => resolve(entity.name, entity.kind).map(match => match.id)));
     for (const [index, extracted] of result.relations.entries()) {
       const from = resolve(extracted.from); const to = resolve(extracted.to);
       for (const [field, matches] of [['from', from], ['to', to]] as const) if (matches.length !== 1) issues.push({ path: `relations[${index}].${field}`, message: '关系端点必须匹配唯一的已有或本次提取实体，请核对名称与别名', paragraph: extracted.paragraph, quote: extracted.quote, sourceText: lines[extracted.paragraph - 1] });
@@ -805,7 +841,7 @@ export class Store {
         return sourceIdMap[sourceId];
       });
       if (key === 'writingActivities' && Array.isArray(value)) return value.map(entry => ({ jobId: map.get(entry.jobId) ?? entry.jobId, activities: clone(entry.activities) }));
-      if (typeof value === 'string') { if (key === 'sourceId') return Object.hasOwn(sourceIdMap, value) ? sourceIdMap[value] : undefined; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds' || key === 'imageIds' || key === 'activeImageIds' || key === 'imageStartingEntityIds' || key === 'imagesRequestedFor' || key === 'selectedReferenceImageIds' || key === 'referenceImageIds' || key === 'referenceEntityIds' || key === 'materialEntityIds') return map.get(value) ?? value; return value; }
+      if (typeof value === 'string') { if (key === 'sourceId') return Object.hasOwn(sourceIdMap, value) ? sourceIdMap[value] : undefined; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds' || key === 'imageIds' || key === 'activeImageIds' || key === 'imageStartingEntityIds' || key === 'imagesRequestedFor' || key === 'selectedReferenceImageIds' || key === 'referenceImageIds' || key === 'referenceEntityIds' || key === 'materialEntityIds' || key === 'materialFactIds' || key === 'materialRelationIds') return map.get(value) ?? value; return value; }
       if (Array.isArray(value)) return value.map(v => remap(v, key)); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, remap(v, k)])); return value;
     };
     const restored = remap({ ...data, revisions: data.revisions.map(entry => ({ revision: entry.revision })) }) as typeof data;
@@ -832,6 +868,7 @@ export class Store {
       const baseState = restoredState(restored.revisions.indexOf(imageRevision));
       if (imageRevision.revision.branchId !== image.branchId || !baseState.imageIds?.includes(image.id) || image.entityId && !baseState.entities.some(entity => entity.id === image.entityId) || image.chapterId && !baseState.chapters.some(chapter => chapter.id === image.chapterId)) throw new HttpError('备份图片起始版本无效');
       if (references.some(referenceId => !baseState.imageIds?.includes(referenceId) || imagesById.get(referenceId)?.status !== 'completed') || [...(image.materialEntityIds ?? []), ...(image.referenceEntityIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.entityId)].some(entityId => !baseState.entities.some(entity => entity.id === entityId))) throw new HttpError('备份图片参考素材不属于起始版本');
+      if (image.materialFactIds?.some(id => !baseState.entities.some(entity => entity.facts.some(fact => fact.id === id))) || image.materialRelationIds?.some(id => !baseState.relations.some(relation => relation.id === id))) throw new HttpError('备份图片公开依据不属于起始版本');
       if ((image.referenceCharacters ?? []).some(character => { const portrait = imagesById.get(character.imageId); return portrait?.kind !== 'portrait' || !portrait.entityId || imageEntity(baseState, portrait.entityId)?.id !== imageEntity(baseState, character.entityId)?.id; })) throw new HttpError('备份人物参考图与身份不匹配');
       if (image.kind === 'cg') {
         const chapter = restored.chapters.find(chapter => chapter.id === image.chapterId);
@@ -873,6 +910,11 @@ export class Store {
     const parents = new Map(restored.revisions.map(r => [r.revision.id, r.revision.parentId]));
     const validatedParents = new Set<string>();
     for (const revision of restored.revisions) { const visited = new Set<string>(); let current: string | undefined = revision.revision.id; while (current && !validatedParents.has(current)) { if (visited.has(current)) throw new HttpError('备份版本存在循环引用'); visited.add(current); current = parents.get(current); } for (const revisionId of visited) validatedParents.add(revisionId); }
+    for (const { revision } of restored.revisions) if (revision.restoredFromRevisionId) {
+      let ancestor = revision.parentId;
+      while (ancestor && ancestor !== revision.restoredFromRevisionId) ancestor = parents.get(ancestor);
+      if (!ancestor) throw new HttpError('备份回退来源必须是同一路径的历史版本');
+    }
     const jobs = new Map(restored.jobs.map(j => [j.id, j])); const importPositions = new Set<string>();
     if (jobs.size !== restored.jobs.length || restored.jobs.some(j => j.projectId !== restored.project.id || !branchIds.has(j.branchId) || !revisionIds.has(j.baseRevisionId) || j.progress > j.total)) throw new HttpError('备份存在无效任务关联');
     for (const state of states) if (state.rpg?.nextChoice) {

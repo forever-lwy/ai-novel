@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import type { Entity, StoryImage, StoryState } from '../shared/types.js';
+import { readerEntityMaterial } from './reader-materials.js';
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const generationParametersSchema = z.object({
@@ -21,10 +22,11 @@ export const imageSchema = z.object({
   selectedReferenceImageIds: z.array(z.string().min(1)).max(16).optional(),
   referenceImageIds: z.array(z.string().min(1)).max(16).optional(), referenceEntityIds: z.array(z.string().min(1)).max(16).optional(),
   materialEntityIds: z.array(z.string().min(1)).max(10000).optional(),
+  materialFactIds: z.array(z.string().min(1)).max(100000).optional(), materialRelationIds: z.array(z.string().min(1)).max(100000).optional(),
   referenceCharacters: z.array(z.object({ entityId: z.string().min(1), imageId: z.string().min(1), name: z.string().max(300) })).max(16).optional(),
   generationParameters: generationParametersSchema.optional(),
   promptStatus: z.enum(['pending', 'completed']).optional(), optimizedAt: z.string().optional(),
-  automatic: z.boolean(), visibility: z.enum(['public', 'secret']), createdAt: z.string(), updatedAt: z.string(), error: z.string().optional(),
+  automatic: z.boolean(), visibility: z.enum(['public', 'secret']), publicMaterial: z.boolean().optional(), createdAt: z.string(), updatedAt: z.string(), error: z.string().optional(),
   mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']).optional(),
 });
 export const imageBackupSchema = z.object({ image: imageSchema, contentBase64: z.string().max(Math.ceil(MAX_IMAGE_BYTES / 3) * 4).optional() });
@@ -46,18 +48,23 @@ export function imageEntity(state: StoryState, entityId: string): Entity | undef
   return entity && !entity.mergedInto ? entity : undefined;
 }
 export function imageReferences(image: StoryImage): string[] { return [...new Set([...(image.referenceImageId ? [image.referenceImageId] : []), ...(image.selectedReferenceImageIds ?? []), ...(image.referenceImageIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.imageId)])]; }
-function readerEntity(entity: Entity | undefined): boolean {
-  return Boolean(entity && entity.visibility === 'public' && (entity.locked || entity.facts.some(fact => fact.visibility === 'public' && fact.temporal !== 'future')) && !entity.facts.some(fact => fact.visibility === 'secret' || fact.temporal === 'future'));
+function readerEntity(entity: Entity | undefined, state: StoryState, publicMaterial: boolean): boolean {
+  return Boolean(entity && readerEntityMaterial(entity, state.chapters) && (publicMaterial || !entity.facts.some(fact => fact.visibility === 'secret' || fact.temporal === 'future')));
 }
 export function imageVisible(image: StoryImage, state: StoryState, author: boolean, historicalSource = false): boolean {
   if (!historicalSource && !state.imageIds?.includes(image.id)) return false;
   if (!historicalSource && image.chapterId && !state.chapters.some(chapter => chapter.id === image.chapterId)) return false;
   if (image.entityId) {
     const entity = imageEntity(state, image.entityId);
-    if (!entity || !author && !readerEntity(entity)) return false;
+    if (!entity || !author && !readerEntity(entity, state, image.publicMaterial === true)) return false;
   }
-  if ([...(image.materialEntityIds ?? []), ...(image.referenceEntityIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.entityId)].some(entityId => { const entity = imageEntity(state, entityId); return !entity || !author && !readerEntity(entity); })) return false;
-  if (!author && image.kind === 'map') {
+  if ([...(image.materialEntityIds ?? []), ...(image.referenceEntityIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.entityId)].some(entityId => { const entity = imageEntity(state, entityId); return !entity || !author && !readerEntity(entity, state, image.publicMaterial === true); })) return false;
+  if (!author && image.publicMaterial) {
+    const facts = new Map(state.entities.flatMap(entity => entity.facts.map(fact => [fact.id, fact] as const)));
+    if (image.materialFactIds?.some(id => { const fact = facts.get(id); return !fact || fact.visibility !== 'public' || fact.temporal === 'future' || fact.citation && !state.chapters.some(chapter => chapter.id === fact.citation!.chapterId); })) return false;
+    if (image.materialRelationIds?.some(id => !state.relations.some(relation => relation.id === id && relation.visibility === 'public'))) return false;
+  }
+  if (!author && image.kind === 'map' && !image.publicMaterial) {
     const locations = state.entities.filter(entity => entity.kind === 'location' && !entity.mergedInto); const ids = new Set(locations.map(entity => entity.id));
     if (locations.some(entity => entity.visibility === 'secret' || entity.facts.some(fact => fact.visibility === 'secret' || fact.temporal === 'future')) || state.relations.some(relation => ids.has(relation.fromId) && ids.has(relation.toId) && relation.visibility === 'secret')) return false;
   }

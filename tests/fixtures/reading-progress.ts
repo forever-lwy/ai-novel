@@ -71,3 +71,39 @@ export function legacyReadingProgressStory(store: Store) {
   for (const id of outputIds) store.outputs.update(id, { status: 'applied' });
   return { project, branchId, chapters, outputIds, counts };
 }
+
+/** Public appearances mixed with secret updates, optionally retaining the old sticky-secret bug. */
+export function mixedVisibilityStory(store: Store, legacy = false) {
+  const project = store.createProject({ title: '公开出场与私密事实验收' }); const branchId = project.mainBranchId;
+  const stamp = new Date().toISOString();
+  const job: Job = { id: randomUUID(), projectId: project.id, branchId, baseRevisionId: store.getBranch(branchId).revisionId, kind: 'extract', status: 'completed', progress: 3, total: 3, message: 'fixture', inputTokens: 0, outputTokens: 0, payload: {}, createdAt: stamp, updatedAt: stamp };
+  store.db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?)').run(job.id, branchId, project.id, job.status, JSON.stringify(job));
+  const chapters: string[] = []; const outputIds: string[] = [];
+  const first = '林舟身穿青衣抵达河岸，阿岚尚未公开身份。';
+  const traveler = entity('character', '林舟', first, { appearance: '身穿青衣', location: '目前位于河岸' });
+  traveler.facts.push({ text: '幕后身份答案', attribute: 'identity', paragraph: 1, quote: first, visibility: 'secret', temporal: 'current', certainty: 'fact' }, { text: '未来登塔安排', paragraph: 1, quote: first, visibility: 'public', temporal: 'future', certainty: 'fact' });
+  const hidden = entity('character', '阿岚', first, { identity: '尚未公开的身份' }); hidden.visibility = 'secret';
+  const second = '阿岚来到河岸，林舟藏好密信。';
+  const secretUpdate = entity('character', '林舟', second, { identity: '密信中的身份答案' }); secretUpdate.visibility = 'secret'; secretUpdate.aliases = ['未揭晓称号'];
+  const third = '林舟在河岸举起青伞。';
+  const contents: [string, string, ExtractedEntity[]][] = [
+    ['河岸初遇', first, [traveler, hidden, entity('location', '河岸', first, { location: '河岸位于城外' })]],
+    ['同章会面', second, [entity('character', '阿岚', second, { location: '目前位于河岸' }), secretUpdate]],
+    ['雨中青伞', third, [entity('character', '林舟', third, { appearance: '手持青伞' })]],
+  ];
+  for (const [title, text, entities] of contents) {
+    const saved = store.saveChapter(branchId, { baseRevisionId: store.getBranch(branchId).revisionId, title, text });
+    const chapterId = saved.state.chapters.at(-1)!.id; chapters.push(chapterId);
+    const result: ExtractionResult = { summary: text, entities, relations: [], foreshadows: [] };
+    const output = store.outputs.create({ projectId: project.id, branchId, jobId: job.id, chapterId, baseRevisionId: saved.branch.revisionId, stage: 'extraction', blockIndex: 0 }, { text: JSON.stringify(result), rawResponse: JSON.stringify(result), inputTokens: 0, outputTokens: 0 });
+    store.outputs.update(output.id, { normalizedText: JSON.stringify(result) }); outputIds.push(output.id);
+    store.applyExtraction(branchId, saved.branch.revisionId, chapterId, result, true); store.outputs.update(output.id, { status: 'applied' });
+  }
+  const state = store.state(branchId); const personId = state.entities.find(entity => entity.name === '林舟')!.id; const allyId = state.entities.find(entity => entity.name === '阿岚')!.id;
+  if (legacy) {
+    for (const entity of state.entities.filter(entity => entity.kind === 'character')) entity.visibility = 'secret';
+    state.entities.find(entity => entity.id === personId)!.aliases.push('未揭晓称号');
+    store.commit(branchId, store.getBranch(branchId).revisionId, state, '旧提取状态夹具');
+  }
+  return { project, branchId, chapters, outputIds, personId, allyId };
+}
