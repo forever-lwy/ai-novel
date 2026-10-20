@@ -2765,15 +2765,17 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
   });
 }
 
-test('图片加载中跨页共用请求，失败可重开，迟到作者图片不进入阅读视图', async ({ page }) => {
+for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) test(`图片加载中跨页共用请求，等待和失败分开显示，迟到作者图片不进入阅读视图（${viewport.width}px）`, async ({ page }, testInfo) => {
   const { project, parked, portrait } = await imageCacheStory(page);
-  let finish!: () => void; let delayedRequests = 0; let failedRequests = 0;
+  await page.setViewportSize(viewport);
+  let finish!: () => void; let finishPortrait!: () => void; let delayedRequests = 0; let failedRequests = 0;
   const gate = new Promise<void>(resolve => { finish = resolve; });
+  const portraitGate = new Promise<void>(resolve => { finishPortrait = resolve; });
   await page.route(`**/images/${parked.id}/content?view=author`, async route => { delayedRequests++; await gate; await route.continue(); });
   await page.route(`**/images/${portrait.id}/content?view=author`, async route => {
     failedRequests++;
     if (failedRequests === 1) await route.fulfill({ status: 503, contentType: 'text/plain', body: 'temporary fixture failure' });
-    else await route.continue();
+    else { await portraitGate; await route.continue(); }
   });
   try {
     await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
@@ -2781,11 +2783,31 @@ test('图片加载中跨页共用请求，失败可重开，迟到作者图片�
     await tab(page, '故事图册');
     const parkedCard = page.locator(`[data-image-id="${parked.id}"]`);
     await parkedCard.scrollIntoViewIfNeeded(); await expect.poll(() => delayedRequests).toBe(1);
+    await expect(parkedCard.getByRole('status')).toHaveText('图片加载中…');
+    await expect(parkedCard.locator('img')).toHaveCSS('visibility', 'hidden');
+    const failedCard = page.locator(`[data-image-id="${portrait.id}"]`);
+    await expect(failedCard.getByRole('status')).toHaveText('图片加载失败');
+    await expect(failedCard.locator('img')).toHaveCSS('visibility', 'hidden');
     await parkedCard.getByRole('button', { name: /^查看图片/ }).click();
     await expect(page.getByTestId('image-viewer').locator('img')).toHaveAttribute('data-image-load-state', 'pending');
+    await expect(page.getByTestId('image-viewer').locator('.cached-image-status')).toHaveText('图片加载中…');
+    await page.screenshot({ path: testInfo.outputPath(`image-loading-viewer-${viewport.width}.png`), animations: 'disabled' });
     expect(delayedRequests).toBe(1);
     await page.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
-    await tab(page, '世界资料'); await expectImagePixels(page.locator('.entity-image-preview img'));
+    await tab(page, '世界资料');
+    const person = page.locator('.entity-card').filter({ has: page.getByRole('button', { name: '林舟', exact: true }) });
+    await person.locator('.entity-image-preview').scrollIntoViewIfNeeded();
+    await expect(person.locator('.entity-image-preview').getByRole('status')).toHaveText('图片加载中…');
+    await person.getByRole('button', { name: '重新绘制', exact: true }).click();
+    const referenceDialog = page.getByRole('dialog');
+    await referenceDialog.getByLabel('参考图选择', { exact: true }).selectOption('manual');
+    const reference = referenceDialog.locator(`[data-reference-image-id="${portrait.id}"]`);
+    await reference.scrollIntoViewIfNeeded(); await expect(reference.getByRole('status')).toHaveText('图片加载中…');
+    await expect(reference.locator('img')).toHaveCSS('visibility', 'hidden');
+    await page.screenshot({ path: testInfo.outputPath(`image-loading-reference-${viewport.width}.png`), animations: 'disabled' });
+    await referenceDialog.getByRole('button', { name: '关闭对话框', exact: true }).click();
+    finishPortrait(); await expectImagePixels(person.locator('.entity-image-preview img'));
+    await expect(person.locator('.entity-image-preview .cached-image-status')).toHaveCount(0);
     expect(failedRequests).toBe(2);
     await page.getByRole('button', { name: '查看 林舟 的详细资料', exact: true }).click();
     const details = page.getByRole('dialog');
@@ -2799,7 +2821,11 @@ test('图片加载中跨页共用请求，失败可重开，迟到作者图片�
     await expect(page.locator('.image-gallery')).not.toContainText('未启用立绘版本');
     await expect(page.locator('.image-gallery')).not.toContainText('仅作者参考场景');
     for (const source of await page.locator('.image-gallery img').evaluateAll(elements => elements.map(element => element.getAttribute('data-image-source')))) expect(source).toContain('view=reader');
-  } finally { finish(); }
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+    await expectImagePixels(parkedCard.locator('img')); await expect(parkedCard.locator('.cached-image-status')).toHaveCount(0);
+    await expect(parkedCard.locator('img')).toHaveCSS('visibility', 'visible'); expect(delayedRequests).toBe(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally { finish(); finishPortrait(); }
 });
 
 test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败保留、放大滚动和全屏查看', async ({ page, browser }, testInfo) => {

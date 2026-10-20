@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ImgHTMLAttributes, type ReactNode } from 'react';
+import { ImageOff, LoaderCircle } from 'lucide-react';
 import { ImageContentCache } from './image-cache';
 
 const ImageCacheContext = createContext<{ cache: ImageContentCache; scope: string } | null>(null);
@@ -24,6 +25,7 @@ function LoadedImage({ source, cache, cacheKey, ...props }: ImgHTMLAttributes<HT
   const [url, setUrl] = useState<string>();
   const [visible, setVisible] = useState(() => props.loading !== 'lazy' || !!cache.peek(cacheKey));
   const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     if (visible) return;
@@ -44,5 +46,9 @@ function LoadedImage({ source, cache, cacheKey, ...props }: ImgHTMLAttributes<HT
     return () => { alive = false; lease.release(); };
   }, [cache, cacheKey, source, visible]);
 
-  return <img {...props} ref={element} src={url} data-image-source={source} data-image-load-state={failed ? 'failed' : url ? 'loaded' : 'pending'} title={failed ? '图片加载失败，重新打开可重试' : props.title} onError={event => { cache.invalidate(cacheKey); setFailed(true); props.onError?.(event); }} />;
+  const state = failed ? 'failed' : loaded ? 'loaded' : 'pending';
+  return <span className="cached-image" data-image-load-state={state} aria-busy={state === 'pending'}>
+    <img {...props} ref={element} src={url} data-image-source={source} data-image-load-state={state} title={failed ? '图片加载失败，重新打开可重试' : props.title} onLoad={event => { setLoaded(true); props.onLoad?.(event); }} onError={event => { cache.invalidate(cacheKey); setFailed(true); props.onError?.(event); }} />
+    {state !== 'loaded' && <span className="cached-image-status" role="status" title={failed ? '关闭后重新打开可重试' : undefined}>{failed ? <ImageOff size={20} aria-hidden="true" /> : <LoaderCircle size={20} className="spin" aria-hidden="true" />}<span>{failed ? '图片加载失败' : '图片加载中…'}</span></span>}
+  </span>;
 }
