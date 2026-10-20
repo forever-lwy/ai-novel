@@ -206,7 +206,7 @@ export function ModelOutputsPanel({ job, branchName, onClose, onApplied, onDirty
     <div className="output-panel">
       <div className="output-intro">
         <div><span className="eyebrow">MODEL RESPONSE ARCHIVE</span><p><strong>{compression ? '摘要压缩' : jobNames[job.kind]}</strong> · {branchName} · {dateText(job.createdAt)}</p></div>
-        <span className="output-private"><EyeOff size={13} />仅作者可见</span>
+        <span className="output-private"><EyeOff size={13} />私人创作记录</span>
       </div>
       <p className="hint">原始响应和最初文本会分别保留。手工修正只在本地保存、校验并应用，不会重新调用模型。</p>
       {error && <Notice error={error} onClose={() => setError('')} />}

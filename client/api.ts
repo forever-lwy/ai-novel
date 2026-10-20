@@ -21,7 +21,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 export const post = <T,>(path: string, body?: unknown) => api<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) });
 export const put = <T,>(path: string, body: unknown) => api<T>(path, { method: 'PUT', body: JSON.stringify(body) });
 
-/** Author-only job streams use the same session cookie as ordinary API calls. */
+/** Job streams use the same authenticated owner session as ordinary API calls. */
 export async function streamJob<T>(jobId: string, signal: AbortSignal, onEvent: (event: T) => void): Promise<void> {
   const response = await fetch(`/api/jobs/${jobId}/events?view=author`, { credentials: 'same-origin', signal, headers: { Accept: 'text/event-stream' } });
   if (!response.ok) {

@@ -42,10 +42,13 @@ async function provider(ctx: Awaited<ReturnType<typeof buildApp>>, protocol: Pro
 }
 
 describe('import rule library and original-based previews', () => {
-  it('requires authentication and author view for every new route', async () => {
+  it('requires authentication and accepts rules without a view parameter', async () => {
     const { ctx, request, upload } = await setup(); const preview = await upload();
     expect((await ctx.app.inject('/api/chapter-rules?view=author')).statusCode).toBe(401);
-    for (const [method, url, payload] of [['GET', '/api/chapter-rules'], ['POST', '/api/chapter-rules', rule], ['POST', `/api/sources/${preview.source.id}/split`, { ruleId: 'none' }], ['GET', `/api/sources/${preview.source.id}/heading-candidates`], ['POST', `/api/sources/${preview.source.id}/generate-rule`, { lines: [1, 5] }]] as const) expect((await request(method, url, payload)).statusCode).toBe(403);
+    for (const [method, url, payload] of [['GET', '/api/chapter-rules'], ['POST', '/api/chapter-rules', rule], ['POST', `/api/sources/${preview.source.id}/split`, { ruleId: 'none' }], ['GET', `/api/sources/${preview.source.id}/heading-candidates`], ['POST', `/api/sources/${preview.source.id}/generate-rule`, { lines: [1, 5] }]] as const) {
+      expect((await ctx.app.inject({ method, url, payload })).statusCode).toBe(401);
+      expect((await request(method, url, payload)).statusCode).toBe(url.endsWith('generate-rule') ? 400 : 200);
+    }
   });
   it('saves, edits and deletes named reusable rules without changing model settings', async () => {
     const { ctx, request } = await setup(); const before = ctx.settings.public();

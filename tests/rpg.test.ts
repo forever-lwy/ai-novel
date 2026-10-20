@@ -256,16 +256,16 @@ describe('durable RPG story choices', () => {
     expect(finished.inputTokens).toBeGreaterThan(waiting.inputTokens); expect(finished.outputTokens).toBeGreaterThan(waiting.outputTokens);
   });
 
-  it('requires author view for RPG generation and choices, and omits role setup and choices from reader JSON', async () => {
+  it('requires login for RPG actions and preserves setup and choices across display modes', async () => {
     const ctx = await buildApp({ initialPassword: 'story-password-123', dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-rpg-api-')), startEngine: false }); apps.push(ctx);
     const login = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'story-password-123' } }); const session = login.cookies.find(cookie => cookie.name === 'session')!.value;
     const project = ctx.store.createProject({ title: '权限体验' }); const payload = { baseRevisionId: ctx.store.getBranch(project.mainBranchId).revisionId, mode: 'rpg', instruction: '', rpg: originalSetup() };
-    expect((await ctx.app.inject({ method: 'POST', url: `/api/branches/${project.mainBranchId}/generate`, cookies: { session }, payload })).statusCode).toBe(403);
-    const generate = await ctx.app.inject({ method: 'POST', url: `/api/branches/${project.mainBranchId}/generate?view=author`, cookies: { session }, payload }); expect(generate.statusCode).toBe(200);
+    expect((await ctx.app.inject({ method: 'POST', url: `/api/branches/${project.mainBranchId}/generate`, payload })).statusCode).toBe(401);
+    const generate = await ctx.app.inject({ method: 'POST', url: `/api/branches/${project.mainBranchId}/generate?view=reader`, cookies: { session }, payload }); expect(generate.statusCode).toBe(200);
     const queued = generate.json<Job>(); const internal = rawJob(ctx.store, queued.id); internal.status = 'paused'; internal.payload.rpgChoice = { id: 'choice', question: '作者选择内容', options };
     ctx.store.db.prepare('UPDATE jobs SET status=?,data=? WHERE id=?').run('paused', JSON.stringify(internal), internal.id);
-    const reader = await ctx.app.inject({ url: `/api/jobs?projectId=${project.id}`, cookies: { session } }); expect(reader.body).not.toContain('作者选择内容');
-    const role = await ctx.app.inject({ url: `/api/branches/${queued.branchId}`, cookies: { session } }); expect(role.body).not.toContain('用户确认的旅人'); expect(role.body).not.toContain('从客栈进入故事');
-    expect((await ctx.app.inject({ method: 'POST', url: `/api/jobs/${queued.id}/choice`, cookies: { session }, payload: { choiceId: 'choice', optionId: 'bridge' } })).statusCode).toBe(403);
+    const reader = await ctx.app.inject({ url: `/api/jobs?projectId=${project.id}`, cookies: { session } }); expect(reader.body).toContain('作者选择内容');
+    const role = await ctx.app.inject({ url: `/api/branches/${queued.branchId}`, cookies: { session } }); expect(role.body).toContain('用户确认的旅人'); expect(role.body).toContain('从客栈进入故事');
+    expect((await ctx.app.inject({ method: 'POST', url: `/api/jobs/${queued.id}/choice`, payload: { choiceId: 'choice', optionId: 'bridge' } })).statusCode).toBe(401);
   });
 });

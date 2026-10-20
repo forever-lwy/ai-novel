@@ -7,7 +7,7 @@ import { buildApp } from '../server/app.js';
 const contexts: Awaited<ReturnType<typeof buildApp>>[] = [];
 afterEach(async () => { for (const ctx of contexts.splice(0)) await ctx.app.close(); });
 
-it('keeps imported responses and failed manual edits private, then applies an exact citation without calling a model', async () => {
+it('requires login for imported responses and failed manual edits, then applies an exact citation without calling a model', async () => {
   const ctx = await buildApp({ initialPassword: 'test-output-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-output-api-')), startEngine: false }); contexts.push(ctx);
   const loginResponse = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'test-output-password' } });
   const session = loginResponse.cookies.find(c => c.name === 'session')!.value;
@@ -18,12 +18,12 @@ it('keeps imported responses and failed manual edits private, then applies an ex
   const result = { summary: '旅人回到古城。', entities: [{ kind: 'character', name: '旅人', aliases: [], description: '归来的旅人', visibility: 'public', facts: [{ text: '旅人来到古城', temporal: 'current', certainty: 'fact', visibility: 'public', paragraph: 1, quote: '回来了。旅人走进山谷。' }] }], relations: [], foreshadows: [] };
   const raw = JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(result) }] }, finishReason: 'STOP' }] });
   const url = `/api/jobs/${job.id}/outputs`;
-  expect((await ctx.app.inject({ url, cookies: { session } })).statusCode).toBe(403);
-  expect((await ctx.app.inject({ method: 'POST', url, cookies: { session }, payload: { text: raw } })).statusCode).toBe(403);
-  const imported = await ctx.app.inject({ method: 'POST', url: `${url}?view=author`, cookies: { session }, payload: { text: raw } });
+  expect((await ctx.app.inject({ url, cookies: { session } })).statusCode).toBe(200);
+  expect((await ctx.app.inject({ method: 'POST', url, payload: { text: raw } })).statusCode).toBe(401);
+  const imported = await ctx.app.inject({ method: 'POST', url, cookies: { session }, payload: { text: raw } });
   expect(imported.statusCode).toBe(200); const output = imported.json();
   const outputUrl = `${url}/${output.id}`;
-  expect((await ctx.app.inject({ url: outputUrl, cookies: { session } })).statusCode).toBe(403);
+  expect((await ctx.app.inject({ url: outputUrl, cookies: { session } })).statusCode).toBe(200);
   const invalid = await ctx.app.inject({ method: 'POST', url: `${outputUrl}/apply?view=author`, cookies: { session }, payload: { text: JSON.stringify(result), baseRevisionId: output.baseRevisionId } });
   expect(invalid.statusCode).toBe(422);
   const detail = (await ctx.app.inject({ url: `${outputUrl}?view=author`, cookies: { session } })).json();

@@ -252,7 +252,7 @@ describe('versioned chapter and extracted material maintenance', () => {
     const changed = store.deleteChapter(branchId, base(store, branchId), third.state.chapters[1].id); expect(changed.state.chapters).toHaveLength(2);
   });
 
-  it('requires authenticated author requests, current versions and an idle branch through HTTP', async () => {
+  it('requires authenticated requests, current versions and an idle branch through HTTP', async () => {
     const ctx = await buildApp({ dataDir: mkdtempSync(join(tmpdir(), 'novel-maintenance-api-')), initialPassword: 'maintenance-password-123', startEngine: false }); cleanup.push(() => ctx.app.close());
     const fixture = readingProgressStory(ctx.store); const target = fixture.third.state.chapters[1].id;
     const login = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'maintenance-password-123' } }); const session = login.cookies.find(cookie => cookie.name === 'session')!.value;
@@ -260,8 +260,8 @@ describe('versioned chapter and extracted material maintenance', () => {
     for (const [method, path] of routes) {
       const url = `/api/branches/${fixture.branchId}${path}`; const payload = { baseRevisionId: base(ctx.store, fixture.branchId) };
       expect((await ctx.app.inject({ method, url: `${url}?view=author`, payload })).statusCode).toBe(401);
-      expect((await ctx.app.inject({ method, url, cookies: { session }, payload })).statusCode).toBe(403);
-      expect((await ctx.app.inject({ method, url: `${url}?view=author`, cookies: { session }, payload: { baseRevisionId: 'old' } })).statusCode).toBe(409);
+      expect((await ctx.app.inject({ method, url, cookies: { session }, payload: { ...payload, baseRevisionId: 'old' } })).statusCode).toBe(409);
+      expect((await ctx.app.inject({ method, url: `${url}?view=reader`, cookies: { session }, payload: { baseRevisionId: 'old' } })).statusCode).toBe(409);
     }
     const response = await ctx.app.inject({ method: 'DELETE', url: `/api/branches/${fixture.branchId}/chapters/${target}?view=author`, cookies: { session }, payload: { baseRevisionId: base(ctx.store, fixture.branchId) } });
     expect(response.statusCode).toBe(200); expect(response.json().state.chapters).toHaveLength(2);

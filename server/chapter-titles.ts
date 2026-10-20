@@ -30,10 +30,6 @@ const titleSystem = `# 章节标题修复
 只返回 {"chapters":[{"chapterId":"输入中的标识","title":"建议标题","reason":"理由","evidence":"本章原文摘录","confidence":"high/medium/low","multipleChapters":false}]}。
 每个输入标识恰好返回一次，包括不需要修改的章节。没有本章原文依据的改名不能标 high。`;
 
-function requireAuthor(request: FastifyRequest) {
-  if ((request.query as { view?: string })?.view !== 'author') throw new HttpError('请在作者视图修复章节标题。', 403);
-}
-
 export function registerChapterTitleRoutes(app: FastifyInstance, deps: { store: Store; settings: SettingsStore; engine: StoryEngine; source: (id: string) => { confirmed: number; filename: string }; bytes: (id: string) => Uint8Array }) {
   const inFlight = new Set<string>();
   const param = (request: FastifyRequest) => identifier.parse((request.params as { id: string }).id);
@@ -80,7 +76,7 @@ export function registerChapterTitleRoutes(app: FastifyInstance, deps: { store: 
   };
   const preview = (path: string, input: (request: FastifyRequest) => { scope: string; samples: ChapterTitleSample[]; instruction: string; check: () => void }) => {
     app.post(path, async (request, reply) => {
-      requireAuthor(request); const work = input(request); work.check();
+      const work = input(request); work.check();
       if (inFlight.has(work.scope)) throw new HttpError('标题修复正在进行，请等待本次结果。', 409);
       inFlight.add(work.scope);
       try { return await generate(work.samples, work.instruction, reply, work.check); }
@@ -114,7 +110,7 @@ export function registerChapterTitleRoutes(app: FastifyInstance, deps: { store: 
     return { scope: `source:${sourceId}`, samples: input.chapters.map(sample => sourceContext(sample, text)), instruction: input.instruction, check };
   });
   app.post('/api/branches/:id/chapter-titles/apply', async request => {
-    requireAuthor(request); const branchId = param(request); deps.engine.assertIdle(branchId);
+    const branchId = param(request); deps.engine.assertIdle(branchId);
     const input = z.object({ baseRevisionId: identifier, changes: z.array(z.object({ chapterId: identifier, originalTitle: title, title }).strict()).min(1).max(MAX_TITLE_REPAIR_CHAPTERS) }).strict().parse(request.body);
     return deps.store.updateChapterTitles(branchId, input.baseRevisionId, input.changes);
   });

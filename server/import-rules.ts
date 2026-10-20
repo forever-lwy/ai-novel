@@ -29,9 +29,6 @@ interface Dependencies {
   sourcePublic: (source: OriginalSource) => Source; bytes: (source: OriginalSource) => Uint8Array;
 }
 
-function author(request: FastifyRequest) {
-  if ((request.query as { view?: string })?.view !== 'author') throw new HttpError('请在作者视图设置分章规则。', 403);
-}
 function parseRegexRule(value: unknown): RegexChapterRuleInput {
   const rule = regexRuleSchema.parse(value);
   try { new RegExp(`^(?:${rule.pattern})$`, rule.flags); }
@@ -64,9 +61,9 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
     return { source: deps.sourcePublic(source), chapters, headingCount: headings.length };
   };
 
-  app.get('/api/chapter-rules', async request => { author(request); return { rules: all() }; });
+  app.get('/api/chapter-rules', async request => { return { rules: all() }; });
   app.post('/api/chapter-rules', async request => {
-    author(request); const rule = parseRule(request.body);
+    const rule = parseRule(request.body);
     if (rule.type !== 'length') await matchChapterHeadings('', rule);
     ensureUniqueName(rule);
     const rules = custom();
@@ -75,7 +72,7 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
     deps.settings.setMeta(META_KEY, JSON.stringify([...rules, saved])); return saved;
   });
   app.put('/api/chapter-rules/:id', async request => {
-    author(request); const id = param(request); const rule = parseRule(request.body);
+    const id = param(request); const rule = parseRule(request.body);
     if (!custom().some(value => value.id === id)) throw new HttpError('找不到可编辑的自定义规则；内置规则可另存为新规则。', 404);
     if (rule.type !== 'length') await matchChapterHeadings('', rule);
     ensureUniqueName(rule, id);
@@ -85,13 +82,13 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
     deps.settings.setMeta(META_KEY, JSON.stringify(rules.map(value => value.id === id ? saved : value))); return saved;
   });
   app.delete('/api/chapter-rules/:id', async request => {
-    author(request); const id = param(request); const rules = custom();
+    const id = param(request); const rules = custom();
     if (!rules.some(value => value.id === id)) throw new HttpError('找不到可删除的自定义分章规则。', 404);
     deps.settings.setMeta(META_KEY, JSON.stringify(rules.filter(value => value.id !== id))); return { ok: true };
   });
 
   app.post('/api/sources/:id/split', async request => {
-    author(request); const source = writableSource(param(request));
+    const source = writableSource(param(request));
     const input = z.object({ ruleId: ruleId.optional(), rule: ruleSchema.optional(), native: z.literal(true).optional() }).strict().refine(value => Number(Boolean(value.ruleId)) + Number(Boolean(value.rule)) + Number(Boolean(value.native)) === 1, '请选择一条分章规则').parse(request.body);
     if (input.native) return { source: deps.sourcePublic(source), chapters: parseNovel(source.filename, deps.bytes(source)).chapters };
     const rule = input.rule ? parseRule(input.rule) : all().find(value => value.id === input.ruleId);
@@ -99,7 +96,7 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
     return preview(source, rule);
   });
   app.get('/api/sources/:id/heading-candidates', async request => {
-    author(request); const source = writableSource(param(request));
+    const source = writableSource(param(request));
     const { q, offset, limit } = z.object({ q: z.string().trim().max(160).default(''), offset: z.coerce.number().int().min(0).max(20000000).default(0), limit: z.coerce.number().int().min(1).max(120).default(60) }).parse(request.query);
     const text = novelText(source.filename, deps.bytes(source));
     const candidates = []; let nextOffset: number | null = null;
@@ -112,7 +109,7 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
   });
 
   app.post('/api/sources/:id/generate-rule', async (request, reply): Promise<GeneratedChapterRule> => {
-    author(request); const source = writableSource(param(request));
+    const source = writableSource(param(request));
     const input = z.object({ lines: z.array(z.number().int().positive().max(20000000)).min(2).max(20), instruction: z.string().trim().max(1000).default('') }).strict().parse(request.body);
     const requested = new Set(input.lines);
     if (requested.size < 2) throw new HttpError('请至少选择两个不同的章节名。');

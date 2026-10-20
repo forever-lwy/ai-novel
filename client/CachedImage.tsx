@@ -11,7 +11,7 @@ export function ImageCacheProvider({ scope, children }: { scope: string; childre
   return <ImageCacheContext.Provider value={value}>{children}</ImageCacheContext.Provider>;
 }
 
-/** All image surfaces share bytes, while the scope keeps author/reader/version boundaries separate. */
+/** All image surfaces share bytes within the current work, branch and version. */
 export function CachedImage(props: ImgHTMLAttributes<HTMLImageElement>) {
   const context = useContext(ImageCacheContext);
   if (!context || !props.src) return <img {...props} />;

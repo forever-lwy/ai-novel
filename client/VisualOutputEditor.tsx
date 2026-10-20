@@ -130,7 +130,7 @@ function CitationPicker({ path }: { path: FormPath }) {
   </div>;
 }
 
-const visibilityOptions = { public: '读者可见', secret: '仅作者可见' };
+const visibilityOptions = { public: '剧情中已公开', secret: '剧情中尚未公开' };
 const temporalOptions = { current: '当前正在发生 / 当前状态', past: '过去发生的事 / 回忆', future: '未来计划 / 预告', unknown: '暂时无法确定时间' };
 const certaintyOptions = { fact: '原文明确说明', inference: '根据原文推测', conflict: '与其他说法存在冲突' };
 const foreshadowOptions = { planned: '计划中', planted: '已埋下', resolved: '已揭晓', abandoned: '已放弃' };
@@ -158,7 +158,7 @@ function EntityCard({ item, path, index }: { item: unknown; path: FormPath; inde
       <div className="visual-form-grid"><TextField path={[...path, 'name']} label="名称" help="已披露本名时使用本名作为名称，原来的明确称呼保留在别名。" /><SelectField path={[...path, 'kind']} label="资料类型" options={kindNames} /></div>
       {item.kind === 'character' && <div className="visual-form-grid"><SelectField path={[...path, 'nameStatus']} label="姓名状态" options={{ confirmed: '已披露姓名', placeholder: '尚未披露，暂用原文称呼' }} optional /><label className="checkbox"><input type="checkbox" checked={item.isMain === true} disabled={disabled} onChange={event => change([...path, 'isMain'], event.target.checked)} />主要角色，写作时放入上下文</label></div>}
       <StringListField path={[...path, 'aliases']} label="别名（每行一个）" help="例如另一个称呼、名字缩写。不需要时可留空。" />
-      <TextField path={[...path, 'description']} label="资料描述" rows={3} help="概述身份、血统、能力和性格等已明确的信息，经历仅保留重大事件。尚未揭晓的秘密应标成仅作者可见。" />
+      <TextField path={[...path, 'description']} label="资料描述" rows={3} help="概述身份、血统、能力和性格等已明确的信息，经历仅保留重大事件。尚未揭晓的秘密应标成剧情中尚未公开。" />
       <SelectField path={[...path, 'visibility']} label="整条资料可见范围" options={visibilityOptions} />
       <ListSection path={[...path, 'facts']} title="事实与变化" empty="这条资料暂无事实。需要记录状态或变化时，可以添加。" addLabel="添加事实" newItem={newFact}>{(fact, factPath, factIndex) => <FactCard key={factIndex} item={fact} path={factPath} index={factIndex} />}</ListSection>
     </div>

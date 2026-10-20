@@ -2,11 +2,13 @@
 
 所有接口 /api，cookie session。JSON 错误 {error:string}。时间 ISO。共享类型 shared/types.ts。
 
+工作台统一使用完整作者资料。`view=author`、`view=reader` 作为旧客户端参数继续接受，均不改变返回资料和操作权限；省略参数效果相同。阅读视图仅在客户端隐藏思维链与工具调用过程，不过滤资料、图片、任务或 RPG 选项。资料查询上的旧 `chapterId` 参数不再限定阅读进度；章节操作、图片关联和分支起点的 `chapterId` 仍按原规则校验。所有接口继续校验登录、来源和适用的作品／故事线／版本边界。
+
 ## 原作参考与文本查询工具
 
 续写请求以 `continuationAnchor={chapterId,title,ending,instruction}` 标记最后保存的正文结尾，同时提供最近完整正文；自定义预设省略上下文块时，运行规则仍带入该起点。内部章节数量和索引不映射到章节编号变量；旧 `chapterNumber` 展开为“待写章节／当前章节”，新建章节缺省标题为“新章节”，EPUB 缺题名时为“未命名章节”。原文标题里的真实编号和原文段落／行号保留。
 
-- `StoryState.sourceReference?:{branchId,revisionId,sourceIds?:string[]}` 绑定同作品的原作故事线版本和已确认源文件。派生故事线保留当前起点状态，另存完整来源版本；嵌套分支继承该引用。新正文任务在排队时固定参考，包括“没有参考”的状态。旧派生线根据来源任务、父线及创建时的历史版本追溯，不读取原线后来的改动。阅读投影删除该字段，内部任务 payload 不经 HTTP 返回。
+- `StoryState.sourceReference?:{branchId,revisionId,sourceIds?:string[]}` 绑定同作品的原作故事线版本和已确认源文件。派生故事线保留当前起点状态，另存完整来源版本；嵌套分支继承该引用。新正文任务在排队时固定参考，包括“没有参考”的状态。旧派生线根据来源任务、父线及创建时的历史版本追溯，不读取原线后来的改动。工作台保留该引用，内部任务 payload 不经 HTTP 返回。
 - 写作的 `originalReference` 上下文单列原作完整剧情摘要、世界观／规则、人物与物品等轻量目录，完整档案和后续正文可通过只读工具获取。原作已有有效作者确认压缩摘要时，使用 `authorConfirmedSummary` 加未覆盖章节摘要；覆盖不属于参考版本或为空时退回逐章摘要。默认实体目录最多 100 项、别名 3 项，提供 `entityDirectoryTotal/entityDirectoryTruncated/aliasesTruncated`，工具仍检索完整档案及全部别名。原作里的未来是作者参考，不合并到当前 `state.entities`、当前摘要或玩家知识；提取仍仅处理当前正文。参考引用随版本保存，完整作品恢复时校验来源关联、映射版本／源文件 ID；缺失或跨作品关联不能静默恢复。
 - 原作文本来自固定参考版本的章节正文，以及已确认导入目录。目录中的未整理章节可读全文，但不存在的摘要／人物资料不会补造。虚拟路径分别位于 `story/`、`original/`、`original/sources/`；文件名由捕获版本中的章节或源文件标识生成不表示顺序的哈希，不向模型提供内部章节序号。必须使用工具返回的 path；旧 RPG 对话中的顺序路径仅在捕获版本内兼容解析，结果仍返回新路径。只在本次捕获的语料中解析路径，不访问任意文件系统。
 - `list_text_files({collection?:'story'|'original'|'all',query?,offset?,limit?})`：按路径、标题或源文件名筛选，返回 `files,total,offset,truncated,nextOffset?`。默认 20 项，`limit` 为 1–100；每个文件含路径、标题、总行数及 `collection/reference/source` 标记。
@@ -32,40 +34,40 @@
 
 ## RPG 与剧情选择
 
-- `Mode` 新增 `rpg`，作品创建与提示词模式条件接受该值。`StoryState.rpg` 保存体验角色及入场要求，跟随故事版本、分支与完整作品备份；阅读投影隐藏此作者配置。可选 `nextChoice={id,question,options,jobId,chapterId,maxWords,instruction,followingChoices?}` 保存已封章的未回答选择；`jobId` 是源生成任务，`chapterId` 是封章正文，备份恢复会重映射关联。同响应后续有效询问放入 `followingChoices`，作为尚未回答的问题带入新章，不能当作玩家已确认行动。
+- `Mode` 新增 `rpg`，作品创建与提示词模式条件接受该值。`StoryState.rpg` 保存体验角色及入场要求，跟随故事版本、分支与完整作品备份。可选 `nextChoice={id,question,options,jobId,chapterId,maxWords,instruction,followingChoices?}` 保存已封章的未回答选择；`jobId` 是源生成任务，`chapterId` 是封章正文，备份恢复会重映射关联。同响应后续有效询问放入 `followingChoices`，作为尚未回答的问题带入新章，不能当作玩家已确认行动。
 - `POST /branches/:id/generate?view=author` 的 `GenerateInput` 可带 `rpg:{character:{kind:'original'|'existing',name,description,entityId?},entryChapterId?,entryInstruction?}`。首次入场按指定章节结尾或当前结尾建立独立 RPG 线，返回 `Job.branchId` 为新线。原创角色须有姓名；已有角色按起点资料中未合并的 character 实体确认，以服务端姓名与资料为准。起点章节须已完成整理。继续体验使用 `mode:'rpg'` 并省略 `rpg`，要求当前版本已有体验配置。RPG 不接受 `chapterId`、选段改写或 `regenerate`。
 - RPG 正文工具 `ask_user({question,options:[{id,label,description?}]})` 提供 2–6 个唯一标识的选项。调用后保存工具对话与已收到正文，将任务设为 `paused`，作者 `Job.pendingChoice={id,question,options}` 返回待选节点，SSE 状态消息后关闭连接。等待期间没有在途模型请求，不自行选择或继续；客户端断线不丢节点。询问内容与回答作为工具记录，不混入小说正文。
 - `POST /jobs/:id/choice?view=author {choiceId,optionId?:string,customText?:string} -> Job`：必须且只能提交一种回答。`optionId` 须属于当前节点，`customText` 为非空自由行动。检查待选状态、节点标识与任务起始版本，重复回答、取消或过期返回 409；选择后排队，沿保存的原工具对话继续，不清空已有正文、不重复已执行工具。再次订阅事件接口可读取完整快照。
 - 章末选择使用同一接口，额外必填 `baseRevisionId`，可带 `branchId` 指定当前分支（默认源任务故事线）。服务端校验同一作品、当前版本中的 `nextChoice`、封章正文及资料状态；正文被修订、旧版本、重复选择、存在进行中任务或资料尚未完成时拒绝。确认选择、消费 `nextChoice`、提交故事版本与创建新生成任务在同一事务内完成，返回新的 `Job.id`。客户端订阅新任务；新章重新构建上下文并带入问题与真实回答，正文、用量和回合计数重新开始，旧章不追加。普通生成接口不能绕过章末选择。
-- 作者任务可返回 `chapterStartChoiceId`，用于章末选择 POST 回包丢失时按作品、故事线和节点精确查找已创建的新任务，只读恢复，不再次提交或隐式重试模型。阅读任务不返回该字段。已接受提交后的视图刷新失败也不阻止客户端打开新章。
+- 作者任务可返回 `chapterStartChoiceId`，用于章末选择 POST 回包丢失时按作品、故事线和节点精确查找已创建的新任务，只读恢复，不再次提交或隐式重试模型。已接受提交后的视图刷新失败也不阻止客户端打开新章。
 - 等待节点禁止用普通 resume/retry 绕过。服务重启或恢复备份后保持手动恢复，直接回答仍待选的节点即可。模型／协议／供应商配置与保存对话不匹配时拒绝续接；用户需恢复原配置。失败的模型请求不会被隐式重试。每段真实返回用量只累计一次。
 - RPG `maxWords` 是整章累计目标，默认 2000，范围 100–20000。正文按去空白后的 Unicode 字符数计数；每轮更新目标、已写和剩余字数，85% 开始收束提示。达到目标后在完整响应／工具回合或 `ask_user` 节点封章，不发下一次本章正文请求；保留完整输出，允许最后一轮超出。`ask_user` 封章时节点进入版本中的 `nextChoice`，不作为旧任务的 `pendingChoice`；正文先保存，再整理资料，失败只恢复资料整理。旧超预算暂停回合的已确认回答仍描述一次后果后封章。
 - 每章 RPG 至少须发生一次有效询问，或承接已回答的章末节点；均没有时任务失败，保留草稿与模型输出，不保存成章。RPG 单章最多 24 个模型回合／96 次工具调用，等待用户本身不占新回合；普通写作仍为 6／24。达到章节目标的最后完整回合可正常封章，未达目标的回合上限仍报错。每次请求保留完整输出 token 上限，不把字数当成 token 或扣减思考额度，缺失用量按对应回合估算并标记 `usageEstimated`。
-- 阅读任务列表不返回待选节点、角色设定或内部对话，所有 `payload` 仍为空；完整备份保留内部对话，且不含供应商凭据。RPG 的关键节点识别及人物行为由模型生成，程序只验证选择结构、等待与版本边界；没有骰子、战斗或背包数值规则。
+- 任务列表返回待选节点与创作配置，内部对话保留在服务端，所有 `payload` 仍为空；完整备份保留内部对话，且不含供应商凭据。RPG 的关键节点识别及人物行为由模型生成，程序只验证选择结构、等待与版本边界；没有骰子、战斗或背包数值规则。
 
 ## 图片接口
 
-- 公开插画使用与阅读卡片相同的公开事实投影，按关联章节过滤秘密、未来事实和后章状态。内部 `StoryImage.publicMaterial` 标记此素材边界，`materialFactIds/materialRelationIds` 保存实际使用的依据；公开图不会因后来新增的无关秘密事实消失，但已用依据被隐藏或资料实体不再公开时仍不可读取。新字段随完整备份校验和重映射，阅读响应隐藏这些内部字段。旧图缺少标记时沿用保守检查，明确的秘密图、作者补充要求及私密参考不自动公开。
-- 绑定 `chapterId` 的图片登记、启用、停用和删除会新增该章及后续的章末快照，与当前图册原子保存；早章阅读不因图片在后续章节写完后才生成而遗漏。更早章节、已有分支与旧快照保留；缺少匹配正文的章末记录时拒绝操作，不拼入最新世界资料。
+- 公开插画按关联章节筛选公开素材，保留 `StoryImage.publicMaterial`、`materialFactIds/materialRelationIds` 等依据标记及备份兼容；工作台不再按这些标记隐藏图片，已有私密图可直接查看，无需修改历史素材标记或重绘。
+- 绑定 `chapterId` 的图片登记、启用、停用和删除会新增该章及后续的章末快照，与当前图册原子保存。更早章节、已有分支与旧快照保留；缺少匹配正文的章末记录时拒绝操作，不拼入最新世界资料。
 
 - `StoryState.activeImageIds?:string[]` 为当前版本的图片选择，必须是 `imageIds` 的无重复子集；缺省为旧作品兼容选择，按明确关联对象取最新成功图，显式空数组表示全部停用。`StoryImage.active` 为当前故事线投影，不修改历史图片资产。人物／实体按合并后的明确实体 ID 分组，地图一组，CG 按章节及准确选段范围分组，同组最多启用一张。新变体保留旧选择；首次对象的待生成图成功后启用。
 - `PUT /branches/:id/images/:imageId/active?view=author {baseRevisionId,active:boolean} -> {view:BranchView,images:StoryImage[]}`：启用／停用当前故事线图片，启用一张会停用同组其他图片；调用方替换整份图片列表并更新版本。新图片须生成完成才能手动启用；不调用任何模型。
 - `DELETE /branches/:id/images/:imageId?view=author {baseRevisionId} -> {view:BranchView,images:StoryImage[]}`：从当前版本的图册及启用列表移除；历史及其他故事线引用保留像素，不跨版本破坏资料。删除当前图片不自动换用其他图片。排队／运行任务按所属故事线处理取消与迟到输出，删除后不能通过当前线内容 URL 读取。
-- 作者列表包含未启用的暂存图，仍能预览；阅读列表／版本引用／直接内容接口仅返回已启用且通过私密过滤的完成图。未启用或删除的图不会进入提示词优化图片候选、实际图片请求及 CG 参考，显式编辑原图也须启用。优化后参考选择变化则拒绝后续图片请求，显式重试按当前选择重新优化。已生成 CG 的历史引用私密检查不要求源图继续在当前图册或启用，但仍检查秘密、未来事实及档案依赖。
+- 图册包含未启用的暂存图，支持预览、重绘和删除；未启用或已删除的图仍不会进入提示词优化候选、实际图片请求及 CG 参考，显式编辑原图也须启用。参考选择在任务期间变化时仍拒绝后续图片请求，显式重试按当前选择重新优化。
 
-- `GET /branches/:id/images?view=author|reader&chapterId= -> StoryImage[]`：默认阅读视图，可选 `chapterId` 与阅读资料共用章节结尾快照，只返回该进度引用且启用的可查看图片；省略进度沿用故事线结尾。作者视图仍读取完整当前版本。完成图带同源、需登录的 `url`，阅读 URL 保留 `chapterId`。阅读响应隐藏提示词、原文片段、参考图标识及错误，并过滤秘密和未来资料图片。
+- `GET /branches/:id/images -> StoryImage[]`：返回当前故事线完整图册，含私密图片、未启用图片与生成中的记录。完成图带同源内容 URL；图片内容接口仍校验当前故事线引用及登录。阅读开关不改变结果。
 - `POST /branches/:id/images?view=author`，请求为 `ImageGenerateInput={baseRevisionId,kind:'portrait'|'entity'|'map'|'cg',entityId?,chapterId?,selection?:{start,end},instruction?,referenceImageId?,selectedReferenceImageIds?:string[]}`，返回 `{view:BranchView,image:StoryImage}`。登记引用创建一个新版本，独立图片任务随后运行；调用方更新 `view.branch.revisionId`。资料图必须指定当前实体，地图依据地点与地理关系，CG 必须指定当前章，选段为正文 UTF-16 起止索引，结束位置不包含在选段内。图片修改需同一关联对象的已完成参考图与修改要求，使用实际原图输入，不覆盖旧图。
 - `selectedReferenceImageIds` 省略时保留自动人物参考，空数组表示不用额外参考图，非空时按数组顺序严格使用作者指定图片，文字优化 AI 的参考人物选择不再决定图片输入。允许当前故事线已启用、已完成且有像素的各类图片；重复、跨线／跨作品、未启用、未完成、缺失及超出当前模型参考图总数量上限的选择在登记前拒绝。最多 16 项，编辑原图 `referenceImageId` 另占一张且始终排第一，不得重复选择。显式选择优先于 `useCharacterReferences`，不等待未选人物的排队立绘；作者选择为可选字段，旧请求保持原行为。
-- `GET /branches/:id/images/:imageId/content?view=author|reader&chapterId=`：只返回所选章节快照引用且通过可见性过滤的已完成 PNG、JPEG 或 WebP 图片二进制；跨作品、当前进度未包含、回退后不再包含及秘密图不可绕过列表直接读取。`chapterId` 可省略，行为与图片列表一致。
-- 图片内容接口继续使用 `Cache-Control: no-store`，每次实际请求都校验登录及可见性。前端在当前工作区内按作品、故事线、版本、作者／阅读、阅读章节及完整内容 URL 复用图片 Blob URL，并合并进行中的下载；不写浏览器持久缓存。未显示图片最多保留 96 项、64 MiB 原始字节，按最近使用淘汰并释放 URL，仍在显示的图片保留到最后一处关闭；离开工作区释放全部 URL 并取消下载。失败不缓存、不自动重试，迟到响应不能显示到其他范围。
+- `GET /branches/:id/images/:imageId/content`：返回当前故事线引用的已完成 PNG、JPEG 或 WebP 二进制，私密和未启用图片也可查看；跨作品、当前故事线不包含或回退后已移除的图片返回 404，未完成返回 409。旧 view 和 chapterId 查询参数不改变结果。
+- 图片内容接口继续使用 `Cache-Control: no-store`，每次实际请求都校验登录及可见性。前端在当前工作区内按作品、故事线、版本及完整内容 URL 复用图片 Blob URL，并合并进行中的下载；不写浏览器持久缓存。未显示图片最多保留 96 项、64 MiB 原始字节，按最近使用淘汰并释放 URL，仍在显示的图片保留到最后一处关闭；离开工作区释放全部 URL 并取消下载。失败不缓存、不自动重试，迟到响应不能显示到其他范围。
 - `POST /branches/:id/images/:imageId/retry?view=author {baseRevisionId}`：显式再次请求，返回新资源和新版本，原记录与原图保留。重试可能再次计费。
 - `POST /branches/:id/images/:imageId/cancel?view=author -> StoryImage`：停止排队或正在生成的图片，拒绝迟到结果。
 - 图片状态为 `queued/running/completed/failed/paused/stale/cancelled`。服务重启或关闭后排队与运行任务转为 `paused`，不自动重复调用；正文或资料版本变化后迟到结果转为 `stale`。图片二进制持久化在 SQLite，单图上限 20 MiB，作品删除和完整备份／恢复包括图片及历史引用，旧版无图片备份继续可用。
-- 手动登记、修改与重试沿用 session、同源、作者视图及起始版本校验；文字任务处于等待、运行或暂停时返回 `409`，防止改变写作起始版本。图片失败不重试文字生成。图片提示词、请求与结果不参与正文保存或 TXT 导出。
+- 手动登记、修改与重试沿用 session、同源、起始版本校验；文字任务处于等待、运行或暂停时返回 `409`，防止改变写作起始版本。图片失败不重试文字生成。图片提示词、请求与结果不参与正文保存或 TXT 导出。
 - 设置可保存 `imageSettings={providerId,model,protocol:'openai-images'|'gemini',size,quality,stylePrompt,autoPortrait,autoCG,timeoutMs}`，复用加密供应商密钥。默认新人物自动立绘开启、自动 CG 关闭，未配置图片模型时不暴露写作生图工具。旧设置缺失该字段时采用默认；旧客户端省略字段保存时保留已存在配置。
 - 写作工具 `generate_character_portrait {name,description}` 与 `generate_scene_cg {description,sourceText}` 登记自动插画意图，返回 `requested`；不在写作过程中改变正文版本。资料整理完成后按明确姓名／别名匹配新人物，CG 引用须逐字存在于已保存正文，再批量绑定引用并独立生图。自动新人物立绘按提取资料补充，已有立绘不重复请求；自动 CG 只在开关开启时提供，由写作模型判断触发。本章最多 12 个自动插画。
 - 图片任务分为提示词优化与图片生成：登记时保存 `material/instruction` 和 `promptStatus='pending'`；文字模型返回专用 `prompt`、选择的参考人物和自动尺寸，校验后保存 `promptStatus='completed'/optimizedAt`，再调用图片接口。优化失败时不发图片请求，像素失败重试复用已优化结果；资料、图片型号／协议、固定构图参数或参考开关已变化时重新优化。任一阶段取消、回退、删除或版本变化都阻止后续计费请求及迟到应用。
-- `StoryImage` 可含 `materialEntityIds`（提示词使用的档案依赖）、`selectedReferenceImageIds`（作者指定的额外参考及顺序，空数组表示不用）、`referenceImageIds/referenceEntityIds/referenceCharacters:{entityId,imageId,name}[]`（本次实际输入）、`generationParameters`（本次实际参数）。原 `sourceText/chapterId/selection` 保持剧情证据，不被优化提示词改写；原单一 `referenceImageId` 继续代表编辑原图。手选在优化前持久化并参与依赖检查，中途停用或删除所选图会停止旧任务；失败重试、分支、备份恢复保留决定并重映射图片 ID，手选失效时明确拒绝重试，不自动换图。阅读响应清除全部优化素材、参数、手选 ID 和参考名册；服务端检查档案及所有参考图链当前可见性，不能从直接图片 URL 绕过。
+- `StoryImage` 可含 `materialEntityIds`（提示词使用的档案依赖）、`selectedReferenceImageIds`（作者指定的额外参考及顺序，空数组表示不用）、`referenceImageIds/referenceEntityIds/referenceCharacters:{entityId,imageId,name}[]`（本次实际输入）、`generationParameters`（本次实际参数）。原 `sourceText/chapterId/selection` 保持剧情证据，不被优化提示词改写；原单一 `referenceImageId` 继续代表编辑原图。手选在优化前持久化并参与依赖检查，中途停用或删除所选图会停止旧任务；失败重试、分支、备份恢复保留决定并重映射图片 ID，手选失效时明确拒绝重试，不自动换图。图册响应保留优化素材、参数、手选 ID 和参考名册，服务端继续检查图片属于当前作品和故事线。
 - `imageSettings` 新增 `promptProviderId/promptModel/promptSystemPrompt/useCharacterReferences`。优化模型默认依次使用已配置的摘要压缩和写作模型，读取摘要压缩用途的参数；输入加完整输出预留超限时请求前停止。所有优化及图片调用均无自动重试。配置未改变时重试像素不重复支付优化请求；旧图片在再次绘制时进入优化步骤，已有数据继续可读取。
 - 旧 `quality` 必需字段为设置兼容保留，只有 OpenAI Images 将其用于生成；Gemini 通过分辨率控制输出，不发送该字段，Together 也不把它当作图片质量参数。原图任务及旧备份字段仍可读取，新增优化和参考字段均为可选字段。
 - 图片协议新增 `together-images`。`size` 接受 `auto` 或合法 `宽x高`；可设 `aspectRatio`、`imageSize`（`auto/512/1K/2K/4K`），自动值由优化 AI 依据型号能力选择，固定值优先。额外图片参数按已知型号能力校验，含 Gemini 的 `systemInstruction/temperature/topP/topK/seed/maxOutputTokens/thinkingLevel/includeThoughts`，OpenAI 的 `quality/background/outputFormat/outputCompression/inputFidelity/moderation`，Together 的 `width/height/steps/guidanceScale/negativePrompt/promptUpsampling/disableSafetyChecker`。不可用参数在保存或请求前明确报错，不静默丢弃。
@@ -74,7 +76,7 @@
 
 ## 分章规则接口
 
-以下路径带 `/api` 前缀，均需登录及 `?view=author`，缺少作者视图返回 403。规则库在服务端全局保存，独立于 `Settings` 和作品备份，完整数据目录迁移保留。
+以下路径带 `/api` 前缀，均需登录。规则库在服务端全局保存，独立于 `Settings` 和作品备份，完整数据目录迁移保留。
 
 - `GET /chapter-rules -> {rules:ChapterRule[]}`：返回 10 条内置规则与至多 100 条自定义规则。标题规则字段为 `{id,type?:"regex",name,pattern,flags,description,builtIn?}`，省略 type 沿用标题匹配，兼容已有规则库。字数规则字段为 `{id,type:"length",name,wordsPerChapter,description,builtIn?}`。内置 ID 为 auto/chinese/volume/english/numbered/bracketed/markdown/special/none/length，length 默认每章 3000 字。
 - `POST /chapter-rules ChapterRuleInput -> ChapterRule`；`PUT /chapter-rules/:id` 同请求体；`DELETE /chapter-rules/:id -> {ok:true}`。标题规则输入 `{type?:"regex",name,pattern,flags?,description?}`；字数规则输入 `{type:"length",name,wordsPerChapter,description?}`，wordsPerChapter 为 100～100000 的整数，不转换字符串或截断小数，不接受标题匹配字段。名称去首尾空白后为 1–80 字符，不与已有规则重复；表达式 1–1000 字符，说明最多 500 字符，flags 为 `""|"i"|"u"|"iu"`、默认 i。拒绝未知字段、无效表达式及匹配空行的规则。内置规则不能覆盖或删除，另存时由服务生成新 ID。
@@ -85,7 +87,7 @@
 
 ## 章节标题修复接口
 
-- `POST /branches/:id/chapter-titles/preview?view=author {baseRevisionId,chapterIds:string[],instruction?:string} -> ChapterTitlePreview`：选择1～20个不同章节，检查作者视图、当前版本及空闲任务状态；读取固定版本本章首4000／长章末1500字符，以及邻章各600字符。导入章节能在原文件中用本章开头唯一定位时，附带起点前800字符与匹配开头作为 sourceContext；查不到或重复时不猜测。返回前再次检查版本和任务。
+- `POST /branches/:id/chapter-titles/preview?view=author {baseRevisionId,chapterIds:string[],instruction?:string} -> ChapterTitlePreview`：选择1～20个不同章节，检查当前版本及空闲任务状态；读取固定版本本章首4000／长章末1500字符，以及邻章各600字符。导入章节能在原文件中用本章开头唯一定位时，附带起点前800字符与匹配开头作为 sourceContext；查不到或重复时不猜测。返回前再次检查版本和任务。
 - `POST /sources/:id/chapter-titles/preview?view=author {chapters:ChapterTitleSample[],instruction?:string} -> ChapterTitlePreview`：仅未确认的原文件可用，支持当前窗口手动编辑／分章后的草稿样本，每次1～20条，不写入源文件、导入目录或故事版本；正文样本及相邻片段采用上述长度限制，原文件上下文由服务端定位补充。source 确认或删除后的迟到结果拒绝。
 - 两种预览都把客户端／数据库标识映射为临时 UUID，模型只见标题和文本，不见目录位置；结果按标识映射回原选择。优先提取模型，依次写作、压缩模型；配置及上下文预算在请求前检查，一次请求不自动重试。同一故事线或源文件同时最多一个标题预览。关闭连接取消请求；与已有模型操作共用限速。
 - `ChapterTitlePreview={ok,suggestions?:[{chapterId,originalTitle,title,reason,evidence,confidence:high|medium|low,multipleChapters:boolean}],error?,inputTokens?,outputTokens?,capture?}`。要求全部标识恰好返回一次，evidence 必须是该章已提供正文或原文件上下文的逐字摘录；high 改名须有依据。新编号必须已出现于原标题或本章材料，拒绝按目录位置猜号。失败返回 `ok:false` 及已收到的脱敏诊断，不应用标题。
@@ -93,50 +95,49 @@
 
 ## 文字与作品接口
 
-- 阅读投影按同一路径的成功公开提取累计出场，修复档案被后续秘密更新持续隐藏的问题；必须匹配唯一实体和一致的公开非未来事实，不使用失败／跨线输出，不改写作者原始档案。新提取在公开事实出现时提升非人工秘密档案，不因秘密更新降低此前公开状态；秘密来源的事实、称呼和关系仍单独隐藏。
-- `Revision.restoredFromRevisionId?` 记录回退实际恢复的历史版本，完整审计父链仍保留；阅读章末快照与公开提取证据沿恢复来源读取，避免删除图片、人工秘密等被回退操作继续影响恢复后的阅读资料。完整备份重映射该关联，来源必须属于正常父链中的历史版本，非法或循环来源拒绝恢复。
+- `Revision.restoredFromRevisionId?` 记录回退实际恢复的历史版本，完整审计父链仍保留；章末快照沿恢复来源读取，确保回退后的分支和资料维护使用所恢复的历史状态。完整备份重映射该关联，来源必须属于正常父链中的历史版本，非法或循环来源拒绝恢复。
 
 - 认证接口见上文“登录与安全边界”，初始密码由服务器环境提供；改密与会话撤销不进入作品备份。
-- GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],branchTree:BranchTreeEntry[],sources:Source[]}。GET 默认隐藏 premise（初始作者设定），显式 ?view=author 返回。
+- GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],branchTree:BranchTreeEntry[],sources:Source[]}。GET 返回完整 premise（初始作者设定）。
 - DELETE /projects/:id（无请求体）-> {ok:true}：永久删除整部作品，包括原文、正文、所有故事线及历史快照、世界资料、剧情规划与伏笔、任务、导入队列、模型输出和搜索索引。先取消该作品未结束的任务、中止模型请求并等待收尾，再在事务中清理数据，迟到结果不能重新写回。删除期间创建、恢复或重试任务返回 409；重复并发删除返回 409，作品不存在或已删除返回 404。沿用 session 和同源校验，无需 baseRevisionId 或作者视图参数；不影响其他作品、登录和供应商设置。原文清理如遇文件占用，会保留在内部待清理目录并在下次服务启动重试。
-- GET /branches/:id?view=author|reader&chapterId= -> BranchView，默认 reader。阅读视图可指定当前故事线中的 `chapterId`，服务端读取截至该章结尾的最新历史快照，恢复当时的人物、物品、名称／别名、归并关系与当前位置；后续出场和资料更新不进入该响应。省略时读取故事线结尾，作者视图忽略进度并返回完整当前状态。读者视图移除 outline/foreshadows/secret 和 future 事实（outline 空对象结构保留），简介与卡片预览优先显示当时的当前状态，过去事实仍保留历史标记。`BranchView.readingChapterId` 标记实际阅读资料进度，`state.chapters` 保留当前故事线的完整目录供切章，摘要清空；`branch.revisionId` 仍为故事线当前版本。进度不属于本线返回 404，缺少匹配当前正文路径的历史快照返回 409，不以最新资料替代，不触发模型调用或修改版本。
+- GET /branches/:id -> BranchView：返回当前故事线完整状态、版本历史、世界设定、伏笔、秘密与未来资料、摘要及 RPG 选择，不再返回 readingChapterId。切章不请求另一份资料快照；需要历史状态时通过分支或回退处理。
 - GET /branches/:id/chapters/:chapterId -> Chapter（只可取该线实际包含的章）。
-- POST /branches/:id/chapters {baseRevisionId,title,text,chapterId?} -> BranchView。新建章节保存为 pending 并自动整理，未配置模型也保留正文。携带 `chapterId` 编辑已有章节时，必须显式 `?view=author` 并无未结束文字任务；在原分支新建正文版本，保留后续章节、已有摘要、资料、关系、锁定内容及原整理状态，不创建分支、不排队提取、不请求模型。旧正文不覆盖；受影响章末快照同步更新，阅读与手动分支仍使用一致边界。仅改标题保留正文 ID；正文改变时创建新正文 ID，匹配到的引文更新章节及段号，失效或无法唯一定位的引文解除但保留事实，伏笔和压缩摘要的章节关联同步映射。所编辑章的旧图片引用从当前状态移除，历史及其他线的图片像素保留；RPG 旧章末选择失效。需更新资料时显式使用单章 extract 接口。过期版本返回 409，其他线的章节返回 404，缺少作者视图返回 403。
+- POST /branches/:id/chapters {baseRevisionId,title,text,chapterId?} -> BranchView。新建章节保存为 pending 并自动整理，未配置模型也保留正文。携带 `chapterId` 编辑已有章节时，必须无未结束文字任务；在原分支新建正文版本，保留后续章节、已有摘要、资料、关系、锁定内容及原整理状态，不创建分支、不排队提取、不请求模型。旧正文不覆盖；受影响章末快照同步更新，历史与手动分支仍使用一致边界。仅改标题保留正文 ID；正文改变时创建新正文 ID，匹配到的引文更新章节及段号，失效或无法唯一定位的引文解除但保留事实，伏笔和压缩摘要的章节关联同步映射。所编辑章的旧图片引用从当前状态移除，历史及其他线的图片像素保留；RPG 旧章末选择失效。需更新资料时显式使用单章 extract 接口。过期版本返回 409，其他线的章节返回 404。
 - `DELETE /branches/:id/chapters/:chapterId?view=author {baseRevisionId} -> BranchView`：只移除当前故事线的所选章，保留其他正文、原文件、历史和其他线。清理该章摘要、非锁定事实、引用关系和章节图片引用；锁定事实保留并解除被删正文的引用。后续编号、未来规划及伏笔预计章节顺延，被处理章覆盖的压缩摘要移除；删除 RPG 章末选择所属章时移除该选择，作者角色设定保留。
 - `DELETE /branches/:id/chapters/:chapterId/extraction?view=author {baseRevisionId} -> BranchView`：保留正文并清除该章旧提取资料与摘要，保留锁定条目与锁定事实，章节改为 pending，不调用模型。其他章节原有结果保留，相关章末快照同步修正。
 - `POST /branches/:id/chapters/:chapterId/extract?view=author {baseRevisionId} -> {view:BranchView,job:Job}`：在同一事务中清除旧结果、创建 total=1 的单章提取任务。未配置模型时先拒绝，不清除资料。内部 targetChapterId 固定所选章，extractChapterId/blockIndex 保存断点；运行、恢复和本地应用输出都只处理目标章。沿用提取输出模式、证据校验、用量、输出留存、配置的显式自动重试策略及手工修正流程。
 - `DELETE /branches/:id/entities/:entityId?view=author {baseRevisionId} -> BranchView`：删除本线档案、事实、合并别名记录、关联关系与资料图片引用，清理伏笔 relatedEntityIds，保留正文。删除正在扮演的已有角色档案时，玩家设定以原创角色继续保存；重新提取仍可能重新发现该档案。
-- 上述四个接口要求登录、同源、显式作者视图与当前版本。排队、运行、暂停或请求仍在结束时返回 409，需先完成或取消；过期版本或缺少匹配正文路径的历史快照返回 409，非本线条目返回 404，缺少作者视图返回 403。维护与历史章提取新增受影响的章末快照，旧快照和输出不改写；回退恢复旧状态，迟到输出不能写入新版本。单章提取名称索引固定到该章进度，后续别名、伏笔和事实不进入提取上下文；较晚章节的新状态优先于早章重新发现的旧状态。
+- 上述四个接口要求登录、同源与当前版本。排队、运行、暂停或请求仍在结束时返回 409，需先完成或取消；过期版本或缺少匹配正文路径的历史快照返回 409，非本线条目返回 404。维护与历史章提取新增受影响的章末快照，旧快照和输出不改写；回退恢复旧状态，迟到输出不能写入新版本。单章提取名称索引固定到该章进度，后续别名、伏笔和事实不进入提取上下文；较晚章节的新状态优先于早章重新发现的旧状态。
 - `POST /branches/:id/fork {baseRevisionId,chapterId?,name} -> BranchView`：不指定 `chapterId` 代表当前结尾。名称去首尾空白后为 1–200 个字符。新分支保存实际起点 `forkChapterId` 与可选 `forkChapterTitle`，显示分叉位置；旧记录可只读补充现存章标题，未知起点不推测。
 - `GET /projects/:id` 的 `branches` 仍只包含可用故事线，`branchTree:BranchTreeEntry[]` 增加仍被可用子线依赖的已删祖先，不包含无子线依赖的已删分支。每项包含原 `Branch` 字段及当前版本的 `chapters:{id,title}[]`，只返回章节标识与标题，不返回正文、摘要、资料或内部任务。章节树按完整前缀与不可变正文 ID 合并节点，不按同名章节或旧 `parentBranchId` 嵌套；同一末章可显示多条线的名称，已删线的名称不可选择。旧记录只读投影，数据库与备份无需迁移。
-- `PUT /branches/:id/name?view=author {baseRevisionId,name} -> Branch`：重命名主线或可用分支。要求登录、同源、显式作者视图和当前版本；过期版本返回 409，已删分支返回 404，空白或超过 200 个字符返回 400。只更新故事线名称与作品更新时间，不新增正文版本、不改变父子关系或中断任务；名称不随正文回退，完整作品备份保留名称。
+- `PUT /branches/:id/name?view=author {baseRevisionId,name} -> Branch`：重命名主线或可用分支。要求登录、同源和当前版本；过期版本返回 409，已删分支返回 404，空白或超过 200 个字符返回 400。只更新故事线名称与作品更新时间，不新增正文版本、不改变父子关系或中断任务；名称不随正文回退，完整作品备份保留名称。
 - `GenerateInput.branchName?:string`：AI 整章／选段改写、重新生成及首次 RPG 入场自动开分支时使用指定名称，同样须为 1–200 个字符；旧客户端省略时沿用自动名称。UI 开始生成前可编辑这个名称。普通续写及 RPG 后续选择沿当前线继续。
 - AI 改写与重新生成按目标章之前的完整正文前缀确定 `parentBranchId`：起点仍属于本线创建时继承的章节时，向来源祖先查找；同一章的多次生成挂到共同来源，继承前缀被本线编辑或起点包含本线新增章节时保留本线为父分支。版本历史仍连接到发起线的实际章末快照，原作参考与任务的 `sourceBranchId` 保留真实发起来源，迟到写入与原线保护沿用现有检查。手动分支及 RPG 入场的来源记录保持原规则。
-- `DELETE /branches/:id?view=author {baseRevisionId} -> {ok:true,mainBranchId}`：删除所选非主线分支，客户端切回主线并刷新列表。要求登录、同源、作者视图及当前版本；主线、未结束文字／生图任务或文字请求仍在收尾时返回 409，缺少作者视图返回 403，重复删除或访问已删分支返回 404。逻辑删除以 `Branch.deletedAt` 保存，项目列表与任务列表不显示已删分支，其任务不能继续／重试；正文、版本、输出及图片保留，用于其他线的历史、原作参考和 RPG 章末选择。子分支不随父分支删除，完整备份保留删除状态与依赖，恢复后已删分支仍不可选择，仅在树中保留可用子线所需的祖先章节目录；主线被标为删除的备份拒绝恢复。分支删除不改变其他分支的版本，也不能通过正文回退撤销。
+- `DELETE /branches/:id?view=author {baseRevisionId} -> {ok:true,mainBranchId}`：删除所选非主线分支，客户端切回主线并刷新列表。要求登录、同源、当前版本；主线、未结束文字／生图任务或文字请求仍在收尾时返回 409，重复删除或访问已删分支返回 404。逻辑删除以 `Branch.deletedAt` 保存，项目列表与任务列表不显示已删分支，其任务不能继续／重试；正文、版本、输出及图片保留，用于其他线的历史、原作参考和 RPG 章末选择。子分支不随父分支删除，完整备份保留删除状态与依赖，恢复后已删分支仍不可选择，仅在树中保留可用子线所需的祖先章节目录；主线被标为删除的备份拒绝恢复。分支删除不改变其他分支的版本，也不能通过正文回退撤销。
 - POST /branches/:id/rollback {baseRevisionId,revisionId} -> BranchView。
-- 作者视图的 `state.chapters[].summary` 为导入或整理正文时同时提取的已发生剧情摘要，片段摘要按处理顺序累积；与 `state.outline.fine` 的预期规划分开；不再生成或使用 coarse。回退和旧章节分支读取该边界的整份快照，摘要、伏笔状态与人物位置事实一起恢复。读者视图及章节正文接口继续隐藏摘要。
+- `state.chapters[].summary` 为导入或整理正文时同时提取的已发生剧情摘要，片段摘要按处理顺序累积；与 `state.outline.fine` 的预期规划分开；不再生成或使用 coarse。回退和旧章节分支读取该边界的整份快照，摘要、伏笔状态与人物位置事实一起恢复。章节正文接口继续仅返回正文信息，完整摘要保留在 BranchView。
 - `state.foreshadows` 保留历史状态，界面默认只显示 `planned/planted`。`resolved/abandoned` 不进入后续待处理伏笔上下文，模型再次提及同名线索不会自动重新打开；作者仍可在历史入口手工查看与修正。
 - 地图使用两端均为 `location` 的地理关系，不将人物或任务关系画成地图节点。人物当前位置使用 `attribute=location` 的当前事实；同一状态按引用章节、段落的先后更新，旧记录转为过去，锁定或不确定的冲突保留供作者核对。
 - PUT /branches/:id/outline {baseRevisionId,outline:{worldview?,locked,fine?}} -> BranchView。编辑世界观与作者约束；历史 fine 可省略，携带时必须与现有值相同，修改返回 410。此接口不能设置压缩摘要。
 - PUT /branches/:id/entities/:entityId {baseRevisionId,entity} -> BranchView；POST /branches/:id/entities/merge {baseRevisionId,fromId,toId} -> BranchView（回退撤销合并）。
 - PUT /branches/:id/foreshadows {baseRevisionId,foreshadows} -> BranchView。
-- GET /branches/:id/search?q=&view=reader|author&chapterId= -> {chapters:{id,title,snippet}[],entities:Entity[]}。阅读档案检索沿用指定章节的资料快照与过滤规则；正文检索保留整条故事线供跳转，跳转后界面同步读取目标章的资料。省略进度及作者视图行为与 BranchView 一致。
+- GET /branches/:id/search?q= -> {chapters,entities}：搜索当前故事线的完整正文与资料，包含秘密与未来事实；旧 view 与 chapterId 查询参数不改变范围。
 - 旧默认可见性兼容发生在版本读取阶段：仅使用对应版本祖先路径内的 applied 提取记录、明确的旧补字段标记、唯一名称／别名匹配和一致的事实／原文引用恢复误隐藏的公开内容。人工秘密、锁定、真实秘密及未来事实仍受原规则约束；没有可靠依据时不放开。旧快照和提取输出保留，接口不生成新版本、不重发模型请求，完整备份恢复后继续兼容。
 - POST /projects/:id/import multipart file -> SourcePreview；GET /sources/:id/preview -> SourcePreview；GET /sources/:id/file 原文件；GET /sources/:id/chapters/:index 原文纯文本。
 - POST /sources/:id/confirm {branchId,baseRevisionId,chapters:[{title,text}]} -> Job（确认目录后追加原文章节并整理）。
 - POST /branches/:id/generate GenerateInput -> Job：`title` 去除首尾空白后非空则直接保存；缺省、空串或纯空白则先保存正文，后台资料任务先额外调用一次写作模型自动命名，再整理资料。命名仅发送本章完整文本，返回 `{title:string}`，不带内部序号、目录位置或章节 ID；自动题名不含章节编号。整章／选段改写与重新生成遵守同一选择，选段使用合并后的全章；RPG 章末选择开启的新章自动命名。标题与章末快照、任务进度原子保存，绑定起始版本；完成后作者 Job.title 和实时快照显示最终题名。命名不自动重试，失败保留正文且显式重试只处理未完成阶段。既有任务未标记自动命名时保持原行为。完整保存后创建资料整理任务；不调用剧情规划模型或后置规划工具。旧已保存正文的任务恢复时仅完成资料整理，不重新请求正文。
 - GET /jobs/:id/events?view=author -> text/event-stream；只允许正文生成任务。连接首先发送 {type:'snapshot',text,title,job,chapterId?,activities?:WritingActivity[]}，随后 {type:'delta',text}、{type:'activity',activity:WritingActivity} 或 {type:'status',job,chapterId?}，paused/failed/cancelled/stale/completed 后结束。草稿持久化，重连读取完整快照；客户端断开订阅不会取消服务器任务，暂停或取消须显式操作任务。
-- GET /jobs/:id/activities?view=author -> WritingActivity[]；仅 generate 任务，需登录及显式作者视图，缺少作者视图返回 403。活动为 {id,kind:'thinking'|'tool',text?,thinkingSource?:'native'|'preset',thinkingTokens?:number,name?,arguments?,result?,status:'running'|'completed'|'failed',error?,proseOffset?:number}，按记录顺序返回；proseOffset 为活动首次出现时作者可见正文的 UTF-16 位置，同 id 后续更新不移动。选段改写保存完整章节后加原文前缀位置，快照同步完整正文。旧记录无位置字段，界面明确提示；位置随备份恢复。实时消息是同 id 完整更新，客户端替换而非重复累加；过程按位置分组且默认折叠，刷新由接口／快照恢复。普通写作重新生成会清理上一轮实时过程，原输出记录保留；RPG 已保存的完整交互保留此前位置，历史规划过程仍可查看。
+- GET /jobs/:id/activities?view=author -> WritingActivity[]；仅 generate 任务，需登录。活动为 {id,kind:'thinking'|'tool',text?,thinkingSource?:'native'|'preset',thinkingTokens?:number,name?,arguments?,result?,status:'running'|'completed'|'failed',error?,proseOffset?:number}，按记录顺序返回；proseOffset 为活动首次出现时作者可见正文的 UTF-16 位置，同 id 后续更新不移动。选段改写保存完整章节后加原文前缀位置，快照同步完整正文。旧记录无位置字段，界面明确提示；位置随备份恢复。实时消息是同 id 完整更新，客户端替换而非重复累加；过程按位置分组且默认折叠，刷新由接口／快照恢复。普通写作重新生成会清理上一轮实时过程，原输出记录保留；RPG 已保存的完整交互保留此前位置，历史规划过程仍可查看。
 - 每轮实际工具结果之后追加可见的“工具结果复核”指令：Chat／Responses 在结果后追加 user 消息，Gemini／Claude 在本轮用户工具结果消息末尾追加 text；不修改已有工具结果和签名，不改变思考配置或输出额度，不增加额外确认回合。旧 RPG 已完成工具的断点在下次续接前补入一次，重复预览不改原断点。写作完整预览展示相同规则，实际追加位置见逐轮请求诊断。
 - 过程展示接口返回的原生思考摘要、文本 think/thinking 块中的预设思考及实际执行的工具调用。thinkingSource=preset 标识预设思考，旧记录省略时按原生展示；该字段随 SSE、快照和备份保留。Gemini 单轮没有公开原生摘要、但返回正整数 thoughtsTokenCount 时，新增 text 缺省、thinkingTokens 为实际用量、status=completed 的原生思考活动；同轮有公开摘要则不重复创建，没有文本及正数用量则不造活动。用量在响应结束后才确认，活动定位到本轮开始处（工具后续接沿用前一个工具的正文位置），旧位置未知时保留缺省。thinkingTokens 随刷新和备份保留，不进入正文或阅读视图。textFilter=dramatron 时在移除标签的同时按正文顺序分流，流式标签可跨片段，普通文本及外层 prose 工具字段均支持，JSON 字符串内的字面标签和辅助尾段不生成思考活动。未完成块在取消／失败时保留并结束为失败，记录回调失败后不再次提交片段。不导出加密推理字段、思考签名；已知密钥和凭据字段脱敏。思考和工具活动独立存储，不能进入 chapter.text、正文编辑器、剧情提取或 TXT 导出。取消及版本变化后拒绝迟到活动，终态活动在正文事务成功后先于 completed 发送。
 - POST /branches/:id/summary-compression?view=author {baseRevisionId} -> Job（kind=plan,purpose=compress-summary，历史名称兼容）；使用 compression 输出阶段，仅创建压缩候选，不修改故事版本。完整源摘要超过摘要压缩模型窗口时分段压缩，再做合并压缩，最多三轮；每段独立校验完整预留输出并持久化进度，重试或人工修复不重复已完成段。进度通过 Job.progress/total/message 返回。GET /jobs/:id/summary-compression?view=author -> {text,chapterIds,baseRevisionId}；POST /branches/:id/summary-compression/confirm?view=author {baseRevisionId,jobId,text} -> BranchView，校验候选版本与覆盖章节后才写入 outline.summaryCompression。候选及确认内容必须比完整原摘要短，原分章摘要保留。
 - 剧情规划接口 /branches/:id/plan 已移除，返回 404。新任务不提供 update_plot_plan；旧保存工具会话中的同名工具仅返回停用说明。
-- GET /jobs?projectId=&view=reader|author -> Job[]；POST /jobs/:id/:action?view=reader|author（pause/resume/retry/cancel）-> Job。payload 永远不通过HTTP返回；生成 Job 顶层提供 generatedChapterId，作者视图额外提供 title 与 generationInput（mode/instruction/maxWords/title），读者视图隐藏这些创作要求；purpose=compress-summary 区分摘要压缩任务；默认读者视图只返回公共任务状态，作者视图显示详细错误。usageEstimated 表示用量含估算值；inputTokens/outputTokens 为累计统计，不参与请求额度限制。
-- 模型输出接口均要求登录及显式 `view=author`，缺少作者视图返回 403；普通任务接口不携带模型输出正文。
+- GET /jobs?projectId=&view=reader|author -> Job[]；POST /jobs/:id/:action?view=reader|author（pause/resume/retry/cancel）-> Job。payload 永远不通过HTTP返回；生成 Job 顶层提供 generatedChapterId，同时提供 title 与 generationInput（mode/instruction/maxWords/title）及 RPG 选择信息；purpose=compress-summary 区分摘要压缩任务；返回完整任务状态和详细错误。usageEstimated 表示用量含估算值；inputTokens/outputTokens 为累计统计，不参与请求额度限制。
+- 模型输出接口均要求登录；普通任务接口不携带模型输出正文。
 - GET /jobs/:id/outputs?view=author -> ModelOutputSummary[]；GET /jobs/:id/outputs/:outputId?view=author -> ModelOutputDetail（原始响应、模型文本、修正文本、校验问题、对应编号原文及 canApply）。
 - 自动命名记录使用 `stage=chapter-title`，保留完整脱敏请求与响应；可在后台任务的输出记录中查看、导入并手工修正 `{title:"题名"}`。应用后任务保持暂停，手动继续只进行资料整理。`generationInput.title` 保留手动输入语义，自动命名时省略；`Job.title` 显示最终保存的名称。
 - 详情中的 `normalizedText` 是本地补全与证据对齐后的 JSON，或写作工具多轮返回的合成正文；`adjustments` 记录对应字段及处理说明，不改写 `rawResponse` / `text`。列表摘要不携带这些正文内容。`sourceParagraphs` 只提供当前片段实际可见的原文，超长段落不会提前返回后半段作为本次依据。
-- `request` 为发送前保存的脱敏请求快照（真实 URL、头、正文、协议、模型、时限、流式开关）；`diagnostics` 为耗时、响应字节数、白名单响应头及传输结果。空响应或连接失败同样记录；请求和响应使用同一输出ID，响应只可填充一次。仅作者详情返回快照，列表与阅读接口不带请求正文。
+- `request` 为发送前保存的脱敏请求快照（真实 URL、头、正文、协议、模型、时限、流式开关）；`diagnostics` 为耗时、响应字节数、白名单响应头及传输结果。空响应或连接失败同样记录；请求和响应使用同一输出ID，响应只可填充一次。仅模型输出详情返回快照，普通任务列表不带请求正文。
 - `diagnostics` 可含 `modelOutcome`（completed/blocked/truncated/empty/error）、`finishReason`、`promptBlockReason`。这是模型服务响应的反馈，不代表资料校验通过；Gemini 流式的真实 `promptFeedback.blockReason` 不替换为泛化标签。网关未返回模型反馈时省略相应字段，不从 5xx 猜测拦截原因，旧备份可继续读取。
 - POST /jobs/:id/outputs?view=author {text} -> ModelOutputRecord：保存历史响应，不自动应用，也不调用模型。
 - POST /jobs/:id/outputs/:outputId/apply?view=author {text,baseRevisionId} -> Job：保存修正后做本地校验。格式或证据不符返回 422，详情接口可取已保存草稿及问题；版本、阶段、进度过期或重复应用返回 409。成功后 completed 或 paused，不自动运行下一次模型请求。

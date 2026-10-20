@@ -1,3 +1,4 @@
+import { showGenerationProcess } from './branch-browser-helpers';
 import { expect, test, type Page } from '@playwright/test';
 
 test.describe.configure({ mode: 'serial' });
@@ -16,7 +17,7 @@ test.afterEach(async ({ page }, testInfo) => { if (testInfo.title.startsWith('�
 async function openImport(page: Page, title: string, text = source) {
   const project = await (await page.request.post('/api/projects', { data: { title } })).json();
   await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${title}`, exact: true }).click();
-  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await showGenerationProcess(page);
   if ((page.viewportSize()?.width ?? 1440) < 760) await page.getByRole('button', { name: '打开章节目录', exact: true }).click();
   await page.getByRole('button', { name: '导入小说', exact: true }).click();
   const modal = page.getByRole('dialog');
@@ -53,7 +54,7 @@ test('标题修复：已保存章节可预览、选择应用和回退，版本�
   const saved = await (await page.request.post(`/api/branches/${project.mainBranchId}/chapters?view=author`, { data: { baseRevisionId: view.branch.revisionId, title: '第12章 错题', text: '第16章 雨夜\n\n林舟来到码头寻找刚刚失踪的守城人。' } })).json();
   const chapterId = saved.state.chapters[0].id;
   await expect.poll(async () => (await (await page.request.get(`/api/branches/${project.mainBranchId}?view=author`)).json()).state.chapters[0].status).toBe('ready');
-  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${title}`, exact: true }).click(); await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${title}`, exact: true }).click(); await showGenerationProcess(page);
   await page.locator('.chapter-item').first().click(); await page.locator('.chapter-actions > summary').click(); await page.getByRole('button', { name: 'AI 修复章节标题', exact: true }).click();
   const repair = page.getByTestId('chapter-title-repair');
   await repair.getByRole('button', { name: '生成标题修复建议', exact: true }).click();
@@ -66,7 +67,7 @@ test('标题修复：已保存章节可预览、选择应用和回退，版本�
   await expect(repair).toContainText('故事线已有新版本');
   expect((await (await page.request.get(`/api/branches/${project.mainBranchId}/chapters/${chapterId}`)).json()).title).toBe('作者刚改的标题');
   await page.getByRole('button', { name: '关闭对话框', exact: true }).click();
-  await page.reload(); await page.getByRole('button', { name: `打开作品 ${title}`, exact: true }).click(); await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await page.locator('.chapter-item').first().click();
+  await page.reload(); await page.getByRole('button', { name: `打开作品 ${title}`, exact: true }).click(); await showGenerationProcess(page); await page.locator('.chapter-item').first().click();
   await page.locator('.chapter-actions > summary').click(); await page.getByRole('button', { name: 'AI 修复章节标题', exact: true }).click();
   await repair.getByRole('button', { name: '生成标题修复建议', exact: true }).click();
   await expect(repair.getByLabel('建议标题：作者刚改的标题', { exact: true })).toHaveValue('第16章 雨夜');

@@ -108,7 +108,7 @@ it('connection tests use the saved output cap and expose sanitized diagnostics e
   expect(result.body).not.toContain('test-secret-key'); expect(result.body).not.toContain('private-cookie');
 });
 
-it('persists an in-flight request and its empty failure in one immutable author-only record and backup', async () => {
+it('persists an in-flight request and its empty failure in one immutable authenticated record and backup', async () => {
   const ctx = await context(); let entered = false; let finish!: () => void;
   const url = await endpoint((_body, response) => { entered = true; finish = () => { response.writeHead(500); response.end(); }; });
   ctx.settings.save(settings({ baseUrl: url, temperature: 0 }));
@@ -118,7 +118,7 @@ it('persists an in-flight request and its empty failure in one immutable author-
   const waitFor = async (check: () => boolean) => { const deadline = Date.now() + 4000; while (!check()) { if (Date.now() > deadline) throw new Error('本地模拟请求未完成'); await new Promise(resolve => setTimeout(resolve, 5)); } };
   await waitFor(() => entered); const before = ctx.engine.listOutputs(job.id); expect(before).toHaveLength(1);
   const id = before[0].id; expect(ctx.engine.outputDetail(job.id, id).output.request?.body).toContain('旅人看见灯塔');
-  expect(before[0]).not.toHaveProperty('request'); expect((await ctx.app.inject({ url: `/api/jobs/${job.id}/outputs/${id}`, cookies: { session: ctx.session } })).statusCode).toBe(403);
+  expect(before[0]).not.toHaveProperty('request'); expect((await ctx.app.inject({ url: `/api/jobs/${job.id}/outputs/${id}`, cookies: { session: ctx.session } })).statusCode).toBe(200);
   finish(); await waitFor(() => ctx.engine.listJobs().find(item => item.id === job.id)?.status === 'failed');
   expect(ctx.engine.listOutputs(job.id)).toHaveLength(1); const output = ctx.engine.outputDetail(job.id, id).output;
   expect(output.httpStatus).toBe(500); expect(output.diagnostics?.responseBytes).toBe(0); expect(output.request?.headers['x-goog-api-key']).toBe('[REDACTED]');

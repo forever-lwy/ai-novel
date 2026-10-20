@@ -1,5 +1,12 @@
 import { expect, type Page } from '@playwright/test';
 
+export async function showGenerationProcess(page: Page) {
+  const toggle = page.locator('.workspace-header button[aria-pressed]');
+  await expect(toggle).toBeEnabled();
+  if (await toggle.getAttribute('aria-pressed') === 'true') await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+}
+
 export async function currentBranchId(page: Page) {
   await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', /.+/);
   return (await page.locator('.workspace').getAttribute('data-branch-id'))!;

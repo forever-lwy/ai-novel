@@ -213,19 +213,19 @@ describe('branch deletion and manual editing HTTP contracts', () => {
     expect(store.state(branchId).chapters[0].status).toBe('ready');
   });
 
-  it('requires login, author view, a current revision and finished tasks for deletion and editing', async () => {
+  it('requires login, a current revision and finished tasks for deletion and editing', async () => {
     const { store, app, engine, session, branchId } = await context(); const fork = store.fork(branchId, { baseRevisionId: base(store, branchId), name: 'HTTP 分支' });
     const deleteUrl = `/api/branches/${fork.branch.id}`; const target = store.state(branchId).chapters[0];
     const routes = [{ method: 'DELETE' as const, url: deleteUrl, payload: { baseRevisionId: fork.branch.revisionId } }, { method: 'POST' as const, url: `/api/branches/${branchId}/chapters`, payload: { baseRevisionId: base(store, branchId), chapterId: target.id, title: target.title, text: '手动修改。' } }];
     for (const route of routes) {
       expect((await app.inject({ ...route, url: `${route.url}?view=author` })).statusCode).toBe(401);
-      expect((await app.inject({ ...route, cookies: { session } })).statusCode).toBe(403);
+      expect((await app.inject({ ...route, cookies: { session }, payload: { ...route.payload, baseRevisionId: 'old' } })).statusCode).toBe(409);
       expect((await app.inject({ ...route, url: `${route.url}?view=author`, cookies: { session }, payload: { ...route.payload, baseRevisionId: 'old' } })).statusCode).toBe(409);
     }
     const waiting = job(store, fork.branch.id, 'paused');
     expect((await app.inject({ ...routes[0], url: `${deleteUrl}?view=author`, cookies: { session } })).statusCode).toBe(409);
     engine.action(waiting.id, 'cancel');
-    expect((await app.inject({ ...routes[0], url: `${deleteUrl}?view=author`, cookies: { session } })).statusCode).toBe(200);
+    expect((await app.inject({ ...routes[0], cookies: { session } })).statusCode).toBe(200);
     expect((await app.inject({ url: `${deleteUrl}?view=author`, cookies: { session } })).statusCode).toBe(404);
     expect((await app.inject({ method: 'DELETE', url: `/api/branches/${branchId}?view=author`, cookies: { session }, payload: { baseRevisionId: base(store, branchId) } })).statusCode).toBe(409);
   });

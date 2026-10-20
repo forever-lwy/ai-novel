@@ -53,7 +53,7 @@ describe('HTTP boundaries and persistence', () => {
     await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: { session }, payload: input });
     expect(ctx.settings.public().providers[0].hasKey).toBe(false);
   });
-  it('reader views and search omit private planning and private entity facts', async () => {
+  it('all display modes return complete author materials, search and task diagnostics', async () => {
     const ctx = await make(), session = await login(ctx);
     const p = ctx.store.createProject({ title: '隐秘档案', premise: '未来真相不公开' });
     let branch = ctx.store.getBranch(p.mainBranchId);
@@ -63,19 +63,21 @@ describe('HTTP boundaries and persistence', () => {
     ctx.store.updateForeshadows(branch.id, branch.revisionId, [{ id: 'f1', title: '最后的钥匙', detail: '秘密揭晓答案', status: 'planned', revealCondition: '第三章', relatedEntityIds: [] }]);
     const reader = await ctx.app.inject({ url: `/api/branches/${branch.id}`, cookies: { session } });
     expect(reader.statusCode).toBe(200);
-    for (const secret of ['幕后身份', '明天成为城主', '隐藏人物', '秘密揭晓答案', '未来真相不公开']) expect(reader.body).not.toContain(secret);
+    for (const secret of ['幕后身份', '明天成为城主', '隐藏人物', '秘密揭晓答案', '未来真相不公开']) expect(reader.body).toContain(secret);
     const author = await ctx.app.inject({ url: `/api/branches/${branch.id}?view=author`, cookies: { session } });
     expect(author.body).toContain('秘密揭晓答案');
-    expect((await ctx.app.inject({ url: `/api/projects/${p.id}`, cookies: { session } })).body).not.toContain('未来真相不公开');
-    expect((await ctx.app.inject({ url: '/api/projects', cookies: { session } })).body).not.toContain('未来真相不公开');
+    expect((await ctx.app.inject({ url: `/api/branches/${branch.id}?view=reader`, cookies: { session } })).json()).toEqual(author.json());
+    expect(reader.json()).toEqual(author.json());
+    expect((await ctx.app.inject({ url: `/api/projects/${p.id}`, cookies: { session } })).body).toContain('未来真相不公开');
+    expect((await ctx.app.inject({ url: '/api/projects', cookies: { session } })).body).toContain('未来真相不公开');
     expect((await ctx.app.inject({ url: `/api/projects/${p.id}?view=author`, cookies: { session } })).body).toContain('未来真相不公开');
-    expect((await ctx.app.inject({ url: `/api/branches/${branch.id}/search?q=${encodeURIComponent('幕后')}`, cookies: { session } })).json().entities).toEqual([]);
+    expect((await ctx.app.inject({ url: `/api/branches/${branch.id}/search?q=${encodeURIComponent('幕后')}`, cookies: { session } })).json().entities).toHaveLength(2);
     ctx.store.saveChapter(branch.id, { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, title: '已完成正文', text: '林舟走进城里。' });
     const job = ctx.engine.enqueue(branch.id, 'plan', { baseRevisionId: ctx.store.getBranch(branch.id).revisionId, purpose: 'compress-summary' });
     const row = JSON.parse(String(ctx.store.db.prepare('SELECT data FROM jobs WHERE id=?').get(job.id)!.data));
     row.status = 'failed'; row.message = '规划幕后身份失败'; row.error = '幕后身份是守门人';
     ctx.store.db.prepare('UPDATE jobs SET status=?,data=? WHERE id=?').run('failed', JSON.stringify(row), job.id);
-    expect((await ctx.app.inject({ url: `/api/jobs?projectId=${p.id}`, cookies: { session } })).body).not.toContain('幕后');
+    expect((await ctx.app.inject({ url: `/api/jobs?projectId=${p.id}`, cookies: { session } })).body).toContain('幕后');
     expect((await ctx.app.inject({ url: `/api/jobs?projectId=${p.id}&view=author`, cookies: { session } })).body).toContain('幕后');
   });
   it('keeps uploaded original bytes and restores a separate project without overwriting the original', async () => {

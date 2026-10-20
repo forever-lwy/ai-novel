@@ -102,11 +102,11 @@ describe('story line names and lineage', () => {
 });
 
 describe('branch naming HTTP contracts', () => {
-  it('requires login and author view, validates names and revision, and returns only metadata', async () => {
+  it('requires login, validates names and revision, and returns only metadata', async () => {
     const { store, app, session, branchId } = await httpContext(); const initial = store.getBranch(branchId);
     const request = { method: 'PUT' as const, url: `/api/branches/${branchId}/name`, payload: { baseRevisionId: initial.revisionId, name: '新主线名称' } };
     expect((await app.inject({ ...request, url: `${request.url}?view=author` })).statusCode).toBe(401);
-    expect((await app.inject({ ...request, cookies: { session } })).statusCode).toBe(403);
+    expect((await app.inject({ ...request, cookies: { session } })).statusCode).toBe(200);
     for (const name of ['', ' ', '名'.repeat(201)]) expect((await app.inject({ ...request, url: `${request.url}?view=author`, cookies: { session }, payload: { ...request.payload, name } })).statusCode).toBe(400);
     expect((await app.inject({ ...request, url: `${request.url}?view=author`, cookies: { session }, payload: { ...request.payload, baseRevisionId: 'old' } })).statusCode).toBe(409);
     const response = await app.inject({ ...request, url: `${request.url}?view=author`, cookies: { session } });

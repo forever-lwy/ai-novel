@@ -27,7 +27,6 @@ import { parseTaskSettings } from '../shared/task-settings.js';
 import type { PromptPreviewInput } from '../shared/prompt-runtime.js';
 
 const revision = z.string().min(1).max(100);
-const readingProgress = (query: unknown) => z.object({ chapterId: z.string().min(1).max(100).optional() }).parse(query).chapterId;
 const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']);
 const outlineSchema = z.object({ worldview: z.string().max(100000).optional(), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000).optional() });
 const modelNameSchema = z.string().trim().max(300).refine(value => !/[\u0000-\u001f\u007f]/.test(value), '模型名称不能包含控制字符');
@@ -160,14 +159,13 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   registerAuthRoutes(app, { settings, store, secureCookies: config.secureCookies, loginAttempts: options.rateLimits?.login });
   const param = (req: any, key = 'id'): string => z.string().min(1).max(100).parse(req.params[key]);
   const base = (body: unknown) => z.object({ baseRevisionId: revision }).parse(body).baseRevisionId;
-  const author = (req: any) => req.query?.view === 'author';
   const source = (id: string): SourceRow => (store.db.prepare('SELECT * FROM sources WHERE id=?').get(id) as SourceRow | undefined) || fail('找不到原文文件。', 404);
   const sourceList = (projectId: string) => (store.db.prepare('SELECT * FROM sources WHERE project_id=? ORDER BY created_at').all(projectId) as SourceRow[]).map(sourcePublic);
   registerImportRuleRoutes(app, { settings, source, sourcePublic: value => sourcePublic(source(value.id)), bytes: value => readFileSync(join(uploadDir, source(value.id).storage_name)) });
   registerChapterTitleRoutes(app, { store, settings, engine, source, bytes: id => readFileSync(join(uploadDir, source(id).storage_name)) });
-  app.get('/api/projects', async request => store.listProjects().map(project => author(request) ? project : { ...project, premise: '' }));
+  app.get('/api/projects', async () => store.listProjects());
   app.post('/api/projects', async request => store.createProject(z.object({ title: z.string().trim().min(1).max(200), premise: z.string().max(100000).default(''), mode: mode.default('original') }).parse(request.body)));
-  app.get('/api/projects/:id', async request => { const project = store.getProject(param(request)); return { project: author(request) ? project : { ...project, premise: '' }, branches: store.listBranches(param(request)), branchTree: store.listBranchTree(param(request)), sources: sourceList(param(request)) }; });
+  app.get('/api/projects/:id', async request => { const project = store.getProject(param(request)); return { project, branches: store.listBranches(param(request)), branchTree: store.listBranchTree(param(request)), sources: sourceList(param(request)) }; });
   app.delete('/api/projects/:id', async request => {
     const projectId = param(request); let stagedDirectory: string | undefined;
     try {
@@ -196,38 +194,39 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     }
     return { ok: true };
   });
-  app.get('/api/branches/:id', async request => store.view(param(request), author(request), readingProgress(request.query)));
+  // This private workbench has one authenticated owner scope; legacy view/chapter queries do not filter it.
+  app.get('/api/branches/:id', async request => store.view(param(request), true));
   app.put('/api/branches/:id/name', async request => {
-    requireAuthor(request); const input = z.object({ baseRevisionId: revision, name: z.string().trim().min(1).max(200) }).strict().parse(request.body);
+    const input = z.object({ baseRevisionId: revision, name: z.string().trim().min(1).max(200) }).strict().parse(request.body);
     return store.renameBranch(param(request), input.baseRevisionId, input.name);
   });
   app.delete('/api/branches/:id', async request => {
-    requireAuthor(request); const branchId = param(request); engine.assertIdle(branchId);
+    const branchId = param(request); engine.assertIdle(branchId);
     return store.deleteBranch(branchId, base(request.body));
   });
   const imageInputSchema = z.object({ baseRevisionId: revision, kind: z.enum(['portrait', 'entity', 'map', 'cg']), entityId: z.string().min(1).max(100).optional(), chapterId: z.string().min(1).max(100).optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), instruction: z.string().max(20000).optional(), referenceImageId: z.string().min(1).max(100).optional(), selectedReferenceImageIds: z.array(z.string().min(1).max(100)).max(16).optional() }).strict();
-  app.get('/api/branches/:id/images', async request => images.list(param(request), author(request), readingProgress(request.query)));
-  app.post('/api/branches/:id/images', async request => { if (!author(request)) fail('请在作者视图中生成图片。', 403); return images.generate(param(request), imageInputSchema.parse(request.body)); });
-  app.get('/api/branches/:id/images/:imageId/content', async (request, reply) => { const content = images.content(param(request), param(request, 'imageId'), author(request), readingProgress(request.query)); return reply.type(content.mimeType).header('Content-Disposition', 'inline').send(Buffer.from(content.bytes)); });
-  app.post('/api/branches/:id/images/:imageId/retry', async request => { if (!author(request)) fail('请在作者视图中重试生图。', 403); return images.retry(param(request), param(request, 'imageId'), base(request.body)); });
-  app.post('/api/branches/:id/images/:imageId/cancel', async request => { if (!author(request)) fail('请在作者视图中取消生图。', 403); return images.cancel(param(request), param(request, 'imageId')); });
-  app.put('/api/branches/:id/images/:imageId/active', async request => { if (!author(request)) fail('请在作者视图中选择启用图片。', 403); const input = z.object({ baseRevisionId: revision, active: z.boolean() }).strict().parse(request.body); return images.setActive(param(request), param(request, 'imageId'), input.baseRevisionId, input.active); });
-  app.delete('/api/branches/:id/images/:imageId', async request => { if (!author(request)) fail('请在作者视图中删除图片。', 403); return images.delete(param(request), param(request, 'imageId'), base(request.body)); });
+  app.get('/api/branches/:id/images', async request => images.list(param(request), true));
+  app.post('/api/branches/:id/images', async request => { return images.generate(param(request), imageInputSchema.parse(request.body)); });
+  app.get('/api/branches/:id/images/:imageId/content', async (request, reply) => { const content = images.content(param(request), param(request, 'imageId'), true); return reply.type(content.mimeType).header('Content-Disposition', 'inline').send(Buffer.from(content.bytes)); });
+  app.post('/api/branches/:id/images/:imageId/retry', async request => { return images.retry(param(request), param(request, 'imageId'), base(request.body)); });
+  app.post('/api/branches/:id/images/:imageId/cancel', async request => { return images.cancel(param(request), param(request, 'imageId')); });
+  app.put('/api/branches/:id/images/:imageId/active', async request => { const input = z.object({ baseRevisionId: revision, active: z.boolean() }).strict().parse(request.body); return images.setActive(param(request), param(request, 'imageId'), input.baseRevisionId, input.active); });
+  app.delete('/api/branches/:id/images/:imageId', async request => { return images.delete(param(request), param(request, 'imageId'), base(request.body)); });
   app.get('/api/branches/:id/chapters/:chapterId', async request => store.chapter(param(request), param(request, 'chapterId')));
   app.delete('/api/branches/:id/chapters/:chapterId', async request => {
-    requireAuthor(request); const branchId = param(request); engine.assertIdle(branchId);
+    const branchId = param(request); engine.assertIdle(branchId);
     return store.deleteChapter(branchId, base(request.body), param(request, 'chapterId'));
   });
   app.delete('/api/branches/:id/chapters/:chapterId/extraction', async request => {
-    requireAuthor(request); const branchId = param(request); engine.assertIdle(branchId);
+    const branchId = param(request); engine.assertIdle(branchId);
     return store.clearChapterExtraction(branchId, base(request.body), param(request, 'chapterId'));
   });
   app.post('/api/branches/:id/chapters/:chapterId/extract', async request => {
-    requireAuthor(request); return engine.reextractChapter(param(request), base(request.body), param(request, 'chapterId'));
+    return engine.reextractChapter(param(request), base(request.body), param(request, 'chapterId'));
   });
   app.post('/api/branches/:id/chapters', async request => {
     const input = z.object({ baseRevisionId: revision, title: z.string().trim().min(1).max(500), text: z.string().max(2000000), chapterId: z.string().optional() }).parse(request.body);
-    if (input.chapterId) { requireAuthor(request); engine.assertIdle(param(request)); }
+    if (input.chapterId) { engine.assertIdle(param(request)); }
     const view = store.saveChapter(param(request), input);
     // Saving prose must succeed even when a provider has not been configured.
     if (!input.chapterId) try { engine.enqueue(view.branch.id, 'extract', { baseRevisionId: view.branch.revisionId }); } catch { /* Explicit retry is available in the workbench. */ }
@@ -238,12 +237,12 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.put('/api/branches/:id/outline', async request => { const body = z.object({ baseRevisionId: revision, outline: outlineSchema }).parse(request.body); const existing = store.state(param(request)).outline; if (body.outline.fine && JSON.stringify(body.outline.fine) !== JSON.stringify(existing.fine)) fail('剧情规划功能已移除，历史规划不能修改。', 410); return store.updateOutline(param(request), body.baseRevisionId, { ...body.outline, fine: existing.fine }); });
   app.put('/api/branches/:id/entities/:entityId', async request => { const body = z.object({ baseRevisionId: revision, entity: entitySchema }).parse(request.body); if (body.entity.id !== param(request, 'entityId')) fail('资料标识不匹配。'); return store.updateEntity(param(request), body.baseRevisionId, body.entity as Entity); });
   app.delete('/api/branches/:id/entities/:entityId', async request => {
-    requireAuthor(request); const branchId = param(request); engine.assertIdle(branchId);
+    const branchId = param(request); engine.assertIdle(branchId);
     return store.deleteEntity(branchId, base(request.body), param(request, 'entityId'));
   });
   app.post('/api/branches/:id/entities/merge', async request => { const b = z.object({ baseRevisionId: revision, fromId: z.string(), toId: z.string() }).parse(request.body); return store.mergeEntities(param(request), b.baseRevisionId, b.fromId, b.toId); });
   app.put('/api/branches/:id/foreshadows', async request => { const b = z.object({ baseRevisionId: revision, foreshadows: z.array(foreshadowSchema).max(10000) }).parse(request.body); return store.updateForeshadows(param(request), b.baseRevisionId, b.foreshadows as Foreshadow[]); });
-  app.get('/api/branches/:id/search', async request => { const { q } = z.object({ q: z.string().max(300).default('') }).parse(request.query); return store.search(param(request), q, author(request), readingProgress(request.query)); });
+  app.get('/api/branches/:id/search', async request => { const { q } = z.object({ q: z.string().max(300).default('') }).parse(request.query); return store.search(param(request), q, true); });
   app.post('/api/projects/:id/import', async request => {
     const projectId = param(request); store.getProject(projectId);
     const file = await request.file(); if (!file) fail('请选择 TXT 或 EPUB 文件。');
@@ -272,15 +271,13 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     });
     return job;
   });
-  app.post('/api/branches/:id/generate', async request => { const b = z.object({ baseRevisionId: revision, mode, instruction: z.string().max(30000), title: z.string().max(500).optional(), branchName: z.string().trim().min(1).max(200).optional(), chapterId: z.string().optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), maxWords: z.number().int().min(100).max(20000).optional(), regenerate: z.boolean().optional(), discardBackground: z.boolean().optional(), rpg: rpgSetupSchema.optional() }).parse(request.body); if (b.mode === 'rpg' || b.rpg) requireAuthor(request); return engine.enqueue(param(request), 'generate', b); });
+  app.post('/api/branches/:id/generate', async request => { const b = z.object({ baseRevisionId: revision, mode, instruction: z.string().max(30000), title: z.string().max(500).optional(), branchName: z.string().trim().min(1).max(200).optional(), chapterId: z.string().optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), maxWords: z.number().int().min(100).max(20000).optional(), regenerate: z.boolean().optional(), discardBackground: z.boolean().optional(), rpg: rpgSetupSchema.optional() }).parse(request.body); return engine.enqueue(param(request), 'generate', b); });
   app.post('/api/branches/:id/extract', async request => engine.enqueue(param(request), 'extract', { baseRevisionId: base(request.body) }));
-  const jobView = (job: Job, asAuthor: boolean): Job => ({ ...job, chapterStartChoiceId: asAuthor ? job.chapterStartChoiceId : undefined, pendingChoice: asAuthor ? job.pendingChoice : undefined, title: asAuthor ? job.title : undefined, generationInput: asAuthor ? job.generationInput : undefined, payload: {}, message: asAuthor ? job.message : ({ queued: '任务等待中', running: '任务进行中', paused: '任务已暂停', failed: '任务未完成', completed: '任务已完成', cancelled: '任务已取消', stale: '起始版本已变化' })[job.status], error: asAuthor ? job.error : job.error ? '请进入作者视图查看具体原因。' : undefined });
-  app.get('/api/jobs', async request => { const { projectId } = z.object({ projectId: z.string().optional() }).parse(request.query); return engine.listJobs(projectId).map(job => jobView(job, author(request))); });
-  // Model outputs can contain unrevealed plot details; never expose them in reader requests.
-  const requireAuthor = (request: unknown) => { if (!author(request)) fail('请在作者视图查看或修正模型输出。', 403); };
-  app.get('/api/jobs/:id/activities', async request => { requireAuthor(request); return engine.listWritingActivities(param(request)); });
+  const jobView = (job: Job): Job => ({ ...job, payload: {} });
+  app.get('/api/jobs', async request => { const { projectId } = z.object({ projectId: z.string().optional() }).parse(request.query); return engine.listJobs(projectId).map(job => jobView(job)); });
+  app.get('/api/jobs/:id/activities', async request => { return engine.listWritingActivities(param(request)); });
   app.get('/api/jobs/:id/events', async (request, reply) => {
-    requireAuthor(request); const jobId = param(request); const snapshot = engine.writingSnapshot(jobId);
+    const jobId = param(request); const snapshot = engine.writingSnapshot(jobId);
     const sessionHash = tokenHash(request.cookies.session || '');
     const stillAuthenticated = () => Boolean(store.db.prepare('SELECT 1 FROM sessions WHERE token_hash=? AND expires_at>?').get(sessionHash, Date.now()));
     reply.hijack(); reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', 'X-Content-Type-Options': 'nosniff', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -297,26 +294,24 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     send(snapshot);
     if (!terminal(snapshot.job.status)) heartbeat = setInterval(() => { if (!stillAuthenticated()) { cleanup(); reply.raw.end(); } else if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.write(': keepalive\n\n'); else cleanup(); }, 15000);
   });
-  app.post('/api/branches/:id/summary-compression', async request => { requireAuthor(request); return engine.enqueue(param(request), 'plan', { baseRevisionId: base(request.body), purpose: 'compress-summary' }); });
-  app.get('/api/jobs/:id/summary-compression', async request => { requireAuthor(request); return engine.summaryCompression(param(request)); });
+  app.post('/api/branches/:id/summary-compression', async request => { return engine.enqueue(param(request), 'plan', { baseRevisionId: base(request.body), purpose: 'compress-summary' }); });
+  app.get('/api/jobs/:id/summary-compression', async request => { return engine.summaryCompression(param(request)); });
   app.post('/api/branches/:id/summary-compression/confirm', async request => {
-    requireAuthor(request); const body = z.object({ baseRevisionId: revision, jobId: z.string().min(1), text: z.string().trim().min(1).max(1000000) }).parse(request.body);
+    const body = z.object({ baseRevisionId: revision, jobId: z.string().min(1), text: z.string().trim().min(1).max(1000000) }).parse(request.body);
     return engine.confirmSummaryCompression(param(request), body);
   });
-  app.get('/api/jobs/:id/outputs', async request => { requireAuthor(request); return engine.listOutputs(param(request)); });
-  app.get('/api/jobs/:id/outputs/:outputId', async request => { requireAuthor(request); return JSON.parse(redactModelPayload(JSON.stringify(engine.outputDetail(param(request), param(request, 'outputId'))), settings.get().providers.flatMap(provider => provider.apiKey ? [provider.apiKey] : []))); });
+  app.get('/api/jobs/:id/outputs', async request => { return engine.listOutputs(param(request)); });
+  app.get('/api/jobs/:id/outputs/:outputId', async request => { return JSON.parse(redactModelPayload(JSON.stringify(engine.outputDetail(param(request), param(request, 'outputId'))), settings.get().providers.flatMap(provider => provider.apiKey ? [provider.apiKey] : []))); });
   app.post('/api/jobs/:id/outputs', async request => {
-    requireAuthor(request);
     const { text } = z.object({ text: z.string().min(1).max(16 * 1024 * 1024) }).parse(request.body);
     return engine.importOutput(param(request), text);
   });
   app.post('/api/jobs/:id/outputs/:outputId/apply', async request => {
-    requireAuthor(request);
     const body = z.object({ text: z.string().min(1).max(16 * 1024 * 1024), baseRevisionId: revision }).parse(request.body);
-    return jobView(engine.applyOutput(param(request), param(request, 'outputId'), body), true);
+    return jobView(engine.applyOutput(param(request), param(request, 'outputId'), body));
   });
-  app.post('/api/jobs/:id/choice', async request => { requireAuthor(request); const input = z.object({ choiceId: z.string().min(1).max(100), optionId: z.string().min(1).max(100).optional(), customText: z.string().trim().min(1).max(10000).optional(), baseRevisionId: revision.optional(), branchId: z.string().min(1).optional() }).strict().parse(request.body); return jobView(engine.choose(param(request), input), true); });
-  app.post('/api/jobs/:id/:action', async request => jobView(engine.action(param(request), z.enum(['pause', 'resume', 'retry', 'cancel']).parse((request.params as any).action)), author(request)));
+  app.post('/api/jobs/:id/choice', async request => { const input = z.object({ choiceId: z.string().min(1).max(100), optionId: z.string().min(1).max(100).optional(), customText: z.string().trim().min(1).max(10000).optional(), baseRevisionId: revision.optional(), branchId: z.string().min(1).optional() }).strict().parse(request.body); return jobView(engine.choose(param(request), input)); });
+  app.post('/api/jobs/:id/:action', async request => jobView(engine.action(param(request), z.enum(['pause', 'resume', 'retry', 'cancel']).parse((request.params as any).action))));
   app.get('/api/settings', async () => settings.public());
   app.post('/api/settings/prompt-preview', async request => {
     const input = promptPreviewSchema.parse(request.body);

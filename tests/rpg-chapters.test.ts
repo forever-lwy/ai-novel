@@ -286,22 +286,22 @@ describe('RPG chapter budgets and durable chapter-boundary choices', () => {
     expect(store.state(queued.branchId).rpg?.nextChoice).toEqual(state.rpg?.nextChoice);
   });
 
-  it('hides sealed choices from readers and requires author access and a current revision for the choice API', async () => {
+  it('preserves sealed choices in every view and requires login and a current revision for answers', async () => {
     const service = await upstream((_body, reply) => respond(reply, '章'.repeat(120), ask('只给作者看的章末问题')));
     const app = await buildApp({ initialPassword: 'story-password-123', dataDir: mkdtempSync(join(tmpdir(), 'ai-novel-rpg-chapters-api-')), startEngine: false }); apps.push(app);
     const ctx = engineFor(app.store, settings(service.url)); const { project, queued } = start(app.store, ctx.engine);
     await finished(ctx.engine, queued.id); const state = await ready(app.store, ctx.engine, queued.branchId); await ctx.engine.close(); const choice = state.rpg!.nextChoice!;
     const login = await app.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'story-password-123' } }); const session = login.cookies.find(cookie => cookie.name === 'session')!.value;
-    const reader = await app.app.inject({ url: `/api/branches/${queued.branchId}`, cookies: { session } }); expect(reader.statusCode).toBe(200); expect(reader.body).not.toContain('只给作者看的章末问题'); expect(reader.json().state.rpg).toBeUndefined();
+    const reader = await app.app.inject({ url: `/api/branches/${queued.branchId}`, cookies: { session } }); expect(reader.statusCode).toBe(200); expect(reader.body).toContain('只给作者看的章末问题'); expect(reader.json().state.rpg.nextChoice).toEqual(choice);
     const author = await app.app.inject({ url: `/api/branches/${queued.branchId}?view=author`, cookies: { session } }); expect(author.json().state.rpg.nextChoice).toEqual(choice);
     const jobs = await app.app.inject({ url: `/api/jobs?projectId=${project.id}`, cookies: { session } }); expect(jobs.body).not.toContain('只给作者看的章末问题');
     const payload = { choiceId: choice.id, optionId: 'bridge', baseRevisionId: app.store.getBranch(queued.branchId).revisionId };
-    expect((await app.app.inject({ method: 'POST', url: `/api/jobs/${queued.id}/choice`, cookies: { session }, payload })).statusCode).toBe(403);
+    expect((await app.app.inject({ method: 'POST', url: `/api/jobs/${queued.id}/choice`, payload })).statusCode).toBe(401);
     expect((await app.app.inject({ method: 'POST', url: `/api/jobs/${queued.id}/choice?view=author`, cookies: { session }, payload: { choiceId: choice.id, optionId: 'bridge' } })).statusCode).toBe(409);
     expect((await app.app.inject({ method: 'POST', url: `/api/jobs/${queued.id}/choice?view=author`, cookies: { session }, payload: { ...payload, baseRevisionId: queued.baseRevisionId } })).statusCode).toBe(409);
-    const accepted = await app.app.inject({ method: 'POST', url: `/api/jobs/${queued.id}/choice?view=author`, cookies: { session }, payload }); expect(accepted.statusCode).toBe(200); expect(accepted.json<Job>().id).not.toBe(queued.id); expect(accepted.json<Job>().chapterStartChoiceId).toBe(choice.id);
+    const accepted = await app.app.inject({ method: 'POST', url: `/api/jobs/${queued.id}/choice?view=reader`, cookies: { session }, payload }); expect(accepted.statusCode).toBe(200); expect(accepted.json<Job>().id).not.toBe(queued.id); expect(accepted.json<Job>().chapterStartChoiceId).toBe(choice.id);
     const authorJobs = await app.app.inject({ url: `/api/jobs?projectId=${project.id}&view=author`, cookies: { session } }); expect(authorJobs.json<Job[]>().find(value => value.id === accepted.json<Job>().id)?.chapterStartChoiceId).toBe(choice.id);
-    const readerJobs = await app.app.inject({ url: `/api/jobs?projectId=${project.id}`, cookies: { session } }); expect(readerJobs.json<Job[]>().find(value => value.id === accepted.json<Job>().id)?.chapterStartChoiceId).toBeUndefined(); expect(readerJobs.body).not.toContain('chapterStartChoiceId');
+    const readerJobs = await app.app.inject({ url: `/api/jobs?projectId=${project.id}`, cookies: { session } }); expect(readerJobs.json<Job[]>().find(value => value.id === accepted.json<Job>().id)?.chapterStartChoiceId).toBe(choice.id); expect(readerJobs.json()).toEqual(authorJobs.json());
     expect((await app.app.inject({ method: 'POST', url: `/api/jobs/${queued.id}/choice?view=author`, cookies: { session }, payload })).statusCode).toBe(409); expect(service.bodies).toHaveLength(1);
   });
 });

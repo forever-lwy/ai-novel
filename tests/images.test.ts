@@ -212,25 +212,25 @@ describe('durable story illustrations', () => {
     let lockStarted = false; const deletion = ctx.service.deleteProject(ctx.project.id, async () => { lockStarted = true; ctx.store.deleteProject(ctx.project.id); });
     expect(lockStarted).toBe(true); expect(ctx.store.images.all()).toEqual([]); release(); await deletion; expect(ctx.store.images.all()).toEqual([]);
   });
-  it('applies session, author view and same-origin boundaries to illustration routes', async () => {
+  it('applies session and same-origin boundaries with full author image access to illustration routes', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'novel-image-api-')); const ctx = await buildApp({ initialPassword: 'fixture-image-password', dataDir: directory, startEngine: false });
     cleanup.push(async () => { await ctx.app.close(); rmSync(directory, { recursive: true, force: true }); });
     const project = ctx.store.createProject({ title: 'API测试' }); const branchId = project.mainBranchId; const baseRevisionId = ctx.store.getBranch(branchId).revisionId;
     const unauthenticated = await ctx.app.inject({ url: `/api/branches/${branchId}/images` }); expect(unauthenticated.statusCode).toBe(401);
     const auth = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'fixture-image-password' } }); const cookies = { session: auth.cookies.find(item => item.name === 'session')!.value };
-    for (const path of [`/api/branches/${branchId}/images`, `/api/branches/${branchId}/images/missing/retry`, `/api/branches/${branchId}/images/missing/cancel`]) expect((await ctx.app.inject({ method: 'POST', url: path, cookies, payload: { baseRevisionId, kind: 'map' } })).statusCode).toBe(403);
+    for (const path of [`/api/branches/${branchId}/images`, `/api/branches/${branchId}/images/missing/retry`, `/api/branches/${branchId}/images/missing/cancel`]) expect((await ctx.app.inject({ method: 'POST', url: path, payload: { baseRevisionId, kind: 'map' } })).statusCode).toBe(401);
     expect((await ctx.app.inject({ method: 'POST', url: `/api/branches/${branchId}/images?view=author`, cookies, headers: { origin: 'https://untrusted.invalid' }, payload: { baseRevisionId, kind: 'map' } })).statusCode).toBe(403);
     expect((await ctx.app.inject({ method: 'POST', url: `/api/branches/${branchId}/images?view=author`, cookies, payload: { baseRevisionId, kind: 'map' } })).statusCode).toBe(400);
     const image = { id: 'private-image', projectId: project.id, branchId, baseRevisionId, kind: 'map' as const, status: 'completed' as const, title: 'private', prompt: '秘密资料', automatic: false, visibility: 'secret' as const, createdAt: '', updatedAt: '', mimeType: 'image/png' as const };
     const state = ctx.store.state(branchId); state.imageIds = [image.id]; ctx.store.commit(branchId, baseRevisionId, state, 'fixture image', revisionId => { image.baseRevisionId = revisionId; ctx.store.images.insert(image, { bytes: png, mimeType: 'image/png' }); });
-    expect((await ctx.app.inject({ url: `/api/branches/${branchId}/images`, cookies })).json()).toEqual([]);
-    expect((await ctx.app.inject({ url: `/api/branches/${branchId}/images/private-image/content`, cookies })).statusCode).toBe(404);
+    expect((await ctx.app.inject({ url: `/api/branches/${branchId}/images`, cookies })).json()).toMatchObject([{ id: image.id, prompt: image.prompt }]);
+    expect((await ctx.app.inject({ url: `/api/branches/${branchId}/images/private-image/content`, cookies })).statusCode).toBe(200);
     const response = await ctx.app.inject({ url: `/api/branches/${branchId}/images/private-image/content?view=author`, cookies }); expect(response.statusCode).toBe(200); expect(response.headers['content-type']).toBe('image/png'); expect(response.rawPayload).toEqual(png); expect(response.headers['x-content-type-options']).toBe('nosniff');
     const baseSelection = ctx.store.getBranch(branchId).revisionId;
-    expect((await ctx.app.inject({ method: 'PUT', url: `/api/branches/${branchId}/images/private-image/active`, cookies, payload: { baseRevisionId: baseSelection, active: false } })).statusCode).toBe(403);
-    expect((await ctx.app.inject({ method: 'DELETE', url: `/api/branches/${branchId}/images/private-image`, cookies, payload: { baseRevisionId: baseSelection } })).statusCode).toBe(403);
+    expect((await ctx.app.inject({ method: 'PUT', url: `/api/branches/${branchId}/images/private-image/active`, payload: { baseRevisionId: baseSelection, active: false } })).statusCode).toBe(401);
+    expect((await ctx.app.inject({ method: 'DELETE', url: `/api/branches/${branchId}/images/private-image`, payload: { baseRevisionId: baseSelection } })).statusCode).toBe(401);
     expect((await ctx.app.inject({ method: 'PUT', url: `/api/branches/${branchId}/images/private-image/active?view=author`, cookies, payload: { baseRevisionId: 'outdated', active: false } })).statusCode).toBe(409);
-    const disabled = await ctx.app.inject({ method: 'PUT', url: `/api/branches/${branchId}/images/private-image/active?view=author`, cookies, payload: { baseRevisionId: baseSelection, active: false } }); expect(disabled.statusCode).toBe(200); expect(disabled.json().view.state.activeImageIds).toEqual([]); expect(disabled.json().images[0].active).toBe(false);
-    const deleted = await ctx.app.inject({ method: 'DELETE', url: `/api/branches/${branchId}/images/private-image?view=author`, cookies, payload: { baseRevisionId: disabled.json().view.branch.revisionId } }); expect(deleted.statusCode).toBe(200); expect(deleted.json().images).toEqual([]); expect(ctx.store.images.content(image.id)?.bytes).toEqual(png); expect((await ctx.app.inject({ url: `/api/branches/${branchId}/images/private-image/content?view=author`, cookies })).statusCode).toBe(404);
+    const disabled = await ctx.app.inject({ method: 'PUT', url: `/api/branches/${branchId}/images/private-image/active?view=reader`, cookies, payload: { baseRevisionId: baseSelection, active: false } }); expect(disabled.statusCode).toBe(200); expect(disabled.json().view.state.activeImageIds).toEqual([]); expect(disabled.json().images[0].active).toBe(false);
+    const deleted = await ctx.app.inject({ method: 'DELETE', url: `/api/branches/${branchId}/images/private-image`, cookies, payload: { baseRevisionId: disabled.json().view.branch.revisionId } }); expect(deleted.statusCode).toBe(200); expect(deleted.json().images).toEqual([]); expect(ctx.store.images.content(image.id)?.bytes).toEqual(png); expect((await ctx.app.inject({ url: `/api/branches/${branchId}/images/private-image/content?view=author`, cookies })).statusCode).toBe(404);
   });
 });

@@ -1,4 +1,4 @@
-import { chooseBranch, currentBranchId } from './branch-browser-helpers';
+import { chooseBranch, currentBranchId, showGenerationProcess } from './branch-browser-helpers';
 import { expect, test, type Page } from '@playwright/test';
 import type { BranchView, Job, Project, Settings } from '../shared/types';
 import { countProseWords } from '../shared/rpg-chapter';
@@ -39,8 +39,8 @@ async function seedNovel(page: Page, title: string, laterText = '林舟在白石
 }
 async function openProject(page: Page, project: Project) {
   await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
-  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
-  await expect(page.getByRole('button', { name: '返回阅读视图', exact: true })).toBeVisible();
+  await showGenerationProcess(page);
+  await expect(page.getByRole('button', { name: '阅读视图', exact: true })).toBeVisible();
 }
 async function waitChoice(page: Page) {
   const choice = page.getByRole('region', { name: '决定接下来的剧情', exact: true });
@@ -131,7 +131,7 @@ test('已有角色待选节点刷新恢复，自定义行动提交失败保留�
   await setup.getByRole('button', { name: '开始体验', exact: true }).click(); await waitChoice(page);
   const rpgBranchId = await currentBranchId(page);
   expect((await branch(page, rpgBranchId)).state.rpg?.character).toMatchObject({ kind: 'existing', name: '林舟' });
-  await page.reload(); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await page.reload(); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await showGenerationProcess(page);
   const choice = await waitChoice(page); await expect(page.locator('.workspace')).toHaveAttribute('data-branch-id', rpgBranchId);
   await choice.getByRole('radio', { name: /自定义行动/ }).check();
   await choice.getByLabel('你想怎么做？', { exact: true }).fill('我先询问守门人，再寻找安全的入口。');
@@ -172,11 +172,11 @@ test('已有角色待选节点刷新恢复，自定义行动提交失败保留�
   await waitReady(page, rpgBranchId, 3); await expect.poll(() => visibleProse(page)).toContain('我先询问守门人');
 });
 
-test('新建作品支持 RPG，切线与阅读视图不答题，任务页可恢复正文节点并取消', async ({ page }) => {
+test('新建作品支持 RPG，切线保留草稿、阅读视图保留选择，任务页可恢复正文节点并取消', async ({ page }) => {
   await page.goto('/'); await page.getByRole('button', { name: '新建作品', exact: true }).click();
   const create = page.getByRole('dialog'); await create.getByLabel('作品名称', { exact: true }).fill('E2E RPG 新作品'); await create.getByLabel('创作方式', { exact: true }).selectOption('rpg');
   await expect(create).toContainText('关键剧情'); await create.getByRole('button', { name: '创建作品', exact: true }).click();
-  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await showGenerationProcess(page);
   const originalBranchId = await currentBranchId(page);
   await page.getByRole('button', { name: '开始创作', exact: true }).click(); const setup = page.getByRole('dialog');
   await expect(setup.getByLabel('创作方式', { exact: true })).toHaveValue('rpg'); await setup.getByLabel('角色姓名', { exact: true }).fill('许安'); await setup.getByRole('button', { name: '开始体验', exact: true }).click();
@@ -190,10 +190,10 @@ test('新建作品支持 RPG，切线与阅读视图不答题，任务页可恢�
   const waitingCard = page.locator('.job-card').filter({ hasText: '等待你的选择' }); await expect(waitingCard).toHaveCount(1); await expect(waitingCard.getByRole('button', { name: '继续', exact: true })).toHaveCount(0);
   await waitingCard.getByRole('button', { name: '回答剧情选择', exact: true }).click(); await waitChoice(page);
   await expect(choice.getByRole('radio', { name: /进入城中/ })).toBeChecked();
-  await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
-  await expect(choice).toHaveCount(0);
-  await expect(page.getByRole('button', { name: '回答剧情选择', exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await waitChoice(page);
+  await page.getByRole('button', { name: '阅读视图', exact: true }).click();
+  await expect(choice).toBeVisible();
+  await expect(page.getByRole('button', { name: '回答剧情选择', exact: true })).toBeVisible();
+  await showGenerationProcess(page); await waitChoice(page);
   await expect(choice.getByRole('radio', { name: /进入城中/ })).toBeChecked();
   await page.getByRole('button', { name: '停止生成', exact: true }).click(); await expect(page.getByRole('button', { name: '退出生成', exact: true })).toBeVisible(); await expect(choice).toHaveCount(0);
   expect(choiceRequests).toBe(0);
@@ -237,7 +237,7 @@ test('从早期章节穿越，AI 读取原作后续摘要、未来物品及指�
   expect(request.output.request.body).toContain('星钥');
   const reader = await (await page.request.get(`/api/branches/${experienceId}?view=reader`)).json();
   expect(JSON.stringify(reader)).not.toContain('FUTURE_REFERENCE_SENTINEL');
-  expect(reader.state).not.toHaveProperty('sourceReference');
+  expect(reader.state).toHaveProperty('sourceReference');
   await choice.getByRole('radio', { name: '友好问候', exact: true }).check();
   await choice.getByRole('button', { name: '确认选择并继续', exact: true }).click();
   await expect(choice).toHaveCount(0);
@@ -272,7 +272,7 @@ test('整章累计字数封章，章末选择刷新恢复并只开启一次下�
   expect((await jobs(page, project.id)).find(job => job.id === firstJob.id)).toMatchObject({ status: 'completed', generatedChapterId: chapterChoice.chapterId });
 
   await page.reload(); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
-  await expect(choice).toHaveCount(0); await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await expect(choice).toBeVisible(); await showGenerationProcess(page);
   await expect(choice.getByText('本章已结束，此次选择将进入下一章。', { exact: true })).toBeVisible();
   await expect.poll(() => visibleProse(page)).toContain(sealedChapter.text.replace(/\s+/g, ''));
   await choice.getByRole('radio', { name: /自定义行动/ }).check();
@@ -286,9 +286,9 @@ test('整章累计字数封章，章末选择刷新恢复并只开启一次下�
   await chooseBranch(page, project.mainBranchId); await expect(choice).toHaveCount(0);
   await chooseBranch(page, rpgBranchId);
   await expect(choice.getByLabel('你想怎么做？', { exact: true })).toHaveValue('下一章承接：先问守门人再进入东门。');
-  await page.getByRole('button', { name: '返回阅读视图', exact: true }).click(); await expect(choice).toHaveCount(0);
-  expect((await (await page.request.get(`/api/branches/${rpgBranchId}?view=reader`)).json()).state).not.toHaveProperty('rpg.nextChoice');
-  await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+  await page.getByRole('button', { name: '阅读视图', exact: true }).click(); await expect(choice).toBeVisible();
+  expect((await (await page.request.get(`/api/branches/${rpgBranchId}?view=reader`)).json()).state).toHaveProperty('rpg.nextChoice');
+  await showGenerationProcess(page);
   await expect(choice.getByLabel('你想怎么做？', { exact: true })).toHaveValue('下一章承接：先问守门人再进入东门。');
   await page.setViewportSize({ width: 390, height: 844 }); await choice.locator('h2').scrollIntoViewIfNeeded();
   expect(await choice.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();

@@ -87,10 +87,10 @@ describe('chapter title preview and versioned application', () => {
     expect(() => ctx.store.restoreProject(ctx.store.exportProject(project.id))).not.toThrow();
     ctx.store.rollback(branchId, { baseRevisionId: base(), revisionId: version }); expect(ctx.store.state(branchId)).toEqual(original);
   });
-  it('requires login and author view, current version, distinct chapter handles and an idle branch', async () => {
+  it('requires login, current version, distinct chapter handles and an idle branch', async () => {
     const { ctx, request, branchId, base, ids } = await setup(); const path = `/api/branches/${branchId}/chapter-titles/preview`; const input = { baseRevisionId: base(), chapterIds: ids() }; const fixture = await provider(ctx);
     expect((await ctx.app.inject({ method: 'POST', url: path + '?view=author', payload: input })).statusCode).toBe(401);
-    expect((await request('POST', path, input)).statusCode).toBe(403);
+    expect((await request('POST', path, { ...input, baseRevisionId: 'stale' })).statusCode).toBe(409);
     expect((await request('POST', path + '?view=author', { ...input, baseRevisionId: 'stale' })).statusCode).toBe(409);
     for (const chapterIds of [[], [ids()[0], ids()[0]], ['foreign'], Array.from({ length: 21 }, () => randomUUID())]) expect((await request('POST', path + '?view=author', { ...input, chapterIds })).statusCode).toBeGreaterThanOrEqual(400);
     const job = ctx.engine.enqueue(branchId, 'extract', { baseRevisionId: base() });
@@ -103,7 +103,7 @@ describe('chapter title preview and versioned application', () => {
     for (const payload of [{ baseRevisionId: 'stale', changes: [change] }, { baseRevisionId: base(), changes: [change, { ...change, chapterId: 'foreign' }] }, { baseRevisionId: base(), changes: [change, change] }, { baseRevisionId: base(), changes: [{ ...change, originalTitle: '旧题' }] }, { baseRevisionId: base(), changes: [{ ...change, title: '' }] }, { baseRevisionId: base(), changes: [{ ...change, title: '换\n行' }] }, { baseRevisionId: base(), changes: [{ ...change, title: change.originalTitle }] }]) {
       expect((await request('POST', path, payload)).statusCode).toBeGreaterThanOrEqual(400); expect(ctx.store.state(branchId)).toEqual(original);
     }
-    expect((await request('POST', path.replace('?view=author', ''), { baseRevisionId: base(), changes: [change] })).statusCode).toBe(403);
+    expect((await request('POST', path.replace('?view=author', ''), { baseRevisionId: base(), changes: [change] })).statusCode).toBe(200);
   });
   it.each(['malformed', 'missing', 'duplicate', 'foreign', 'false-evidence', 'no-evidence', 'invented-number', 'upstream'])('retains diagnostics and does not retry or save on %s output', async problem => {
     const { ctx, request, branchId, base, ids } = await setup(); const version = base();

@@ -271,8 +271,8 @@ describe('author-only activity API and SSE', () => {
     context.store.recordWritingActivity(writing.id, { type: 'tool_call', id: 'private-image', name: 'generate_character_portrait', arguments: { name: '未出场人物' } });
     context.engine.action(writing.id, 'pause');
     expect((await context.app.inject(`/api/jobs/${writing.id}/activities?view=author`)).statusCode).toBe(401);
-    expect((await context.app.inject({ url: `/api/jobs/${writing.id}/activities`, cookies })).statusCode).toBe(403);
-    expect((await context.app.inject({ url: `/api/jobs/${writing.id}/activities?view=reader`, cookies })).statusCode).toBe(403);
+    expect((await context.app.inject({ url: `/api/jobs/${writing.id}/activities`, cookies })).statusCode).toBe(200);
+    expect((await context.app.inject({ url: `/api/jobs/${writing.id}/activities?view=reader`, cookies })).statusCode).toBe(200);
     const history = await context.app.inject({ url: `/api/jobs/${writing.id}/activities?view=author`, cookies });
     expect(history.statusCode).toBe(200); expect(history.json()).toMatchObject([{ kind: 'thinking', text: '作者可见的思考过程' }, { kind: 'tool', name: 'search_story' }, { kind: 'thinking', thinkingSource: 'preset', text: '预设中的作者辅助核对' }, { kind: 'tool', name: 'generate_character_portrait' }]);
     const stream = await context.app.inject({ url: `/api/jobs/${writing.id}/events?view=author`, cookies });

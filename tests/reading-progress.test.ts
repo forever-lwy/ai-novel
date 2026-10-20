@@ -115,25 +115,26 @@ describe('chapter-scoped reader materials', () => {
     expect(images.content(branchId, lateImage.id, false, lateId).bytes).toEqual(readingPng);
   });
 
-  it('applies progress and membership checks through the authenticated HTTP routes', async () => {
+  it('uses complete current materials in every display mode without rewriting history', async () => {
     const app = await buildApp({ initialPassword: 'reading-progress-password', dataDir: mkdtempSync(join(tmpdir(), 'novel-reading-http-')), startEngine: false }); cleanup.push(() => app.app.close());
-    const { branchId, first, third } = readingProgressStory(app.store);
+    const { branchId, first } = readingProgressStory(app.store);
     const login = await app.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'reading-progress-password' } });
     const cookies = { session: login.cookies.find(cookie => cookie.name === 'session')!.value };
-    const earlyId = first.state.chapters[0].id; const lateId = third.state.chapters[2].id;
-    const response = await app.app.inject({ url: `/api/branches/${branchId}?chapterId=${earlyId}`, cookies });
-    expect(response.statusCode).toBe(200); expect(response.json().state.entities.map((entity: Entity) => entity.name)).toEqual(['林舟', '河岸', '铜钥']);
-    expect((await app.app.inject({ url: `/api/branches/${branchId}/search?q=${encodeURIComponent('阿岚')}&chapterId=${earlyId}`, cookies })).json().entities).toEqual([]);
-    expect((await app.app.inject({ url: `/api/branches/${branchId}/images?chapterId=${earlyId}`, cookies })).json().map((image: { title: string }) => image.title)).toEqual(['河岸立绘']);
-    const latestImages = (await app.app.inject({ url: `/api/branches/${branchId}/images?chapterId=${lateId}`, cookies })).json();
-    const lateImage = latestImages.find((image: { title: string }) => image.title === '灯塔场景');
-    expect((await app.app.inject({ url: `/api/branches/${branchId}/images/${lateImage.id}/content?chapterId=${earlyId}`, cookies })).statusCode).toBe(404);
-    expect((await app.app.inject({ url: lateImage.url, cookies })).rawPayload).toEqual(readingPng);
-    for (const path of ['', '/search?q=test&', '/images?', `/images/${lateImage.id}/content?`]) {
-      const url = path === '' ? `/api/branches/${branchId}?chapterId=foreign` : `/api/branches/${branchId}${path}chapterId=foreign`;
-      expect((await app.app.inject({ url, cookies })).statusCode).toBe(404);
+    const baseline = app.store.view(branchId, true);
+    const changes = app.store.db.prepare('SELECT total_changes() AS n').get()!.n;
+    const images = app.images.list(branchId, true);
+    for (const query of ['', '?view=author', '?view=reader', '?view=reader&chapterId=' + first.state.chapters[0].id, '?chapterId=foreign']) {
+      const response = await app.app.inject({ url: '/api/branches/' + branchId + query, cookies });
+      expect(response.statusCode).toBe(200); expect(response.json()).toEqual(baseline); expect(response.json()).not.toHaveProperty('readingChapterId');
+      expect((await app.app.inject({ url: '/api/branches/' + branchId + '/images' + query, cookies })).json()).toEqual(images);
+      for (const image of images) {
+        expect((await app.app.inject({ url: '/api/branches/' + branchId + '/images/' + image.id + '/content' + query, cookies })).rawPayload).toEqual(readingPng);
+      }
+      const search = '/api/branches/' + branchId + '/search' + (query || '?') + (query ? '&' : '') + 'q=' + encodeURIComponent('阿岚');
+      expect((await app.app.inject({ url: search, cookies })).json().entities.map((entity: Entity) => entity.name)).toEqual(['阿岚']);
+      expect((await app.app.inject({ url: '/api/branches/' + branchId + query })).statusCode).toBe(401);
     }
-    expect((await app.app.inject({ url: `/api/branches/${branchId}?chapterId=`, cookies })).statusCode).toBe(400);
-    expect((await app.app.inject({ url: `/api/branches/${branchId}?view=author&chapterId=${earlyId}`, cookies })).json().state.entities.some((entity: Entity) => entity.name === '阿岚')).toBe(true);
+    expect((await app.app.inject({ url: '/api/branches/' + branchId + '/chapters/foreign', cookies })).statusCode).toBe(404);
+    expect(app.store.db.prepare('SELECT total_changes() AS n').get()!.n).toBe(changes);
   });
 });
