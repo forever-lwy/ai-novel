@@ -49,11 +49,12 @@ export class ImageService {
   }
   private publicImage(image: StoryImage, branchId: string, author: boolean, state = this.store.state(branchId), chapterId?: string): StoryImage {
     const progress = !author && chapterId ? `&chapterId=${encodeURIComponent(chapterId)}` : '';
-    const url = image.status === 'completed' ? `/api/branches/${encodeURIComponent(branchId)}/images/${encodeURIComponent(image.id)}/content?view=${author ? 'author' : 'reader'}${progress}` : undefined;
+    const url = image.status === 'completed' ? `/api/branches/${encodeURIComponent(branchId)}/images/${encodeURIComponent(image.id)}/content?view=${author ? 'author' : 'reader'}${progress}&v=${encodeURIComponent(image.updatedAt)}` : undefined;
     const entityId = image.entityId ? imageEntity(state, image.entityId)?.id : undefined;
     const referenceCharacters = image.referenceCharacters?.map(character => { const current = imageEntity(state, character.entityId); return { ...character, entityId: current?.id ?? character.entityId, name: current?.name ?? character.name }; });
     const active = this.store.images.active(image, state);
-    return author ? { ...image, entityId, referenceCharacters, active, url } : { ...image, entityId, active, prompt: '', sourceText: undefined, selection: undefined, referenceImageId: undefined, selectedReferenceImageIds: undefined, error: undefined, material: undefined, instruction: undefined, materialEntityIds: undefined, materialFactIds: undefined, materialRelationIds: undefined, publicMaterial: undefined, referenceImageIds: undefined, referenceEntityIds: undefined, referenceCharacters: undefined, generationParameters: undefined, promptStatus: undefined, optimizedAt: undefined, url };
+    const previewUrl = url ? `${url}&size=preview` : undefined;
+    return author ? { ...image, entityId, referenceCharacters, active, url, previewUrl } : { ...image, entityId, active, prompt: '', sourceText: undefined, selection: undefined, referenceImageId: undefined, selectedReferenceImageIds: undefined, error: undefined, material: undefined, instruction: undefined, materialEntityIds: undefined, materialFactIds: undefined, materialRelationIds: undefined, publicMaterial: undefined, referenceImageIds: undefined, referenceEntityIds: undefined, referenceCharacters: undefined, generationParameters: undefined, promptStatus: undefined, optimizedAt: undefined, url, previewUrl };
   }
   list(branchId: string, author = false, chapterId?: string): StoryImage[] {
     const branch = this.store.getBranch(branchId); const state = author ? this.store.state(branchId) : this.store.readingState(branchId, chapterId);
@@ -62,6 +63,13 @@ export class ImageService {
   content(branchId: string, imageId: string, author = false, chapterId?: string): ImageContent {
     const image = this.find(branchId, imageId, author, chapterId); if (image.status !== 'completed') throw new HttpError('图片尚未生成完成', 409);
     const content = this.store.images.content(imageId); if (!content) throw new HttpError('图片内容不存在', 404); return content;
+  }
+  contentTag(branchId: string, imageId: string): string {
+    const image = this.find(branchId, imageId, true);
+    if (image.status !== 'completed') throw new HttpError('图片尚未生成完成', 409);
+    const tag = this.store.images.contentTag(imageId);
+    if (!tag) throw new HttpError('图片内容不存在', 404);
+    return tag;
   }
   setActive(branchId: string, imageId: string, baseRevisionId: string, active: boolean): { view: BranchView; images: StoryImage[] } {
     this.available(branchId, baseRevisionId); const image = this.find(branchId, imageId, true);

@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { hashPassword, tokenHash, verifyPasswordWithUpgrade, type SettingsStore } from './security.js';
 import type { Store } from './store.js';
@@ -77,7 +77,10 @@ export function registerAuthRoutes(app: FastifyInstance, options: AuthOptions) {
 
   app.get('/api/auth/status', async request => {
     const initialized = Boolean(settings.meta('password'));
-    return { initialized, authenticated: isAuthenticated(request.cookies.session) };
+    const authenticated = isAuthenticated(request.cookies.session);
+    // This separate one-way namespace is not a login credential.
+    const cacheScope = authenticated ? createHash('sha256').update(`browser-cache:${request.cookies.session}`).digest('hex') : undefined;
+    return { initialized, authenticated, ...(cacheScope ? { cacheScope } : {}) };
   });
   app.post('/api/auth/login', { bodyLimit: authBodyLimit, onRequest: loginLimit }, async (request, reply) => {
     const { password } = z.object({ password: loginPassword }).strict().parse(request.body);

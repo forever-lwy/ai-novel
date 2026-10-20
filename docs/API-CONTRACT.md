@@ -20,7 +20,7 @@
 ## 登录与安全边界
 
 - 初始密码通过服务启动环境的 `INITIAL_PASSWORD` 设置，只对没有密码的数据目录生效。新密码 12～256 字符，去除首尾空白后仍须至少 12 位，拒绝全空白、重复单字符及常见弱密码；只保存带版本及参数的 scrypt 哈希。首次启动缺失、为空或不合规则时停止启动，错误不包含密码；已有数据库密码不被此变量覆盖。
-- `GET /auth/status -> {initialized:boolean,authenticated:boolean}`，不返回初始密码、密码哈希或会话值。不提供网页初始化密码接口；嵌入式实例未初始化时只能提示管理员配置。
+- `GET /auth/status -> {initialized:boolean,authenticated:boolean,cacheScope?:string}`：已登录时返回当前会话稳定的浏览器缓存命名空间，重新登录后变化；该单向摘要不能用作登录凭据。不返回初始密码、密码哈希或原始会话值。不提供网页初始化密码接口；嵌入式实例未初始化时只能提示管理员配置。
 - `POST /auth/login {password} -> {ok:true}`，接受旧版 8～256 字符密码；成功登录时将旧 `salt:hash` 升级为带版本与参数的 scrypt 哈希（`N=16384,r=8,p=5`），不更改原密码。错误密码为 401。
 - `POST /auth/logout -> {ok:true}`，撤销当前会话并清除 Cookie。
 - `POST /auth/password {currentPassword,password} -> {ok:true}`，要求有效会话与当前密码，新密码遵循初始化规则。事务更新密码并撤销全部原会话，返回当前浏览器的新 Cookie；异步校验期间密码或会话已变化时拒绝操作。
@@ -55,11 +55,11 @@
 - `DELETE /branches/:id/images/:imageId?view=author {baseRevisionId} -> {view:BranchView,images:StoryImage[]}`：从当前版本的图册及启用列表移除；历史及其他故事线引用保留像素，不跨版本破坏资料。删除当前图片不自动换用其他图片。排队／运行任务按所属故事线处理取消与迟到输出，删除后不能通过当前线内容 URL 读取。
 - 图册包含未启用的暂存图，支持预览、重绘和删除；未启用或已删除的图仍不会进入提示词优化候选、实际图片请求及 CG 参考，显式编辑原图也须启用。参考选择在任务期间变化时仍拒绝后续图片请求，显式重试按当前选择重新优化。
 
-- `GET /branches/:id/images -> StoryImage[]`：返回当前故事线完整图册，含私密图片、未启用图片与生成中的记录。完成图带同源内容 URL；图片内容接口仍校验当前故事线引用及登录。阅读开关不改变结果。
+- `GET /branches/:id/images -> StoryImage[]`：返回当前故事线完整图册，含私密图片、未启用图片与生成中的记录。完成图带同源原图 `url` 和缩略图 `previewUrl`，URL 的 v 参数随图片记录变化；图片内容接口仍校验当前故事线引用及登录。阅读开关不改变结果。
 - `POST /branches/:id/images?view=author`，请求为 `ImageGenerateInput={baseRevisionId,kind:'portrait'|'entity'|'map'|'cg',entityId?,chapterId?,selection?:{start,end},instruction?,referenceImageId?,selectedReferenceImageIds?:string[]}`，返回 `{view:BranchView,image:StoryImage}`。登记引用创建一个新版本，独立图片任务随后运行；调用方更新 `view.branch.revisionId`。资料图必须指定当前实体，地图依据地点与地理关系，CG 必须指定当前章，选段为正文 UTF-16 起止索引，结束位置不包含在选段内。图片修改需同一关联对象的已完成参考图与修改要求，使用实际原图输入，不覆盖旧图。
 - `selectedReferenceImageIds` 省略时保留自动人物参考，空数组表示不用额外参考图，非空时按数组顺序严格使用作者指定图片，文字优化 AI 的参考人物选择不再决定图片输入。允许当前故事线已启用、已完成且有像素的各类图片；重复、跨线／跨作品、未启用、未完成、缺失及超出当前模型参考图总数量上限的选择在登记前拒绝。最多 16 项，编辑原图 `referenceImageId` 另占一张且始终排第一，不得重复选择。显式选择优先于 `useCharacterReferences`，不等待未选人物的排队立绘；作者选择为可选字段，旧请求保持原行为。
-- `GET /branches/:id/images/:imageId/content`：返回当前故事线引用的已完成 PNG、JPEG 或 WebP 二进制，私密和未启用图片也可查看；跨作品、当前故事线不包含或回退后已移除的图片返回 404，未完成返回 409。旧 view 和 chapterId 查询参数不改变结果。
-- 图片内容接口继续使用 `Cache-Control: no-store`，每次实际请求都校验登录及可见性。前端在当前工作区内按作品、故事线、版本及完整内容 URL 复用图片 Blob URL，并合并进行中的下载；不写浏览器持久缓存。未显示图片最多保留 96 项、64 MiB 原始字节，按最近使用淘汰并释放 URL，仍在显示的图片保留到最后一处关闭；离开工作区释放全部 URL 并取消下载。失败不缓存、不自动重试，迟到响应不能显示到其他范围。
+- `GET /branches/:id/images/:imageId/content`：默认返回当前故事线引用的已完成 PNG、JPEG 或 WebP 原始二进制；`size=preview` 返回等比例、最长边不超过 480 像素、不放大小图的 WebP 预览，转换失败返回 422，原图仍可读取。私密和未启用图片也可查看；跨作品、当前故事线不包含或回退后已移除的图片返回 404，未完成返回 409。旧 view、chapterId 及缓存标识 v 参数不改变访问范围。
+- 图片内容接口使用 `Cache-Control: private, no-cache` 与内容 ETag，原图和预览有独立标识；先校验登录、当前故事线引用与完成状态，再处理 `If-None-Match`，未变化返回无正文的 304。失败不作为可复用图片；服务端合并相同预览转换，最多 2 项并行，派生缓存最多 256 项／32 MiB，不改写原图或备份。前端在同一登录会话中按作品、故事线及图片 URL 共用 Blob URL，不随无关故事版本变化失效；返回书架保留，退出登录释放。未显示图片最多保留 96 项、64 MiB 原始字节，使用中的图片不被淘汰；失败不自动重试，迟到响应不能填入已清理的会话缓存。
 - `POST /branches/:id/images/:imageId/retry?view=author {baseRevisionId}`：显式再次请求，返回新资源和新版本，原记录与原图保留。重试可能再次计费。
 - `POST /branches/:id/images/:imageId/cancel?view=author -> StoryImage`：停止排队或正在生成的图片，拒绝迟到结果。
 - 图片状态为 `queued/running/completed/failed/paused/stale/cancelled`。服务重启或关闭后排队与运行任务转为 `paused`，不自动重复调用；正文或资料版本变化后迟到结果转为 `stale`。图片二进制持久化在 SQLite，单图上限 20 MiB，作品删除和完整备份／恢复包括图片及历史引用，旧版无图片备份继续可用。
@@ -98,9 +98,9 @@
 - `Revision.restoredFromRevisionId?` 记录回退实际恢复的历史版本，完整审计父链仍保留；章末快照沿恢复来源读取，确保回退后的分支和资料维护使用所恢复的历史状态。完整备份重映射该关联，来源必须属于正常父链中的历史版本，非法或循环来源拒绝恢复。
 
 - 认证接口见上文“登录与安全边界”，初始密码由服务器环境提供；改密与会话撤销不进入作品备份。
-- GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],branchTree:BranchTreeEntry[],sources:Source[]}。GET 返回完整 premise（初始作者设定）。
+- GET /projects -> Project[]; POST /projects {title,premise,mode} -> Project; GET /projects/:id -> {project,branches:Branch[],branchTree:BranchTreeEntry[],sources:Source[],cacheVersion:string}。GET 返回完整 premise（初始作者设定）。cacheVersion 是不透明的服务状态校验值，不是可用于写操作的故事 revisionId。
 - DELETE /projects/:id（无请求体）-> {ok:true}：永久删除整部作品，包括原文、正文、所有故事线及历史快照、世界资料、剧情规划与伏笔、任务、导入队列、模型输出和搜索索引。先取消该作品未结束的任务、中止模型请求并等待收尾，再在事务中清理数据，迟到结果不能重新写回。删除期间创建、恢复或重试任务返回 409；重复并发删除返回 409，作品不存在或已删除返回 404。沿用 session 和同源校验，无需 baseRevisionId 或作者视图参数；不影响其他作品、登录和供应商设置。原文清理如遇文件占用，会保留在内部待清理目录并在下次服务启动重试。
-- GET /branches/:id -> BranchView：返回当前故事线完整状态、版本历史、世界设定、伏笔、秘密与未来资料、摘要及 RPG 选择，不再返回 readingChapterId。切章不请求另一份资料快照；需要历史状态时通过分支或回退处理。
+- GET /branches/:id -> BranchView：返回当前故事线完整状态、版本历史、世界设定、伏笔、秘密与未来资料、摘要及 RPG 选择，以及 cacheVersion，不再返回 readingChapterId。前端先读取作品信息，只有 cacheVersion 与本地快照一致时才复用完整资料；任意数据库写入、外部连接修改或服务重启使该保守校验值失效，包括原版本内的快照修正。正文按当前目录中的不可变章节 ID 复用，名称由最新目录覆盖。写操作仍须携带 baseRevisionId。
 - GET /branches/:id/chapters/:chapterId -> Chapter（只可取该线实际包含的章）。
 - POST /branches/:id/chapters {baseRevisionId,title,text,chapterId?} -> BranchView。新建章节保存为 pending 并自动整理，未配置模型也保留正文。携带 `chapterId` 编辑已有章节时，必须无未结束文字任务；在原分支新建正文版本，保留后续章节、已有摘要、资料、关系、锁定内容及原整理状态，不创建分支、不排队提取、不请求模型。旧正文不覆盖；受影响章末快照同步更新，历史与手动分支仍使用一致边界。仅改标题保留正文 ID；正文改变时创建新正文 ID，匹配到的引文更新章节及段号，失效或无法唯一定位的引文解除但保留事实，伏笔和压缩摘要的章节关联同步映射。所编辑章的旧图片引用从当前状态移除，历史及其他线的图片像素保留；RPG 旧章末选择失效。需更新资料时显式使用单章 extract 接口。过期版本返回 409，其他线的章节返回 404。
 - `DELETE /branches/:id/chapters/:chapterId?view=author {baseRevisionId} -> BranchView`：只移除当前故事线的所选章，保留其他正文、原文件、历史和其他线。清理该章摘要、非锁定事实、引用关系和章节图片引用；锁定事实保留并解除被删正文的引用。后续编号、未来规划及伏笔预计章节顺延，被处理章覆盖的压缩摘要移除；删除 RPG 章末选择所属章时移除该选择，作者角色设定保留。

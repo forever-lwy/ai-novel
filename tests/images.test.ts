@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import sharp from 'sharp';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +30,43 @@ function setup(generator: ImageGenerator = async () => ({ bytes: png, mimeType: 
 async function until(predicate: () => boolean) { for (let index = 0; index < 100 && !predicate(); index++) await new Promise(resolve => setTimeout(resolve, 5)); expect(predicate()).toBe(true); }
 
 describe('durable story illustrations', () => {
+  it('revalidates original and preview pixels after authorization without rewriting originals', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'novel-image-cache-api-'));
+    const ctx = await buildApp({ initialPassword: 'fixture-image-password', dataDir: directory, startEngine: false });
+    cleanup.push(async () => { await ctx.app.close(); rmSync(directory, { recursive: true, force: true }); });
+    const project = ctx.store.createProject({ title: '缓存样例' }); const branchId = project.mainBranchId;
+    const auth = await ctx.app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'fixture-image-password' } });
+    const cookies = { session: auth.cookies.find(item => item.name === 'session')!.value };
+    const pixels = await sharp({ create: { width: 1200, height: 900, channels: 4, background: '#638baa' } }).png().toBuffer();
+    const image: StoryImage = { id: 'cached-image', projectId: project.id, branchId, baseRevisionId: ctx.store.getBranch(branchId).revisionId, kind: 'map', status: 'completed', title: '地图', prompt: '', automatic: false, visibility: 'public', createdAt: '', updatedAt: '', mimeType: 'image/png' };
+    const state = ctx.store.state(branchId); state.imageIds = [image.id];
+    ctx.store.commit(branchId, image.baseRevisionId, state, '图片', revisionId => ctx.store.images.insert({ ...image, baseRevisionId: revisionId }, { bytes: pixels, mimeType: 'image/png' }));
+    const url = `/api/branches/${branchId}/images/${image.id}/content?view=author`;
+    const original = await ctx.app.inject({ url, cookies });
+    expect(original.rawPayload).toEqual(pixels); expect(original.headers['cache-control']).toBe('private, no-cache');
+    const tag = String(original.headers.etag); expect(tag).toBeTruthy();
+    const reads = vi.spyOn(ctx.store.images, 'content');
+    const unchanged = await ctx.app.inject({ url, cookies, headers: { 'if-none-match': tag } });
+    expect(unchanged.statusCode).toBe(304); expect(unchanged.rawPayload.length).toBe(0); expect(reads).not.toHaveBeenCalled();
+    const [preview, other] = await Promise.all([0, 1].map(() => ctx.app.inject({ url: `${url}&size=preview`, cookies })));
+    expect(preview.statusCode).toBe(200); expect(preview.headers['content-type']).toBe('image/webp');
+    expect(preview.rawPayload).toEqual(other.rawPayload); expect(preview.rawPayload.length).toBeLessThan(pixels.length);
+    const metadata = await sharp(preview.rawPayload).metadata();
+    expect(metadata.width).toBe(480); expect(metadata.height).toBe(360);
+    expect(preview.headers.etag).not.toBe(tag);
+    expect((await ctx.app.inject({ url: `${url}&size=preview`, cookies, headers: { 'if-none-match': String(preview.headers.etag) } })).statusCode).toBe(304);
+    expect(ctx.store.images.content(image.id)?.bytes).toEqual(pixels);
+    expect(ctx.store.exportProject(project.id).images?.[0].contentBase64).toBe(pixels.toString('base64'));
+    const changed = ctx.store.state(branchId); changed.outline.locked = '调整文字资料';
+    ctx.store.commit(branchId, ctx.store.getBranch(branchId).revisionId, changed, '更新资料');
+    expect((await ctx.app.inject({ url, cookies, headers: { 'if-none-match': tag } })).statusCode).toBe(304);
+    expect((await ctx.app.inject({ url, headers: { 'if-none-match': tag } })).statusCode).toBe(401);
+    const deleted = ctx.store.state(branchId); deleted.imageIds = []; deleted.activeImageIds = [];
+    ctx.store.commit(branchId, ctx.store.getBranch(branchId).revisionId, deleted, '移除图片');
+    expect((await ctx.app.inject({ url, cookies, headers: { 'if-none-match': tag } })).statusCode).toBe(404);
+    expect((await ctx.app.inject({ url: `${url}&size=preview`, cookies, headers: { 'if-none-match': String(preview.headers.etag) } })).statusCode).toBe(404);
+    reads.mockRestore();
+  });
   it('binds a portrait to a version and exposes only completed public pixels to readers', async () => {
     const ctx = setup(); const result = ctx.service.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'portrait', entityId: 'character-1' });
     expect(result.image.status).toBe('queued'); expect(result.view.state.imageIds).toEqual([result.image.id]); expect(ctx.service.list(ctx.branchId)).toEqual([]);

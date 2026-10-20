@@ -13,6 +13,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     credentials: 'same-origin',
     headers,
   });
+  if (response.status === 401 && typeof window !== 'undefined' && path !== '/auth/login') window.dispatchEvent(new Event('story-session-ended'));
   const data = await response.json().catch(() => null);
   if (!response.ok) throw new ApiError(data?.error || `请求失败（${response.status}）`, response.status);
   return data as T;

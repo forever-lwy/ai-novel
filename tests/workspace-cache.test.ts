@@ -52,4 +52,30 @@ describe('workspace navigation cache', () => {
     await Promise.resolve(); expect(cache.get('chapter')).toBe('old'); finish('latest');
     expect(await pending).toBe('latest'); expect(cache.get('chapter')).toBe('latest');
   });
+
+  it('restores persisted content without downloading it, but refresh bypasses old storage', async () => {
+    const storage = { get: vi.fn(async () => 'saved'), set: vi.fn() };
+    const loader = vi.fn(async () => 'updated');
+    const cache = new ResourceCache<string>(2, 4096, storage);
+    expect(await cache.load('chapter', loader)).toBe('saved');
+    expect(loader).not.toHaveBeenCalled();
+    expect(await cache.load('chapter', loader, true)).toBe('updated');
+    expect(storage.set).toHaveBeenCalledWith('chapter', 'updated');
+  });
+
+  it('falls back to the server when browser storage is unavailable', async () => {
+    const cache = new ResourceCache<string>(2, 4096, { get: async () => { throw new Error('storage disabled'); }, set: () => {} });
+    expect(await cache.load('chapter', async () => 'server prose')).toBe('server prose');
+  });
+
+  it('cannot refill cleared session caches with a late server response', async () => {
+    const storage = { get: vi.fn(async () => undefined), set: vi.fn() };
+    const cache = new ResourceCache<string>(2, 4096, storage);
+    let finish!: (value: string) => void;
+    const request = cache.load('chapter', () => new Promise<string>(resolve => { finish = resolve; }));
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    cache.clear(); finish('old session');
+    await request;
+    expect(cache.get('chapter')).toBeUndefined(); expect(storage.set).not.toHaveBeenCalled();
+  });
 });

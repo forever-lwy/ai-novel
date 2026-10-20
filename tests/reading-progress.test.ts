@@ -125,7 +125,7 @@ describe('chapter-scoped reader materials', () => {
     const images = app.images.list(branchId, true);
     for (const query of ['', '?view=author', '?view=reader', '?view=reader&chapterId=' + first.state.chapters[0].id, '?chapterId=foreign']) {
       const response = await app.app.inject({ url: '/api/branches/' + branchId + query, cookies });
-      expect(response.statusCode).toBe(200); expect(response.json()).toEqual(baseline); expect(response.json()).not.toHaveProperty('readingChapterId');
+      expect(response.statusCode).toBe(200); expect(response.json()).toEqual({ ...baseline, cacheVersion: app.store.cacheVersion() }); expect(response.json()).not.toHaveProperty('readingChapterId');
       expect((await app.app.inject({ url: '/api/branches/' + branchId + '/images' + query, cookies })).json()).toEqual(images);
       for (const image of images) {
         expect((await app.app.inject({ url: '/api/branches/' + branchId + '/images/' + image.id + '/content' + query, cookies })).rawPayload).toEqual(readingPng);

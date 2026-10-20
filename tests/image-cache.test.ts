@@ -24,11 +24,11 @@ describe('workspace image content cache', () => {
     const reference = cache.acquire('same-scope-image', '/image');
     expect(reference.url).toBe('blob:fixture-1'); expect(await reference.ready).toBe(reference.url);
     expect(fetcher).toHaveBeenCalledTimes(1); expect(createUrl).toHaveBeenCalledTimes(1);
-    expect(fetcher).toHaveBeenCalledWith('/image', expect.objectContaining({ credentials: 'same-origin', cache: 'no-store' }));
+    expect(fetcher).toHaveBeenCalledWith('/image', expect.objectContaining({ credentials: 'same-origin', cache: 'no-cache' }));
     reference.release(); cache.clear(); expect(revokeUrl).toHaveBeenCalledWith('blob:fixture-1');
   });
 
-  it('does not share an image across author, chapter, branch, project or revision boundaries', async () => {
+  it('keeps distinct caller scopes isolated even when their source URL is the same', async () => {
     const cache = new ImageContentCache();
     const scopes = [
       ['project', viewCacheKey('branch', 'v1', true, 'first')],

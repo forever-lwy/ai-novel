@@ -110,6 +110,11 @@ export function readBackupStates(entries: readonly { state?: unknown; snapshot?:
 }
 
 export class Store {
+  private cacheEpoch = randomUUID();
+  /** Conservative validator: also covers in-place snapshot repairs and external writers. */
+  cacheVersion(): string {
+    return `${this.cacheEpoch}:${this.db.prepare('SELECT total_changes() AS n').get()!.n}:${this.db.prepare('PRAGMA data_version').get()!.data_version}`;
+  }
   private legacyVisibilityCache = new Map<string, StoryState>();
   private legacyVisibilityVersion = '';
   readonly db: DatabaseSync;

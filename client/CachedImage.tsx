@@ -4,14 +4,15 @@ import { ImageContentCache } from './image-cache';
 
 const ImageCacheContext = createContext<{ cache: ImageContentCache; scope: string } | null>(null);
 
-export function ImageCacheProvider({ scope, children }: { scope: string; children: ReactNode }) {
-  const [cache] = useState(() => new ImageContentCache());
+export function ImageCacheProvider({ scope, children, shared }: { scope: string; children: ReactNode; shared?: ImageContentCache }) {
+  const [local] = useState(() => new ImageContentCache());
+  const cache = shared ?? local;
   const value = useMemo(() => ({ cache, scope }), [cache, scope]);
-  useEffect(() => () => cache.clear(), [cache]);
+  useEffect(() => () => { if (!shared) cache.clear(); }, [cache, shared]);
   return <ImageCacheContext.Provider value={value}>{children}</ImageCacheContext.Provider>;
 }
 
-/** All image surfaces share bytes within the current work, branch and version. */
+/** Surfaces share pixels by login session, work, branch and versioned resource URL. */
 export function CachedImage(props: ImgHTMLAttributes<HTMLImageElement>) {
   const context = useContext(ImageCacheContext);
   if (!context || !props.src) return <img {...props} />;

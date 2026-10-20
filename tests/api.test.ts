@@ -19,6 +19,18 @@ function form(filename: string, contents: string | Buffer) {
   return { headers: { 'content-type': `multipart/form-data; boundary=${boundary}` }, payload: Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`), Buffer.from(contents), Buffer.from(`\r\n--${boundary}--\r\n`)]) };
 }
 describe('HTTP boundaries and persistence', () => {
+  it('gives each login a stable, non-credential browser cache namespace', async () => {
+    const ctx = await make(); const session = await login(ctx);
+    const first = (await ctx.app.inject({ url: '/api/auth/status', cookies: { session } })).json();
+    expect(first.cacheScope).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.cacheScope).not.toBe(session);
+    expect((await ctx.app.inject({ url: '/api/auth/status', cookies: { session } })).json().cacheScope).toBe(first.cacheScope);
+    expect((await ctx.app.inject({ url: '/api/projects', cookies: { session: first.cacheScope } })).statusCode).toBe(401);
+    await ctx.app.inject({ method: 'POST', url: '/api/auth/logout', cookies: { session } });
+    expect((await ctx.app.inject({ url: '/api/auth/status', cookies: { session } })).json().cacheScope).toBeUndefined();
+    const next = await login(ctx);
+    expect((await ctx.app.inject({ url: '/api/auth/status', cookies: { session: next } })).json().cacheScope).not.toBe(first.cacheScope);
+  });
   it('requires a session, rate limits login and rejects cross-origin mutation', async () => {
     const ctx = await make();
     expect((await ctx.app.inject('/api/auth/status')).json()).toEqual({ initialized: true, authenticated: false });

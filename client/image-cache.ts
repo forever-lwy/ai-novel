@@ -7,7 +7,7 @@ type ImageEntry = {
   failed?: boolean;
 };
 
-/** Workspace-local pixel cache. Visible images stay pinned; idle images use a bounded LRU. */
+/** Session-local pixel cache. Visible images stay pinned; idle images use a bounded LRU. */
 export class ImageContentCache {
   private entries = new Map<string, ImageEntry>();
 
@@ -25,7 +25,8 @@ export class ImageContentCache {
       const controller = new AbortController();
       const created: ImageEntry = { controller, ready: Promise.resolve(''), bytes: 0, users: 0 };
       created.ready = Promise.resolve().then(async () => {
-        const response = await fetch(source, { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+        const response = await fetch(source, { credentials: 'same-origin', cache: 'no-cache', signal: controller.signal });
+        if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event('story-session-ended'));
         if (!response.ok) throw new Error(`图片加载失败（${response.status}）`);
         const blob = await response.blob();
         controller.signal.throwIfAborted();

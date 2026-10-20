@@ -3,7 +3,7 @@ import type { ExtractionResult, StoryImage, Job } from '../../shared/types.js';
 import type { Store } from '../../server/store.js';
 import { normalizeExtraction, splitExtractionBlocks } from '../../server/extraction.js';
 
-export const readingPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7x8AAAAASUVORK5CYII=', 'base64');
+export const readingPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVQImWPw6Sv6DwAEwgJMYzx9CAAAAABJRU5ErkJggg==', 'base64');
 type ExtractedEntity = ExtractionResult['entities'][number];
 const entity = (kind: ExtractedEntity['kind'], name: string, quote: string, attributes: Record<string, string>): ExtractedEntity => ({
   kind, name, aliases: [], description: '', visibility: 'public',

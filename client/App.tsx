@@ -1,15 +1,23 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, BookOpen, Plus, Settings as SettingsIcon, LogOut, Upload, FolderOpen, Feather, Sparkles, Trash2 } from 'lucide-react';
 import type { Mode, Project } from '../shared/types';
 import { api, post, modeNames, dateText } from './api';
 import { Brand, Empty, Modal, Notice, Spinner } from './ui';
 import { SettingsPage } from './SettingsPanel';
 import { Workspace } from './Workspace';
+import { ApplicationCache, clearStoredCaches } from './application-cache';
+
+type AuthStatus = { initialized: boolean; authenticated: boolean; cacheScope?: string };
+const expiredSessionMessage = '登录已失效，未保存的内容仍保留在当前页面。请先复制未保存内容，再返回书架重新登录。';
 
 export default function App() {
-  const [auth, setAuth] = useState<{ initialized: boolean; authenticated: boolean } | null>(null);
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [resources, setResources] = useState<ApplicationCache | null>(null);
+  const resourcesRef = useRef<ApplicationCache | null>(null);
+  const authSequence = useRef(0);
   const [projects, setProjects] = useState<Project[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
+  const currentRef = useRef(current); currentRef.current = current;
   const [settings, setSettings] = useState(false);
   const previousScroll = useRef<number | null>(null);
   const [create, setCreate] = useState(false);
@@ -23,7 +31,49 @@ export default function App() {
   const [mode, setMode] = useState<Mode>('original');
 
   const loadProjects = async () => setProjects(await api<Project[]>('/projects'));
-  useEffect(() => { api<{ initialized: boolean; authenticated: boolean }>('/auth/status').then(setAuth).catch(e => setError(e.message)); }, []);
+  const refreshAuth = useCallback(async () => {
+    const sequence = ++authSequence.current;
+    const value = await api<AuthStatus>('/auth/status');
+    if (sequence !== authSequence.current) return;
+    if (!value.authenticated && currentRef.current && resourcesRef.current) {
+      await resourcesRef.current.clear();
+      if (sequence === authSequence.current) setError(expiredSessionMessage);
+      return;
+    }
+    const scope = value.authenticated ? value.cacheScope ?? resourcesRef.current?.scope ?? crypto.randomUUID() : undefined;
+    if (resourcesRef.current?.scope !== scope) {
+      const previous = resourcesRef.current;
+      if (previous) await previous.clear();
+      if (sequence !== authSequence.current) return;
+      if (scope) { resourcesRef.current = new ApplicationCache(scope); setResources(resourcesRef.current); }
+      else { resourcesRef.current = null; setResources(null); }
+    }
+    if (!value.authenticated) { setCurrent(null); void clearStoredCaches(); }
+    else setError(previous => previous === expiredSessionMessage ? '' : previous);
+    setAuth(value);
+  }, []);
+  useEffect(() => {
+    const refresh = () => { if (!document.hidden) void refreshAuth().catch(e => setError(e.message)); };
+    const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('ai-novel-session') : undefined;
+    const expire = (broadcast: boolean) => {
+      ++authSequence.current;
+      void resourcesRef.current?.clear(); resourcesRef.current = null; setResources(null);
+      setCurrent(null); setSettings(false); setAuth({ initialized: true, authenticated: false });
+      if (broadcast) channel?.postMessage('logout');
+    };
+    const ended = () => {
+      if (currentRef.current) { void resourcesRef.current?.clear(); setError(expiredSessionMessage); }
+      else expire(false);
+    };
+    const logout = () => expire(true);
+    if (channel) channel.onmessage = event => { if (event.data === 'logout') expire(false); };
+    refresh();
+    window.addEventListener('story-session-ended', ended);
+    window.addEventListener('story-session-logout', logout);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { ++authSequence.current; channel?.close(); window.removeEventListener('story-session-ended', ended); window.removeEventListener('story-session-logout', logout); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
+  }, [refreshAuth]);
   useEffect(() => { if (auth?.authenticated) loadProjects().catch(e => setError(e.message)); }, [auth?.authenticated]);
   useEffect(() => {
     if (settings) window.scrollTo(0, 0);
@@ -56,17 +106,20 @@ export default function App() {
     setDeleting(true); setDeleteError('');
     try {
       await api<{ ok: true }>(`/projects/${projectId}`, { method: 'DELETE' });
+      await resourcesRef.current?.forgetProject(projectId);
       setProjects(previous => previous.filter(project => project.id !== projectId));
       setDeleteTarget(null);
     } catch (e) { setDeleteError((e as Error).message); } finally { setDeleting(false); }
   }
   if (!auth) return <main className="startup"><Brand />{error ? <Notice error={error} /> : <Spinner />}</main>;
-  if (!auth.authenticated) return <Auth initialized={auth.initialized} onAuthenticated={() => setAuth({ initialized: true, authenticated: true })} />;
+  if (!auth.authenticated) return <Auth initialized={auth.initialized} onAuthenticated={() => { void refreshAuth().catch(e => setError(e.message)); }} />;
+  if (!resources) return <Spinner text="正在恢复工作台…" />;
 
   return <div className="app-shell">
+    {current && error && <div className="workspace-notice"><Notice error={error} onClose={() => setError('')} /></div>}
     <div hidden={settings} inert={settings}>
-    {current ? <Workspace projectId={current} active={!settings} onBack={() => { setCurrent(null); loadProjects().catch(e => setError(e.message)); }} onSettings={openSettings} /> : <>
-      <header className="site-header"><Brand /><div className="header-actions"><button className="text-button" onClick={openSettings}><SettingsIcon size={17} /><span>设置</span></button><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={async () => { try { await post('/auth/logout'); setAuth({ initialized: true, authenticated: false }); } catch (e) { setError((e as Error).message); } }}><LogOut size={18} /></button></div></header>
+    {current ? <Workspace key={current} projectId={current} resources={resources} active={!settings} onBack={() => { setCurrent(null); loadProjects().catch(e => setError(e.message)); }} onSettings={openSettings} /> : <>
+      <header className="site-header"><Brand /><div className="header-actions"><button className="text-button" onClick={openSettings}><SettingsIcon size={17} /><span>设置</span></button><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={async () => { try { await post('/auth/logout'); window.dispatchEvent(new Event('story-session-logout')); } catch (e) { setError((e as Error).message); } }}><LogOut size={18} /></button></div></header>
       <main className="shelf-page">
         <section className="shelf-intro"><div><span className="eyebrow"><span className="tiny-dot" /> 私人创作空间</span><h1>每一个故事，<br /><em>都值得成为一个世界。</em></h1><p>从一段灵感开始，或走进一本熟悉的小说。<br />让人物、地点与埋下的伏笔，陪故事一起生长。</p></div><div className="intro-art" aria-hidden="true"><div className="art-orbit orbit-one" /><div className="art-orbit orbit-two" /><div className="art-book"><Feather size={56} strokeWidth={1} /><span>故事未完</span><small>THE WORLD CONTINUES</small></div><span className="art-star star-one">✧</span><span className="art-star star-two">✧</span></div></section>
         {error && <Notice error={error} onClose={() => setError('')} />}

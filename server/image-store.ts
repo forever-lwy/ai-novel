@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Entity, StoryImage, StoryState } from '../shared/types.js';
 import { readerEntityMaterial } from './reader-materials.js';
@@ -72,6 +73,8 @@ export function imageVisible(image: StoryImage, state: StoryState, author: boole
 }
 
 export class ImageStore {
+  private tags = new Map<string, string>();
+  private dataVersion: unknown;
   constructor(private db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS image_assets (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, branch_id TEXT NOT NULL, data TEXT NOT NULL, content BLOB);
       CREATE INDEX IF NOT EXISTS image_assets_project ON image_assets(project_id);`);
@@ -105,11 +108,25 @@ export class ImageStore {
   insert(image: StoryImage, content?: ImageContent) {
     if (content) validateImageContent(content);
     this.db.prepare('INSERT INTO image_assets VALUES(?,?,?,?,?)').run(image.id, image.projectId, image.branchId, JSON.stringify(image), content ? Buffer.from(content.bytes) : null);
+    this.tags.delete(image.id);
   }
   update(image: StoryImage, content?: ImageContent) {
     if (content) validateImageContent(content);
     if (content) this.db.prepare('UPDATE image_assets SET data=?,content=? WHERE id=?').run(JSON.stringify(image), Buffer.from(content.bytes), image.id);
     else this.db.prepare('UPDATE image_assets SET data=? WHERE id=?').run(JSON.stringify(image), image.id);
+    this.tags.delete(image.id);
+  }
+  contentTag(id: string): string | undefined {
+    const version = this.db.prepare('PRAGMA data_version').get()!.data_version;
+    if (version !== this.dataVersion) { this.dataVersion = version; this.tags.clear(); }
+    const cached = this.tags.get(id);
+    if (cached) return cached;
+    const content = this.content(id);
+    if (!content) return undefined;
+    const tag = createHash('sha256').update(content.mimeType).update(content.bytes).digest('hex');
+    if (this.tags.size >= 512) this.tags.delete(this.tags.keys().next().value!);
+    this.tags.set(id, tag);
+    return tag;
   }
   content(id: string): ImageContent | undefined { const row = this.db.prepare('SELECT data,content FROM image_assets WHERE id=?').get(id); if (!row?.content) return undefined; const image = JSON.parse(String(row.data)) as StoryImage; return image.mimeType ? { bytes: Buffer.from(row.content as Uint8Array), mimeType: image.mimeType } : undefined; }
   export(projectId: string) { return this.all(projectId).map(image => ({ image, ...(this.content(image.id) ? { contentBase64: Buffer.from(this.content(image.id)!.bytes).toString('base64') } : {}) })); }

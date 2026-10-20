@@ -10,6 +10,7 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { Store, rpgSetupSchema } from './store.js';
 import { StoryEngine } from './engine.js';
 import { ImageService } from './images.js';
+import { ImagePreviews } from './image-previews.js';
 import { validateImageParameters } from './image-provider.js';
 import { parseNovel } from './importer.js';
 import { registerImportRuleRoutes } from './import-rules.js';
@@ -165,7 +166,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   registerChapterTitleRoutes(app, { store, settings, engine, source, bytes: id => readFileSync(join(uploadDir, source(id).storage_name)) });
   app.get('/api/projects', async () => store.listProjects());
   app.post('/api/projects', async request => store.createProject(z.object({ title: z.string().trim().min(1).max(200), premise: z.string().max(100000).default(''), mode: mode.default('original') }).parse(request.body)));
-  app.get('/api/projects/:id', async request => { const project = store.getProject(param(request)); return { project, branches: store.listBranches(param(request)), branchTree: store.listBranchTree(param(request)), sources: sourceList(param(request)) }; });
+  app.get('/api/projects/:id', async request => { const project = store.getProject(param(request)); return { project, branches: store.listBranches(param(request)), branchTree: store.listBranchTree(param(request)), sources: sourceList(param(request)), cacheVersion: store.cacheVersion() }; });
   app.delete('/api/projects/:id', async request => {
     const projectId = param(request); let stagedDirectory: string | undefined;
     try {
@@ -195,7 +196,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     return { ok: true };
   });
   // This private workbench has one authenticated owner scope; legacy view/chapter queries do not filter it.
-  app.get('/api/branches/:id', async request => store.view(param(request), true));
+  app.get('/api/branches/:id', async request => ({ ...store.view(param(request), true), cacheVersion: store.cacheVersion() }));
   app.put('/api/branches/:id/name', async request => {
     const input = z.object({ baseRevisionId: revision, name: z.string().trim().min(1).max(200) }).strict().parse(request.body);
     return store.renameBranch(param(request), input.baseRevisionId, input.name);
@@ -207,7 +208,23 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   const imageInputSchema = z.object({ baseRevisionId: revision, kind: z.enum(['portrait', 'entity', 'map', 'cg']), entityId: z.string().min(1).max(100).optional(), chapterId: z.string().min(1).max(100).optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), instruction: z.string().max(20000).optional(), referenceImageId: z.string().min(1).max(100).optional(), selectedReferenceImageIds: z.array(z.string().min(1).max(100)).max(16).optional() }).strict();
   app.get('/api/branches/:id/images', async request => images.list(param(request), true));
   app.post('/api/branches/:id/images', async request => { return images.generate(param(request), imageInputSchema.parse(request.body)); });
-  app.get('/api/branches/:id/images/:imageId/content', async (request, reply) => { const content = images.content(param(request), param(request, 'imageId'), true); return reply.type(content.mimeType).header('Content-Disposition', 'inline').send(Buffer.from(content.bytes)); });
+  const imagePreviews = new ImagePreviews();
+  app.get('/api/branches/:id/images/:imageId/content', async (request, reply) => {
+    const { size } = z.object({ size: z.enum(['preview']).optional() }).parse(request.query);
+    const branchId = param(request); const imageId = param(request, 'imageId');
+    // Authorize the current reference before considering a browser's cached pixels.
+    const contentTag = images.contentTag(branchId, imageId);
+    const etag = `${size === 'preview' ? 'W/' : ''}"${contentTag}-${size === 'preview' ? 'preview-v1' : 'original'}"`;
+    if (request.headers['if-none-match']?.split(',').some(value => value.trim().replace(/^W\//, '') === etag.replace(/^W\//, '') || value.trim() === '*')) {
+      return reply.header('Cache-Control', 'private, no-cache').header('ETag', etag).code(304).send();
+    }
+    const content = size === 'preview'
+      ? await imagePreviews.get(etag, () => images.content(branchId, imageId, true))
+      : images.content(branchId, imageId, true);
+    // A deletion or replacement while a thumbnail was being encoded must take effect.
+    if (size === 'preview' && images.contentTag(branchId, imageId) !== contentTag) fail('图片已变化，请重新打开', 409);
+    return reply.type(content.mimeType).header('Cache-Control', 'private, no-cache').header('ETag', etag).header('Content-Disposition', 'inline').send(Buffer.from(content.bytes));
+  });
   app.post('/api/branches/:id/images/:imageId/retry', async request => { return images.retry(param(request), param(request, 'imageId'), base(request.body)); });
   app.post('/api/branches/:id/images/:imageId/cancel', async request => { return images.cancel(param(request), param(request, 'imageId')); });
   app.put('/api/branches/:id/images/:imageId/active', async request => { const input = z.object({ baseRevisionId: revision, active: z.boolean() }).strict().parse(request.body); return images.setActive(param(request), param(request, 'imageId'), input.baseRevisionId, input.active); });

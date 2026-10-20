@@ -1,10 +1,11 @@
-/** Per-workspace memory only. Both entry count and retained text are bounded. */
+/** Bounded memory cache, with optional session-scoped browser persistence. */
 export class ResourceCache<T> {
   private values = new Map<string, { value: T; size: number }>();
   private pending = new Map<string, Promise<T>>();
   private size = 0;
+  private generation = 0;
 
-  constructor(private maxEntries: number, private maxSize: number) {}
+  constructor(private maxEntries: number, private maxSize: number, private storage?: { get(key: string): Promise<T | undefined>; set(key: string, value: T): void }) {}
 
   get(key: string): T | undefined {
     const entry = this.values.get(key);
@@ -13,7 +14,7 @@ export class ResourceCache<T> {
     return entry.value;
   }
 
-  set(key: string, value: T) {
+  set(key: string, value: T, persist = true) {
     const previous = this.values.get(key);
     if (previous?.value === value) return;
     if (previous) { this.values.delete(key); this.size -= previous.size; }
@@ -21,10 +22,20 @@ export class ResourceCache<T> {
     const size = JSON.stringify(value).length * 2;
     if (size > this.maxSize) return;
     this.values.set(key, { value, size }); this.size += size;
+    if (persist) this.storage?.set(key, value);
     while (this.values.size > this.maxEntries || this.size > this.maxSize) {
       const oldest = this.values.keys().next().value!;
       this.size -= this.values.get(oldest)!.size; this.values.delete(oldest);
     }
+  }
+  async read(key: string): Promise<T | undefined> {
+    const cached = this.get(key);
+    if (cached !== undefined) return cached;
+    const generation = this.generation;
+    const value = await this.storage?.get(key).catch(() => undefined);
+    if (generation !== this.generation) return undefined;
+    if (value !== undefined) this.set(key, value, false);
+    return value;
   }
 
   load(key: string, loader: () => Promise<T>, refresh = false, accept: (value: T) => boolean = () => true): Promise<T> {
@@ -32,13 +43,17 @@ export class ResourceCache<T> {
     if (cached !== undefined) return Promise.resolve(cached);
     const pending = this.pending.get(key);
     if (pending) return pending;
-    const request = Promise.resolve().then(loader).then(value => {
-      if (accept(value)) this.set(key, value);
+    const generation = this.generation;
+    const request = Promise.resolve().then(() => !refresh && this.storage
+      ? this.read(key).then(stored => stored !== undefined ? stored : loader())
+      : loader()).then(value => {
+      if (generation === this.generation && accept(value)) this.set(key, value);
       return value;
     }).finally(() => { if (this.pending.get(key) === request) this.pending.delete(key); });
     this.pending.set(key, request);
     return request;
   }
+  clear() { this.generation++; this.values.clear(); this.pending.clear(); this.size = 0; }
 }
 
 /** Reader materials must never share an entry with author materials or another chapter boundary. */

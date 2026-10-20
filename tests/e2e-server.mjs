@@ -63,7 +63,7 @@ let lastModelParameters;
 let finishGeminiArgsStream;
 let imageRequests = 0; let imageEditRequests = 0; let lastImageRequest;
 let promptOptimizationRequests = 0; let lastPromptOptimizationRequest; let lastOptimizedImagePrompt;
-const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aP9sAAAAASUVORK5CYII=';
+const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVQImWPw6Sv6DwAEwgJMYzx9CAAAAABJRU5ErkJggg==';
 const modelServer = createServer(async (req, res) => {
   if (req.url === '/__e2e/stats' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ modelRequests, chapterTitleRequests, modelListRequests, modelRequestsByModel, lastModelParameters, imageRequests, imageEditRequests, lastImageRequest, promptOptimizationRequests, lastPromptOptimizationRequest, lastOptimizedImagePrompt })); return; }
   if (req.url === '/__e2e/shutdown' && req.method === 'POST') { res.writeHead(200); res.end('stopping test fixture'); setImmediate(() => void close()); return; }

@@ -64,7 +64,7 @@ describe('password storage and authentication security', () => {
     const context = await make(), session = await setup(context);
     const hash = context.settings.meta('password')!;
     const status = await context.app.inject({ url: '/api/auth/status', cookies: { session } });
-    expect(status.json()).toEqual({ initialized: true, authenticated: true });
+    expect(status.json()).toEqual({ initialized: true, authenticated: true, cacheScope: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(status.body).not.toContain(password); expect(status.body).not.toContain(hash);
     expect(session).toMatch(/^[a-f0-9]{64}$/);
     const rows = context.store.db.prepare('SELECT token_hash FROM sessions').all();
