@@ -6,6 +6,7 @@ import { normalizeImageSettings } from '../shared/image-settings';
 import { api, dateText, statusNames } from './api';
 import { Empty, Modal, Notice } from './ui';
 import { ImageViewer } from './ImageViewer';
+import { CachedImage } from './CachedImage';
 
 export type ImageTarget = Omit<ImageGenerateInput, 'baseRevisionId'>;
 export type ImageAction = 'retry' | 'cancel' | 'activate' | 'deactivate' | 'delete';
@@ -31,7 +32,7 @@ export function ImageRequestDialog({ target, title, excerpt, reference, images =
     await onSubmit({ ...target, instruction: instruction.trim() || undefined, selectedReferenceImageIds: referenceMode === 'auto' ? undefined : referenceMode === 'none' ? [] : selectedIds });
   }
   return <Modal title={title} onClose={() => !busy && onClose()} closeDisabled={busy}><form className="form-stack image-request" onSubmit={submit}>
-    {reference?.url && <img className="image-reference" src={reference.url} alt={`修改参考：${reference.title}`} />}{excerpt && <blockquote className="image-source-text">{excerpt}</blockquote>}
+    {reference?.url && <CachedImage className="image-reference" src={reference.url} alt={`修改参考：${reference.title}`} />}{excerpt && <blockquote className="image-source-text">{excerpt}</blockquote>}
     <p className="hint">{reference ? '以这张图片为参考，AI 先根据修改要求编写专用提示词，再生成新图片。原图会保留。' : 'AI 根据已保存的正文或资料编写专用提示词，再生成图片。已有图片会保留，完成后可在图册查看本次提示词、尺寸与参考图。'}</p>
     <label>{reference ? '修改要求' : '补充绘制要求（可选）'}<textarea rows={4} disabled={busy} required={!!reference} value={instruction} onChange={event => setInstruction(event.target.value)} placeholder={reference ? '例如：保留服装和五官，把背景改成雨中的城门。' : '例如：全身立绘、简洁背景，或希望表现的光线与构图。'} /></label>
     <label>参考图选择<select aria-label="参考图选择" value={referenceMode} disabled={busy} onChange={event => setReferenceMode(event.target.value as typeof referenceMode)}><option value="auto">自动选择</option><option value="manual">自己选择</option><option value="none">{reference ? '不用其他参考图' : '不用参考图'}</option></select></label>
@@ -45,7 +46,7 @@ export function ImageRequestDialog({ target, title, excerpt, reference, images =
       <label>查找参考图片<input aria-label="查找参考图片" value={search} disabled={busy} onChange={event => setSearch(event.target.value)} placeholder="搜索图片名称或类型…" /></label>
       <div className="image-reference-options">{filtered.map(image => {
         const index = selectedIds.indexOf(image.id); const checked = index >= 0;
-        return <label className={`image-reference-option ${checked ? 'is-selected' : ''}`} key={image.id} data-reference-image-id={image.id}><img src={image.url} alt={image.title} loading="lazy" /><span className="checkbox"><input type="checkbox" aria-label={`参考图片 ${image.title}`} checked={checked} disabled={busy || !caps || !checked && selectedIds.length >= limit} onChange={() => setSelectedIds(ids => checked ? ids.filter(id => id !== image.id) : [...ids, image.id])} /><span>{image.title}</span></span><small>{imageKindNames[image.kind]}{checked ? ` · 参考图 ${index + 1 + (reference ? 1 : 0)}` : ''}</small></label>;
+        return <label className={`image-reference-option ${checked ? 'is-selected' : ''}`} key={image.id} data-reference-image-id={image.id}><CachedImage src={image.url} alt={image.title} loading="lazy" /><span className="checkbox"><input type="checkbox" aria-label={`参考图片 ${image.title}`} checked={checked} disabled={busy || !caps || !checked && selectedIds.length >= limit} onChange={() => setSelectedIds(ids => checked ? ids.filter(id => id !== image.id) : [...ids, image.id])} /><span>{image.title}</span></span><small>{imageKindNames[image.kind]}{checked ? ` · 参考图 ${index + 1 + (reference ? 1 : 0)}` : ''}</small></label>;
       })}</div>
       {!filtered.length && <p className="hint">{candidates.length ? '没有匹配的图片，请更换搜索词。' : '暂无可选参考图片，可先绘制并启用图片，或选择不用参考图。'}</p>}
       {selectedIds.some(id => !candidates.some(image => image.id === id)) && <Notice error="部分所选图片已不可用，请清空后重新选择。" />}
@@ -77,7 +78,7 @@ export function StoryImageCards({ images, author = false, busy = false, onGenera
   useEffect(() => { if (opened && !images.some(image => image.id === opened.id)) setOpened(null); }, [opened?.id, images]);
   const viewerAction = (image: StoryImage, action: ImageAction) => { if (action === 'activate' || action === 'deactivate') setOpened(null); onAction?.(image, action); };
   return <><div className={`story-image-grid ${compact ? 'compact' : ''}`}>{listed.map(image => <article className={`story-image-card image-kind-${image.kind}`} key={image.id} data-image-id={image.id} data-image-active={image.active !== false}>
-    <button className="story-image-preview" disabled={!image.url || image.status !== 'completed'} onClick={() => setOpened({ id: image.id, detailsOpen: false })} aria-label={`查看图片 ${image.title}`}>{image.status === 'completed' && image.url ? <img src={image.url} alt={image.title} loading="lazy" /> : <span><Images size={28} className={image.status === 'running' ? 'spin' : ''} /><small>{author && image.status === 'running' && image.promptStatus === 'pending' ? '正在优化绘图提示词' : statusNames[image.status]}</small></span>}</button>
+    <button className="story-image-preview" disabled={!image.url || image.status !== 'completed'} onClick={() => setOpened({ id: image.id, detailsOpen: false })} aria-label={`查看图片 ${image.title}`}>{image.status === 'completed' && image.url ? <CachedImage src={image.url} alt={image.title} loading="lazy" /> : <span><Images size={28} className={image.status === 'running' ? 'spin' : ''} /><small>{author && image.status === 'running' && image.promptStatus === 'pending' ? '正在优化绘图提示词' : statusNames[image.status]}</small></span>}</button>
     <div className="story-image-info"><div className="row between"><span>{imageKindNames[image.kind]}</span><span className={`status-pill ${image.status}`}>{statusNames[image.status]}</span></div><h4>{image.title}</h4>{image.error && author && <p className="image-error" role="alert">{image.error}</p>}{image.status === 'paused' && author && <p className="hint">任务中断，重新绘制会发起新的生图请求。</p>}{author && image.status === 'completed' && <span className={`image-selection-pill ${image.active === false ? 'is-inactive' : 'is-active'}`}>{image.active === false ? '未启用 · 暂存' : '已启用'}</span>}<small>{dateText(image.createdAt)}{image.automatic ? ' · 自动绘制' : ''}{author && image.visibility === 'secret' ? ' · 仅作者可见' : ''}</small>
       <div className="story-image-actions">
         {image.chapterId && onChapter && <button className="text-button" onClick={() => onChapter(image)}>关联剧情<ArrowUpRight size={12} /></button>}{image.entityId && onEntity && <button className="text-button" onClick={() => onEntity(image.entityId!)}>关联资料<ArrowUpRight size={12} /></button>}

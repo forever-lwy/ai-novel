@@ -2661,6 +2661,147 @@ test('专用生图提示词、AI 尺寸、两人物 CG 参考、Nano Banana 2 �
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 
+async function imageCacheStory(page: Page) {
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-image-cache-browser-')));
+  let backup: Buffer;
+  try {
+    const { project, branchId } = readingProgressStory(store);
+    const portrait = store.images.all(project.id).find(image => image.kind === 'portrait')!;
+    const cg = store.images.all(project.id).find(image => image.kind === 'cg')!;
+    const parked: StoryImage = { ...portrait, id: 'cache-parked', title: '未启用立绘版本' };
+    const secret: StoryImage = { ...cg, id: 'cache-secret', title: '仅作者参考场景', visibility: 'secret', selection: { start: 0, end: 5 }, sourceText: cg.sourceText!.slice(0, 5) };
+    for (const image of [parked, secret]) store.images.insert(image, { bytes: readingPng, mimeType: 'image/png' });
+    store.updateImageReferences(branchId, store.getBranch(branchId).revisionId, cg.chapterId, state => {
+      state.imageIds = [...(state.imageIds ?? []), parked.id, secret.id];
+      state.activeImageIds = [...(state.activeImageIds ?? []), secret.id];
+    }, '保存图片缓存验收样例', revisionId => { for (const image of [parked, secret]) store.images.update({ ...image, baseRevisionId: revisionId }); });
+    const data = store.exportProject(project.id); data.project.title = `图片缓存验收 ${project.id.slice(0, 8)}`;
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: data, sources: [] }));
+  } finally { store.close(); }
+  const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'image-cache.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(restored.ok(), await restored.text()).toBeTruthy();
+  const project = await restored.json();
+  const images: StoryImage[] = await (await page.request.get(`/api/branches/${project.mainBranchId}/images?view=author`)).json();
+  return { project, images, parked: images.find(image => image.title === '未启用立绘版本')!, portrait: images.find(image => image.title === '河岸立绘')! };
+}
+
+async function expectImagePixels(images: Locator) {
+  for (let index = 0; index < await images.count(); index++) {
+    const image = images.nth(index); await image.scrollIntoViewIfNeeded();
+    await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0)).toBe(true);
+  }
+}
+
+for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+  test(`图片内容跨页面复用，参考图和未启用立绘不重复下载（${viewport.width}px）`, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
+    const { project, images, parked, portrait } = await imageCacheStory(page);
+    await page.setViewportSize(viewport);
+    const requests: string[] = [];
+    page.on('request', request => { if (/\/images\/[^/]+\/content\?/.test(request.url())) requests.push(request.url()); });
+    await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+    await expect(page.locator('.manuscript h1')).toHaveText('第三章 灯塔');
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(4);
+    await expectImagePixels(page.locator('.image-gallery img'));
+    const authorRequests = () => requests.filter(url => new URL(url).searchParams.get('view') === 'author');
+    for (const image of images) expect(authorRequests().filter(url => url.includes(image.id))).toHaveLength(1);
+    const originalRequests = authorRequests().length;
+    const cachedUrl = await page.locator(`[data-image-id="${portrait.id}"] img`).getAttribute('src');
+
+    for (let round = 0; round < 2; round++) {
+      await tab(page, '世界资料');
+      await expectImagePixels(page.locator('.entity-image-preview img'));
+      await page.getByRole('button', { name: '查看 林舟 的详细资料', exact: true }).click();
+      const details = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: '世界资料 · 林舟', exact: true }) });
+      await expect(details.locator('.story-image-card')).toHaveCount(2); await expectImagePixels(details.locator('.story-image-card img'));
+      await details.locator(`[data-image-id="${parked.id}"]`).getByRole('button', { name: /^查看图片/ }).click();
+      await expectImagePixels(page.getByTestId('image-viewer').locator('img'));
+      await page.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
+      await details.getByRole('button', { name: '关闭对话框', exact: true }).click();
+      await page.locator('.entity-card').filter({ has: page.getByRole('button', { name: '林舟', exact: true }) }).getByRole('button', { name: '重新绘制', exact: true }).click();
+      const request = page.getByRole('dialog');
+      await request.getByLabel('参考图选择', { exact: true }).selectOption('manual');
+      await expect(request.locator('.image-reference-option')).toHaveCount(3);
+      await expectImagePixels(request.locator('.image-reference-option img'));
+      await request.getByLabel('查找参考图片', { exact: true }).fill('河岸');
+      await expect(request.locator('.image-reference-option')).toHaveCount(1);
+      await request.getByLabel('查找参考图片', { exact: true }).fill('');
+      await expectImagePixels(request.locator('.image-reference-option img'));
+      if (round === 1) await page.screenshot({ path: testInfo.outputPath(`image-cache-references-${viewport.width}.png`), animations: 'disabled' });
+      await request.getByRole('button', { name: '关闭对话框', exact: true }).click();
+      await tab(page, '正文'); await expectImagePixels(page.locator('.chapter-images img'));
+      await tab(page, '故事图册'); await expectImagePixels(page.locator('.image-gallery img'));
+    }
+    expect(authorRequests()).toHaveLength(originalRequests);
+    expect(await page.locator(`[data-image-id="${portrait.id}"] img`).getAttribute('src')).toBe(cachedUrl);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+    // Each new reading boundary must still obtain its own server-filtered pixels.
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
+    await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(2);
+    await expectImagePixels(page.locator('.image-gallery img'));
+    for (const source of await page.locator('.image-gallery img').evaluateAll(elements => elements.map(element => element.getAttribute('data-image-source')))) expect(source).toContain('view=reader');
+    await expect(page.locator('.image-gallery')).not.toContainText('仅作者参考场景');
+    if (viewport.width < 768) await page.getByRole('button', { name: '打开章节目录', exact: true }).click();
+    await page.locator('.chapter-item').filter({ hasText: '第一章 河岸' }).click();
+    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(1);
+    await expectImagePixels(page.locator('.image-gallery img'));
+    const firstChapterUrl = await page.locator('.image-gallery img').getAttribute('src');
+    expect(firstChapterUrl).not.toBe(cachedUrl);
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+    await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(4);
+    await expectImagePixels(page.locator('.image-gallery img'));
+    expect(authorRequests()).toHaveLength(originalRequests);
+
+    // A revision changes the cache boundary; a parked replacement remains previewable.
+    await page.locator(`[data-image-id="${parked.id}"]`).getByRole('button', { name: '启用图片', exact: true }).click();
+    await expect(page.locator(`[data-image-id="${parked.id}"]`)).toHaveAttribute('data-image-active', 'true');
+    await expectImagePixels(page.locator('.image-gallery img'));
+    expect(authorRequests()).toHaveLength(originalRequests + 4);
+    const leavingUrl = await page.locator(`[data-image-id="${parked.id}"] img`).getAttribute('src');
+    await page.getByRole('button', { name: '返回书架', exact: true }).click();
+    expect(await page.evaluate(async url => { try { return (await fetch(url!)).ok; } catch { return false; } }, leavingUrl)).toBe(false);
+  });
+}
+
+test('图片加载中跨页共用请求，失败可重开，迟到作者图片不进入阅读视图', async ({ page }) => {
+  const { project, parked, portrait } = await imageCacheStory(page);
+  let finish!: () => void; let delayedRequests = 0; let failedRequests = 0;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  await page.route(`**/images/${parked.id}/content?view=author`, async route => { delayedRequests++; await gate; await route.continue(); });
+  await page.route(`**/images/${portrait.id}/content?view=author`, async route => {
+    failedRequests++;
+    if (failedRequests === 1) await route.fulfill({ status: 503, contentType: 'text/plain', body: 'temporary fixture failure' });
+    else await route.continue();
+  });
+  try {
+    await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+    await page.getByRole('button', { name: '查看作者资料', exact: true }).click();
+    await tab(page, '故事图册');
+    const parkedCard = page.locator(`[data-image-id="${parked.id}"]`);
+    await parkedCard.scrollIntoViewIfNeeded(); await expect.poll(() => delayedRequests).toBe(1);
+    await parkedCard.getByRole('button', { name: /^查看图片/ }).click();
+    await expect(page.getByTestId('image-viewer').locator('img')).toHaveAttribute('data-image-load-state', 'pending');
+    expect(delayedRequests).toBe(1);
+    await page.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
+    await tab(page, '世界资料'); await expectImagePixels(page.locator('.entity-image-preview img'));
+    expect(failedRequests).toBe(2);
+    await page.getByRole('button', { name: '查看 林舟 的详细资料', exact: true }).click();
+    const details = page.getByRole('dialog');
+    await details.locator(`[data-image-id="${parked.id}"] img`).scrollIntoViewIfNeeded();
+    expect(delayedRequests).toBe(1);
+    await details.getByRole('button', { name: '关闭对话框', exact: true }).click();
+    await page.getByRole('button', { name: '返回阅读视图', exact: true }).click();
+    finish();
+    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(2);
+    await expectImagePixels(page.locator('.image-gallery img'));
+    await expect(page.locator('.image-gallery')).not.toContainText('未启用立绘版本');
+    await expect(page.locator('.image-gallery')).not.toContainText('仅作者参考场景');
+    for (const source of await page.locator('.image-gallery img').evaluateAll(elements => elements.map(element => element.getAttribute('data-image-source')))) expect(source).toContain('view=reader');
+  } finally { finish(); }
+});
+
 test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败保留、放大滚动和全屏查看', async ({ page, browser }, testInfo) => {
   test.setTimeout(180_000);
   const viewerErrors: string[] = []; page.on('pageerror', error => viewerErrors.push(error.message));
@@ -2685,7 +2826,7 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
     await expect(card(second.id).getByRole('button', { name: '启用后可修改', exact: true })).toBeDisabled();
     await card(third.id).getByRole('button', { name: '启用图片', exact: true }).click(); await expect(card(third.id)).toHaveAttribute('data-image-active', 'true'); await expect(card(first.id)).toHaveAttribute('data-image-active', 'false');
     await card(first.id).getByRole('button', { name: '启用图片', exact: true }).click(); await expect(card(first.id)).toHaveAttribute('data-image-active', 'true'); await expect(card(third.id)).toHaveAttribute('data-image-active', 'false');
-    await tab(page, '世界资料'); await expect(person.locator('.entity-image-preview img')).toHaveAttribute('src', new RegExp(first.id));
+    await tab(page, '世界资料'); await expect(person.locator('.entity-image-preview img')).toHaveAttribute('data-image-source', new RegExp(first.id)); await expectImagePixels(person.locator('.entity-image-preview img'));
     await tab(page, '故事图册'); await card(first.id).getByRole('button', { name: '停用图片', exact: true }).click(); await expect(card(first.id)).toHaveAttribute('data-image-active', 'false');
     await tab(page, '正文'); await page.getByRole('button', { name: '生成本章 CG', exact: true }).click(); await page.getByRole('dialog').getByRole('button', { name: '开始绘制', exact: true }).click(); await expect(page.locator('.chapter-images .image-kind-cg .status-pill.completed')).toHaveCount(1);
     const noReference = await stats(); expect(noReference.lastImageRequest.referenceCount).toBe(0); for (const image of portraits) expect(noReference.lastPromptOptimizationRequest.prompt).not.toContain(image.id);
@@ -2699,6 +2840,8 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
     // A large, neutral browser-only SVG fixture exercises real scrolling geometry.
     const viewerFixture = '<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1800"><rect width="2400" height="1800" fill="#dce8d3"/><path d="M0 900H2400M1200 0V1800" stroke="#6d9661" stroke-width="20"/><text x="200" y="250" font-size="90" fill="#345c3a">VIEWER FIXTURE</text></svg>';
     await page.route(`**/api/branches/${branchId}/images/${second.id}/content**`, route => route.fulfill({ contentType: 'image/svg+xml', body: viewerFixture }));
+    // Start cold so the geometry fixture is fetched instead of reusing the already viewed PNG.
+    await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 图片选择与查看', exact: true }).click(); await page.getByRole('button', { name: '查看作者资料', exact: true }).click(); await tab(page, '故事图册');
     await card(second.id).getByRole('button', { name: /^查看图片/ }).click(); const viewer = page.getByTestId('image-viewer');
     await expect.poll(async () => viewer.locator('.image-viewer-image').evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(2400);
     const detailToggle = viewer.getByRole('button', { name: '生图详情', exact: true }); const details = viewer.locator('.image-viewer-details');

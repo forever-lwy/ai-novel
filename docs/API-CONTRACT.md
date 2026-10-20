@@ -57,6 +57,7 @@
 - `POST /branches/:id/images?view=author`，请求为 `ImageGenerateInput={baseRevisionId,kind:'portrait'|'entity'|'map'|'cg',entityId?,chapterId?,selection?:{start,end},instruction?,referenceImageId?,selectedReferenceImageIds?:string[]}`，返回 `{view:BranchView,image:StoryImage}`。登记引用创建一个新版本，独立图片任务随后运行；调用方更新 `view.branch.revisionId`。资料图必须指定当前实体，地图依据地点与地理关系，CG 必须指定当前章，选段为正文 UTF-16 起止索引，结束位置不包含在选段内。图片修改需同一关联对象的已完成参考图与修改要求，使用实际原图输入，不覆盖旧图。
 - `selectedReferenceImageIds` 省略时保留自动人物参考，空数组表示不用额外参考图，非空时按数组顺序严格使用作者指定图片，文字优化 AI 的参考人物选择不再决定图片输入。允许当前故事线已启用、已完成且有像素的各类图片；重复、跨线／跨作品、未启用、未完成、缺失及超出当前模型参考图总数量上限的选择在登记前拒绝。最多 16 项，编辑原图 `referenceImageId` 另占一张且始终排第一，不得重复选择。显式选择优先于 `useCharacterReferences`，不等待未选人物的排队立绘；作者选择为可选字段，旧请求保持原行为。
 - `GET /branches/:id/images/:imageId/content?view=author|reader&chapterId=`：只返回所选章节快照引用且通过可见性过滤的已完成 PNG、JPEG 或 WebP 图片二进制；跨作品、当前进度未包含、回退后不再包含及秘密图不可绕过列表直接读取。`chapterId` 可省略，行为与图片列表一致。
+- 图片内容接口继续使用 `Cache-Control: no-store`，每次实际请求都校验登录及可见性。前端在当前工作区内按作品、故事线、版本、作者／阅读、阅读章节及完整内容 URL 复用图片 Blob URL，并合并进行中的下载；不写浏览器持久缓存。未显示图片最多保留 96 项、64 MiB 原始字节，按最近使用淘汰并释放 URL，仍在显示的图片保留到最后一处关闭；离开工作区释放全部 URL 并取消下载。失败不缓存、不自动重试，迟到响应不能显示到其他范围。
 - `POST /branches/:id/images/:imageId/retry?view=author {baseRevisionId}`：显式再次请求，返回新资源和新版本，原记录与原图保留。重试可能再次计费。
 - `POST /branches/:id/images/:imageId/cancel?view=author -> StoryImage`：停止排队或正在生成的图片，拒绝迟到结果。
 - 图片状态为 `queued/running/completed/failed/paused/stale/cancelled`。服务重启或关闭后排队与运行任务转为 `paused`，不自动重复调用；正文或资料版本变化后迟到结果转为 `stale`。图片二进制持久化在 SQLite，单图上限 20 MiB，作品删除和完整备份／恢复包括图片及历史引用，旧版无图片备份继续可用。

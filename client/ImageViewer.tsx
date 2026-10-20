@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { ChevronDown, ChevronUp, Expand, Info, Maximize, Minimize, Scan, X, ZoomIn, ZoomOut } from 'lucide-react';
 import type { StoryImage } from '../shared/types';
+import { CachedImage } from './CachedImage';
 
 type ChromeEdge = 'top' | 'bottom';
 
@@ -99,7 +100,7 @@ export function ImageViewer({ image, onClose, children, initialDetailsOpen = fal
         <div className="row wrap"><button className="text-button" aria-label="适应窗口" title="适应窗口" onClick={resetFit}><Scan size={18} /><span className="image-viewer-control-text">适应窗口</span></button><button className="text-button" aria-label="原始大小" title="原始大小" onClick={() => setScale(1)}><Expand size={18} /><span className="image-viewer-control-text">原始大小</span></button><button className="text-button" aria-label={fullMode === 'page' ? '退出页面全屏' : fullMode === 'native' ? '退出全屏' : '全屏查看图片'} title={fullScreen ? '退出全屏' : '全屏查看图片'} onClick={() => void toggleFullScreen()}>{fullMode === 'none' ? <Maximize size={18} /> : <Minimize size={18} />}<span className="image-viewer-control-text">{fullMode === 'page' ? '退出页面全屏' : fullMode === 'native' ? '退出全屏' : '全屏查看'}</span></button></div>
       </div>
         <div ref={viewport} className="image-viewer-viewport" aria-label="可滚动的图片区域" tabIndex={0} onPointerDown={event => { if (event.pointerType !== 'mouse' || event.button !== 0) return; drag.current = { x: event.clientX, y: event.clientY, left: event.currentTarget.scrollLeft, top: event.currentTarget.scrollTop }; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (!drag.current) return; event.currentTarget.scrollLeft = drag.current.left + drag.current.x - event.clientX; event.currentTarget.scrollTop = drag.current.top + drag.current.y - event.clientY; }} onPointerUp={event => { drag.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }} onPointerCancel={() => { drag.current = null; }}>
-          <div className="image-viewer-canvas" style={{ width: Math.max(rendered.width + 24, available.width + 24), height: Math.max(rendered.height + 24, available.height + 24) }}><img className="image-viewer-image" src={image.url} alt={image.title} draggable={false} onLoad={event => setNatural({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} style={natural.width ? { width: rendered.width, height: rendered.height } : undefined} /></div>
+          <div className="image-viewer-canvas" style={{ width: Math.max(rendered.width + 24, available.width + 24), height: Math.max(rendered.height + 24, available.height + 24) }}><CachedImage className="image-viewer-image" src={image.url} alt={image.title} draggable={false} onLoad={event => setNatural({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} style={natural.width ? { width: rendered.width, height: rendered.height } : undefined} /></div>
         </div></>}
       {children && detailsOpen && <div id={detailsId} className="image-viewer-details" data-image-chrome-edge="top">{children}</div>}
     </div>
