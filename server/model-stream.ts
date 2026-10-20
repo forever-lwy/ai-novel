@@ -1,5 +1,5 @@
 import type { ModelActivityEvent, ProviderProtocol } from '../shared/types.js';
-import { partialWritingProse, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
+import { cleanToolOutputArtifacts, partialWritingProse, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 import { GeminiFunctionStream } from './gemini-function-stream.js';
 
 type Json = Record<string, any>;
@@ -52,13 +52,23 @@ export function createStreamEndDetector(protocol: ProviderProtocol): (chunk: str
 }
 
 /** Emit prose only; public thoughts and tool execution are recorded through separate activity events. */
-export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text: string) => void, writingTool: boolean | { name: string; field: string } = false): (chunk: string) => void {
+export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text: string) => void, writingTool: boolean | { name: string; field: string } = false, filterToolArtifacts = false): ((chunk: string) => void) & { finish: () => void } {
   const carrierName = typeof writingTool === 'object' ? writingTool.name : WRITING_RESPONSE_NAME;
   const carrierField = typeof writingTool === 'object' ? writingTool.field : 'prose';
   let pending = '';
   const toolParts = new Map<string, { name: string; raw: string; sent: string }>();
   const geminiCalls = new GeminiFunctionStream();
   let plain = ''; let sent = '';
+  const publish = (final: boolean) => {
+    const candidates = [plain, ...[...toolParts.values()].filter(part => part.name === carrierName).map(part => part.sent)];
+    // Normalize each channel before comparing lengths: an artifact-only plain
+    // channel must not displace a shorter, valid result-tool payload.
+    const best = candidates.map(value => filterToolArtifacts ? cleanToolOutputArtifacts(value, final) : value)
+      .reduce((longest, value) => value.length > longest.length ? value : longest, '');
+    // Two gateway channels can mirror the same output. Append only a
+    // compatible suffix; the final capture selects the complete candidate.
+    if (best.startsWith(sent) && best.length > sent.length) { emit(best.slice(sent.length)); sent = best; }
+  };
   const transport = (id: string, toolName?: string, fragment?: string, snapshot?: unknown) => {
     const part = toolParts.get(id) ?? { name: '', raw: '', sent: '' };
     if (toolName) part.name = toolName;
@@ -69,7 +79,7 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
     // A closed JSON snapshot may still end halfway through a streamed UTF-16 pair.
     part.sent = partialWritingProse(part.raw, carrierField).replace(/[\ud800-\udbff]$/, '');
   };
-  return chunk => {
+  const feed = (chunk: string) => {
     pending += chunk;
     let separator: RegExpExecArray | null;
     while ((separator = /\r\n\r\n|\n\n|\r\r/.exec(pending))) {
@@ -117,15 +127,13 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
         if (name === 'content_block_start' && data.content_block?.type === 'text' && typeof data.content_block.text === 'string') text = data.content_block.text;
         if (name === 'content_block_delta' && data.delta?.type === 'text_delta' && typeof data.delta.text === 'string') text = data.delta.text;
       }
-      if (writingTool) {
+      if (writingTool || filterToolArtifacts) {
         plain += text;
-        const best = [plain, ...[...toolParts.values()].filter(part => part.name === carrierName).map(part => part.sent)].reduce((longest, value) => value.length > longest.length ? value : longest, '');
-        // Two gateway channels can mirror the same output. Append only a
-        // compatible suffix; the final capture selects the complete candidate.
-        if (best.startsWith(sent) && best.length > sent.length) { emit(best.slice(sent.length)); sent = best; }
+        publish(false);
       } else if (text) emit(text);
     }
   };
+  return Object.assign(feed, { finish: () => publish(true) });
 }
 
 /** Gemini can interleave public thought and prose parts inside one SSE event.

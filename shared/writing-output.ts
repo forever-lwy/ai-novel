@@ -1,6 +1,39 @@
 import type { ModelToolCall } from './types.js';
 
 export const WRITING_RESPONSE_NAME = 'emit_writing_response';
+
+// Reported in Gemini tool turns. Match only these complete sequences, never
+// standalone CDATA closers, emoji or ordinary "Sides" text. Signed wire history
+// stays untouched; this is used only for decoded output candidates.
+const TOOL_OUTPUT_ARTIFACTS = ['Sides]]>🪒úm', ']]>🪒úm'];
+export function cleanToolOutputArtifacts(text: string, final = true): string {
+  let output = ''; let start = 0; let quoted = false; let escaped = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    // JSON evidence and explicitly quoted literals must remain byte-for-byte
+    // intact, including escaped quotes inside a result-tool string.
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') { quoted = true; continue; }
+    if (char !== ']' && char !== 'S') continue;
+    if (char === 'S' && index > start && /[A-Za-z]/.test(text[index - 1] ?? '')) continue;
+    const artifact = TOOL_OUTPUT_ARTIFACTS.find(value => text.startsWith(value, index));
+    if (artifact) {
+      output += text.slice(start, index);
+      index += artifact.length - 1; start = index + 1;
+    } else if (!final && text.length - index < TOOL_OUTPUT_ARTIFACTS[0].length
+      && TOOL_OUTPUT_ARTIFACTS.some(value => value.startsWith(text.slice(index)))) {
+      // Hold only a possible marker suffix until another delta disambiguates it.
+      return output + text.slice(start, index);
+    }
+  }
+  return output + text.slice(start);
+}
+
 export const WRITING_TOOL_INSTRUCTION = `# 正文工具通道
 每轮只调用一次 emit_writing_response，将本轮正文放入 prose，将需要实际执行的工具放入 toolCalls。
 - prose 包含本轮新增输出，可以为空；启用三段或单段格式时，辅助标签也放入 prose，程序清理后保存正文。不要在普通文本通道写正文，工具参数、结果和玩家回答不写入 prose。

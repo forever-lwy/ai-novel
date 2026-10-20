@@ -8,7 +8,7 @@ import { createStreamActivityEmitter, createStreamEndDetector, createStreamTextE
 import { chapterBudgetInstruction, chapterBudgetReached } from '../shared/rpg-chapter.js';
 import { STRUCTURED_OUTPUT_INSTRUCTION, TOOL_JSON_INSTRUCTION, TOOL_RESULT_REVIEW_INSTRUCTION } from '../shared/prompt-runtime.js';
 import { EXTRACTION_SUBMISSION_NAME, EXTRACTION_TOOL_INSTRUCTION } from '../shared/extraction-output.js';
-import { partialWritingProse, unpackWritingResponse, writingResponseTool, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
+import { cleanToolOutputArtifacts, partialWritingProse, unpackWritingResponse, writingResponseTool, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
 import { archiveCarrierMessages, carrierInstruction, responseCarrierTool, unpackResponseCarrier } from '../shared/response-carrier.js';
 import { rebornMessages } from '../shared/reborn-messages.js';
@@ -338,7 +338,7 @@ export function buildRequestSnapshot(config: ProviderConfig, request: ModelReque
   return requestSnapshot(config, continuationWire(config, request));
 }
 
-async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void, onContent?: () => void, writingTool: boolean | { name: string; field: string } = false): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
+async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void, onContent?: () => void, writingTool: boolean | { name: string; field: string } = false, filterToolArtifacts = false): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
   if (!response.body) return { raw: '', bytes: 0, incomplete: false };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -346,7 +346,7 @@ async function readBody(response: Response, config: ProviderConfig, onTextDelta?
   const detector = createStreamEndDetector(config.protocol);
   const decoder = new TextDecoder();
   const redactor = createSecretStreamRedactor(config.apiKey ? [config.apiKey] : [], text => onTextDelta?.(text));
-  const emit = createStreamTextEmitter(config.protocol, text => redactor.feed(text), writingTool);
+  const emit = createStreamTextEmitter(config.protocol, text => redactor.feed(text), writingTool, filterToolArtifacts);
   const activities = createStreamActivityEmitter(config.protocol, event => onActivity?.(event));
   let pendingFrames = '';
   const dispatchFrames = (decoded: string) => {
@@ -391,7 +391,10 @@ async function readBody(response: Response, config: ProviderConfig, onTextDelta?
   } catch { error ??= 'read'; }
   // Socket closure is not a thinking completion marker. Interrupted blocks
   // remain open for the job's failed/paused/cancelled state to settle them.
-  finally { redactor.finish(); reader.releaseLock(); }
+  finally {
+    try { emit.finish(); redactor.finish(); }
+    finally { reader.releaseLock(); }
+  }
   return { raw: Buffer.concat(chunks, length).toString('utf8'), bytes: length, incomplete: Boolean(error), error };
 }
 
@@ -415,7 +418,9 @@ function inspectBody(config: ProviderConfig, response: Response | undefined, bod
 
 /** A single billable request. Failures never trigger automatic retries. */
 async function sendModelRequest(config: ProviderConfig, request: ModelRequest, wire: ReturnType<typeof requestBody>): Promise<{ data: JsonObject; result: ModelResult }> {
-  const clean = (text: string) => request.textFilter ? cleanDramatronText(text, request.textFilter) : text;
+  const filterToolArtifacts = config.protocol === 'gemini' && Boolean(request.tools?.length || request.writingOutputMode === 'tool');
+  const normalize = (text: string) => filterToolArtifacts ? cleanToolOutputArtifacts(text) : text;
+  const clean = (text: string) => request.textFilter ? cleanDramatronText(normalize(text), request.textFilter) : normalize(text);
   let outputCallbackFailed = false;
   const publishOutput = (publish: () => void) => {
     if (outputCallbackFailed || request.signal?.aborted) return;
@@ -433,12 +438,12 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     if (textFilter) textFilter.feed(text); else request.onTextDelta?.(text);
   } : undefined;
   const rawOutputText = (data: JsonObject) => {
-    let text = responseText(config.protocol, data);
+    let text = normalize(responseText(config.protocol, data));
     if (request.writingOutputMode === 'tool') {
       const calls = responseToolCalls(config.protocol, data);
       const output = calls.find(call => call.name === (request.responseCarrier?.name ?? WRITING_RESPONSE_NAME));
       if (output) {
-        const carrier = partialWritingProse(typeof output.arguments === 'string' ? output.arguments : JSON.stringify(output.arguments) ?? '', request.responseCarrier?.field);
+        const carrier = normalize(partialWritingProse(typeof output.arguments === 'string' ? output.arguments : JSON.stringify(output.arguments) ?? '', request.responseCarrier?.field));
         if (carrier.length >= text.length) text = carrier;
       }
     }
@@ -517,7 +522,7 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
     received = await readBody(response, { ...config, stream: snapshot.stream }, response.ok ? emitText : undefined, response.ok ? request.onActivity : undefined, streamingResponse ? () => {
       receivedContent = true;
       if (!controller.signal.aborted) timer.refresh();
-    } : undefined, request.writingOutputMode === 'tool' ? request.responseCarrier ?? true : false);
+    } : undefined, request.writingOutputMode === 'tool' ? request.responseCarrier ?? true : false, filterToolArtifacts);
     transport = request.signal?.aborted ? 'cancelled' : timedOut ? 'timeout' : received.error === 'read' ? 'interrupted' : 'http';
     const { data, tokens, streamError } = capture();
     if (data && response.ok && !request.signal?.aborted && !response.headers.get('content-type')?.includes('text/event-stream') && !/^\s*(?::|event:|data:)/.test(received.raw)) {
@@ -547,9 +552,9 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
         else if (config.protocol === 'gemini') check.candidates[0].content.parts.push({ text: '工具调用' });
         else { check.stop_reason = check.stop_reason === 'tool_use' ? 'end_turn' : check.stop_reason; check.content.push({ type: 'text', text: '工具调用' }); }
         parseResult(config.protocol, check);
-        const plain = responseText(config.protocol, data);
+        const plain = normalize(responseText(config.protocol, data));
         const parsed = request.responseCarrier ? unpackResponseCarrier(responseToolCalls(config.protocol, data), request.responseCarrier) : undefined;
-        const carrier = parsed ? parsed.prose : request.writingOutputMode === 'tool' ? unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name), Boolean(clean(plain).trim())).prose : plain;
+        const carrier = normalize(parsed ? parsed.prose : request.writingOutputMode === 'tool' ? unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name), Boolean(clean(plain).trim())).prose : plain);
         const text = clean(redactPayload(request.writingOutputMode === 'tool' && plain.length > carrier.length ? plain : carrier, config.apiKey));
         if (!text.trim() && request.writingOutputMode === 'tool' && !(parsed ?? unpackWritingResponse(responseToolCalls(config.protocol, data), (request.tools ?? []).map(tool => tool.name))).calls.length) throw new Error('清理辅助标签后没有正文或工具调用，已保留原始响应。');
         return { data, result: { text, ...responseUsage(config.protocol, data) } };
