@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Entity, StoryImage, StoryState } from '../shared/types.js';
 import { readerEntityMaterial } from './reader-materials.js';
+import { imageGroupKey } from '../shared/image-groups.js';
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const generationParametersSchema = z.object({
@@ -81,9 +82,7 @@ export class ImageStore {
   }
   get(id: string): StoryImage | undefined { const row = this.db.prepare('SELECT data FROM image_assets WHERE id=?').get(id); return row ? JSON.parse(String(row.data)) : undefined; }
   groupKey(image: StoryImage, state: StoryState): string {
-    if (image.kind === 'portrait' || image.kind === 'entity') return `entity:${image.entityId ? imageEntity(state, image.entityId)?.id ?? image.entityId : image.id}`;
-    if (image.kind === 'map') return 'map';
-    return `cg:${image.chapterId}:${image.selection ? `${image.selection.start}:${image.selection.end}` : 'full'}`;
+    return imageGroupKey(image, image.entityId ? imageEntity(state, image.entityId)?.id ?? image.entityId : undefined);
   }
   activeIds(state: StoryState): string[] {
     const selected = new Map<string, string>(); const explicit = state.activeImageIds !== undefined;

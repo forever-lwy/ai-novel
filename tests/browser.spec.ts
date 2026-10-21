@@ -11,6 +11,7 @@ import { gzipSync } from 'node:zlib';
 import { Store } from '../server/store';
 import { readingProgressStory, legacyReadingProgressStory, mixedVisibilityStory, readingPng } from './fixtures/reading-progress';
 import type { Entity, StoryImage } from '../shared/types';
+import { imageGroupKey } from '../shared/image-groups';
 
 // These tests exercise the real UI/server against a local HTTP model fixture.
 // Passing them is not evidence of real-provider acceptance.
@@ -42,6 +43,14 @@ async function createProject(page: Page, title: string) {
 
 async function tab(page: Page, title: string) {
   await page.locator('.workspace-tabs').getByRole('button', { name: new RegExp(`^${title}`) }).click();
+}
+async function openImageGroup(page: Page, image: StoryImage) {
+  const key = imageGroupKey(image);
+  if (await page.locator(`.image-group-versions[data-image-group="${key}"]`).isVisible()) return;
+  const back = page.getByRole('button', { name: '返回图册', exact: true });
+  if (await back.isVisible()) await back.click();
+  await page.locator(`[data-open-image-group="${key}"]`).click();
+  await expect(page.locator(`.image-group-versions[data-image-group="${key}"]`)).toBeVisible();
 }
 async function visibleProse(page: Page) { return (await page.locator('.manuscript .prose').allTextContents()).join(''); }
 
@@ -2519,6 +2528,8 @@ test('生图设置、自动人物与场景工具、全文选段 CG、重绘参�
     await expect(modal).toContainText('世界资料 · 林舟'); await expect(modal.locator('.story-image-card')).toHaveCount(1);
     await modal.getByRole('button', { name: '重新绘制', exact: true }).first().click(); await modal.getByRole('button', { name: '开始绘制', exact: true }).click();
     await tab(page, '故事图册'); await page.getByRole('button', { name: /^人物立绘 \d+$/ }).click();
+    await expect(page.locator('.image-group-card')).toHaveCount(1);
+    await openImageGroup(page, automatic.find((image: StoryImage) => image.kind === 'portrait'));
     await expect(page.locator('.image-gallery .status-pill.completed')).toHaveCount(2);
     const manualPortrait = (await listImages()).find((image: any) => image.kind === 'portrait' && !image.automatic);
     await expect(page.locator(`[data-image-id="${manualPortrait.id}"]`).getByRole('button', { name: '启用后可修改', exact: true })).toBeDisabled();
@@ -2534,16 +2545,18 @@ test('生图设置、自动人物与场景工具、全文选段 CG、重绘参�
     await expect.poll(async () => (await listImages()).filter((image: any) => image.kind === 'entity' && image.status === 'completed').length).toBe(1);
     await tab(page, '地点关系'); await page.getByRole('button', { name: '生成世界地图', exact: true }).click(); await modal.getByRole('button', { name: '开始绘制', exact: true }).click();
     await expect(page.locator('.map-images .status-pill.completed')).toHaveCount(1);
-    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(8);
+    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .image-group-card')).toHaveCount(6);
     await page.screenshot({ path: testInfo.outputPath('story-images-desktop.png'), animations: 'disabled' });
     await page.setViewportSize({ width: 390, height: 844 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
     await page.screenshot({ path: testInfo.outputPath('story-images-mobile.png'), animations: 'disabled' }); await page.setViewportSize({ width: 1440, height: 1000 });
     const cg = (await listImages()).find((image: any) => image.kind === 'cg' && !image.automatic && image.selection);
+    await openImageGroup(page, cg);
     await page.locator(`[data-image-id="${cg.id}"]`).getByRole('button', { name: '关联剧情', exact: true }).click(); await expect(page.locator('.highlighted-paragraph')).toContainText('林舟来到白石城');
     await tab(page, '故事图册'); await page.getByRole('button', { name: '阅读视图', exact: true }).click();
     const readerImages = await (await page.request.get(`/api/branches/${branchId}/images?view=reader`)).json();
     expect(readerImages.some((image: any) => image.id === editedImage.id)).toBe(true);
-    await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(readerImages.length); await expect(page.locator('.image-gallery .image-kind-cg')).toHaveCount(readerImages.filter((image: any) => image.kind === 'cg').length); await expect(page.getByRole('button', { name: 'AI 修改', exact: true }).first()).toBeVisible();
+    await expect(page.locator('.image-gallery .image-group-card')).toHaveCount(new Set(readerImages.map((image: StoryImage) => imageGroupKey(image))).size); await expect(page.locator('.image-gallery .image-kind-cg')).toHaveCount(3);
+    await openImageGroup(page, editedImage); await expect(page.locator('.image-group-versions .story-image-card')).toHaveCount(3); await expect(page.getByRole('button', { name: 'AI 修改', exact: true }).first()).toBeVisible();
     await expect(page.locator('.workspace')).not.toContainText('保留五官，把斗篷改成蓝色');
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
@@ -2563,6 +2576,7 @@ test('生图取消的迟到响应在阅读开关后继续显示，跨故事线�
     else await route.continue();
   });
   await tab(page, '故事图册'); await expect(page.locator('.story-image-card')).toHaveCount(1);
+  await openImageGroup(page, secretImage as StoryImage);
   const response = page.waitForResponse(value => value.url().includes('/ui-secret-image/cancel'));
   await page.getByRole('button', { name: '取消绘制', exact: true }).click();
   await page.getByRole('button', { name: '阅读视图', exact: true }).click();
@@ -2662,7 +2676,7 @@ test('专用生图提示词、AI 尺寸、两人物 CG 参考、Nano Banana 2 �
     const openaiCG = (await imageList()).find((image: any) => image.kind === 'cg');
     expect(openaiCG.promptStatus).toBe('completed'); expect(openaiCG.prompt).toContain('E2E_OPTIMIZED_IMAGE_PROMPT'); expect(openaiCG.prompt).not.toContain('剧情：'); expect(openaiCG.generationParameters.size).toBe('1536x1024'); expect(openaiCG.referenceCharacters.map((character: any) => character.name).sort()).toEqual(['林舟', '苏晴']);
     const firstStats = await stats(); expect(firstStats.lastPromptOptimizationRequest.model).toBe('e2e-image-prompt'); expect(firstStats.lastImageRequest).toMatchObject({ edit: true, referenceCount: 2, referenceBytes: true }); expect(firstStats.lastImageRequest.prompt.replace(/\r\n/g, '\n')).toBe(openaiCG.prompt);
-    await tab(page, '故事图册'); await page.locator(`[data-image-id="${openaiCG.id}"]`).getByRole('button', { name: '生图详情', exact: true }).click();
+    await tab(page, '故事图册'); await openImageGroup(page, openaiCG); await page.locator(`[data-image-id="${openaiCG.id}"]`).getByRole('button', { name: '生图详情', exact: true }).click();
     await expect(modal.getByTestId('optimized-image-prompt')).toContainText('E2E_OPTIMIZED_IMAGE_PROMPT'); await expect(modal.getByTestId('image-actual-parameters')).toContainText('1536 × 1024'); await expect(modal.locator('.image-character-references')).toContainText('苏晴'); await modal.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
     await page.getByRole('button', { name: '设置', exact: true }).click(); await settings.getByRole('button', { name: '生图与自动插画', exact: true }).click();
     await settings.getByLabel('生图提示词优化供应商', { exact: true }).selectOption(providerId); await settings.getByLabel('生图提示词优化模型', { exact: true }).fill('e2e-image-prompt');
@@ -2685,14 +2699,14 @@ test('专用生图提示词、AI 尺寸、两人物 CG 参考、Nano Banana 2 �
     const cleaned = (await (await page.request.get('/api/settings')).json()).imageSettings; expect(cleaned.thinkingLevel).toBeUndefined(); expect(cleaned.systemInstruction).toBeUndefined(); expect(cleaned.imageSize).toBeUndefined(); expect(cleaned.temperature).toBeUndefined(); expect(cleaned.promptModel).toBe('e2e-image-prompt');
     await settings.getByRole('button', { name: '返回作品', exact: true }).click(); await page.getByRole('button', { name: '生成本章 CG', exact: true }).click(); await modal.getByRole('button', { name: '开始绘制', exact: true }).click(); await expect(page.locator('.chapter-images .image-kind-cg .status-pill.completed')).toHaveCount(3);
     const togetherStats = await stats(); expect(togetherStats.lastImageRequest).toMatchObject({ protocol: 'together-images', referenceCount: 2, referenceBytes: true, parameters: { width: 1536, height: 1024, steps: 30, guidance_scale: 3, seed: 99, output_format: 'png' } });
-    await tab(page, '故事图册'); await page.getByRole('button', { name: '阅读视图', exact: true }).click(); await expect(page.getByRole('button', { name: '生图详情', exact: true }).first()).toBeVisible(); await expect(page.locator('.workspace')).not.toContainText('E2E_OPTIMIZED_IMAGE_PROMPT'); await expect(page.locator('.workspace')).not.toContainText('IMAGE_SYSTEM_E2E');
+    await tab(page, '故事图册'); await openImageGroup(page, openaiCG); await page.getByRole('button', { name: '阅读视图', exact: true }).click(); await expect(page.getByRole('button', { name: '生图详情', exact: true }).first()).toBeVisible(); await expect(page.locator('.workspace')).not.toContainText('E2E_OPTIMIZED_IMAGE_PROMPT'); await expect(page.locator('.workspace')).not.toContainText('IMAGE_SYSTEM_E2E');
     await showGenerationProcess(page); await page.getByRole('button', { name: '设置', exact: true }).click(); await settings.getByRole('button', { name: '生图与自动插画', exact: true }).click(); await settings.getByLabel('生图提示词优化模型', { exact: true }).fill('e2e-image-prompt-failure'); await settings.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(settings.getByRole('status')).toContainText('设置已保存'); await settings.getByRole('button', { name: '返回作品', exact: true }).click();
     const beforeFailure = await stats(); await tab(page, '正文'); await page.getByRole('button', { name: '生成本章 CG', exact: true }).click(); await modal.getByRole('button', { name: '开始绘制', exact: true }).click(); await expect(page.locator('.chapter-images .image-kind-cg .status-pill.failed')).toHaveCount(1); expect((await stats()).imageRequests).toBe(beforeFailure.imageRequests);
     await page.locator('.chapter-images .story-image-card').filter({ has: page.locator('.status-pill.failed') }).getByRole('button', { name: '生图详情', exact: true }).click(); await expect(modal).toContainText('生图提示词尚未完成'); await expect(modal.getByTestId('optimized-image-prompt')).toHaveCount(0); await modal.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 
-async function imageCacheStory(page: Page) {
+async function imageCacheStory(page: Page, galleryVariants = false) {
   const store = new Store(mkdtempSync(join(tmpdir(), 'novel-image-cache-browser-')));
   let backup: Buffer;
   try {
@@ -2702,10 +2716,12 @@ async function imageCacheStory(page: Page) {
     const parked: StoryImage = { ...portrait, id: 'cache-parked', title: '未启用立绘版本' };
     const secret: StoryImage = { ...cg, id: 'cache-secret', title: '仅作者参考场景', visibility: 'secret', selection: { start: 0, end: 5 }, sourceText: cg.sourceText!.slice(0, 5) };
     for (const image of [parked, secret]) store.images.insert(image, { bytes: readingPng, mimeType: 'image/png' });
+    const variants: StoryImage[] = galleryVariants ? [{ ...cg, id: 'gallery-cg-variant', title: '另一个构图', createdAt: '2026-10-21T03:00:00Z' }, { ...portrait, id: 'gallery-failed', title: '未完成的立绘', status: 'failed', error: '本地验收失败记录', createdAt: '2026-10-21T04:00:00Z' }] : [];
+    for (const image of variants) store.images.insert(image, image.status === 'completed' ? { bytes: readingPng, mimeType: 'image/png' } : undefined);
     store.updateImageReferences(branchId, store.getBranch(branchId).revisionId, cg.chapterId, state => {
-      state.imageIds = [...(state.imageIds ?? []), parked.id, secret.id];
+      state.imageIds = [...(state.imageIds ?? []), parked.id, secret.id, ...variants.map(image => image.id)];
       state.activeImageIds = [...(state.activeImageIds ?? []), secret.id];
-    }, '保存图片缓存验收样例', revisionId => { for (const image of [parked, secret]) store.images.update({ ...image, baseRevisionId: revisionId }); });
+    }, '保存图片缓存验收样例', revisionId => { for (const image of [parked, secret, ...variants]) store.images.update({ ...image, baseRevisionId: revisionId }); });
     const data = store.exportProject(project.id); data.project.title = `图片缓存验收 ${project.id.slice(0, 8)}`;
     backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: data, sources: [] }));
   } finally { store.close(); }
@@ -2722,6 +2738,64 @@ async function expectImagePixels(images: Locator) {
     const image = images.nth(index); await image.scrollIntoViewIfNeeded();
     await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0)).toBe(true);
   }
+}
+
+for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+  test(`图册按人物和场景归组，搜索保留全部版本，启用删除及分支隔离（${viewport.width}px）`, async ({ page }, testInfo) => {
+    const { project, images, portrait, parked } = await imageCacheStory(page, true);
+    const branchId = project.mainBranchId;
+    const view = await (await page.request.get(`/api/branches/${branchId}`)).json();
+    const forkResponse = await page.request.post(`/api/branches/${branchId}/fork`, { data: { baseRevisionId: view.branch.revisionId, name: '图册旧分支' } });
+    expect(forkResponse.ok()).toBe(true); const fork = await forkResponse.json();
+    const cg = images.find(image => image.title === '另一个构图')!;
+    const secret = images.find(image => image.title === '仅作者参考场景')!;
+    const requests: string[] = []; const errors: string[] = [];
+    page.on('request', request => { if (request.url().includes('/content?')) requests.push(request.url()); });
+    page.on('pageerror', error => errors.push(error.message));
+    await page.setViewportSize(viewport); await page.goto('/');
+    await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await tab(page, '故事图册');
+    const groups = page.locator('.image-group-card');
+    await expect(groups).toHaveCount(3); await expect(page.locator('.image-gallery-count')).toHaveText('3 组 · 6 个版本');
+    const portraitGroup = page.locator(`.image-group-card[data-image-group="${imageGroupKey(portrait)}"]`);
+    await expect(portraitGroup).toHaveAttribute('data-cover-image-id', portrait.id);
+    await expect(portraitGroup).toContainText('3 个版本'); await expect(portraitGroup).toContainText('1 项待处理');
+    await expectImagePixels(page.locator('.image-gallery img'));
+    expect(requests.some(url => url.includes(parked.id))).toBe(false);
+    await page.locator('.workspace-main').evaluate(element => { element.scrollTop = 0; });
+    await page.screenshot({ path: testInfo.outputPath(`image-groups-${viewport.width}.png`), animations: 'disabled' });
+    await portraitGroup.locator('[data-open-image-group]').scrollIntoViewIfNeeded();
+    const overviewScroll = await page.locator('.workspace-main').evaluate(element => element.scrollTop);
+    await openImageGroup(page, portrait); await expect(page.locator('.image-gallery h2')).toBeVisible();
+    await page.getByRole('button', { name: '返回图册', exact: true }).click();
+    expect(Math.abs(await page.locator('.workspace-main').evaluate(element => element.scrollTop) - overviewScroll)).toBeLessThanOrEqual(1);
+    const search = page.getByRole('textbox', { name: '查找故事图片', exact: true });
+    await search.fill('  未启用立绘版本  '); await expect(groups).toHaveCount(1);
+    await openImageGroup(page, parked); await expect(page.locator('.image-group-versions .story-image-card')).toHaveCount(3);
+    await expect(page.getByRole('button', { name: '重试绘制', exact: true })).toBeVisible();
+    await expectImagePixels(page.locator('.image-group-versions img'));
+    await showGenerationProcess(page); await expect(page.locator('.image-group-versions .story-image-card')).toHaveCount(3);
+    const parkedCard = page.locator(`[data-image-id="${parked.id}"]`);
+    await parkedCard.getByRole('button', { name: '启用图片', exact: true }).click(); await expect(parkedCard).toHaveAttribute('data-image-active', 'true');
+    await expect(page.locator(`[data-image-id="${portrait.id}"]`)).toHaveAttribute('data-image-active', 'false');
+    await parkedCard.getByRole('button', { name: /^查看图片/ }).click(); await expectImagePixels(page.getByTestId('image-viewer').locator('img'));
+    await page.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
+    await page.screenshot({ path: testInfo.outputPath(`image-versions-${viewport.width}.png`), animations: 'disabled' });
+    await page.getByRole('button', { name: '返回图册', exact: true }).click(); await expect(search).toHaveValue('  未启用立绘版本  ');
+    await expect(portraitGroup).toHaveAttribute('data-cover-image-id', parked.id);
+    await search.fill('另一个构图'); await expect(groups).toHaveCount(1); await openImageGroup(page, cg);
+    await expect(page.locator('.image-group-versions .story-image-card')).toHaveCount(2);
+    const expectedOrder = images.filter(image => imageGroupKey(image) === imageGroupKey(cg)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(image => image.id);
+    expect(await page.locator('.image-group-versions [data-image-id]').evaluateAll(elements => elements.map(element => element.getAttribute('data-image-id')))).toEqual(expectedOrder);
+    await page.getByRole('button', { name: '返回图册', exact: true }).click(); await search.fill('');
+    await openImageGroup(page, secret); await expect(page.locator('.image-group-versions .story-image-card')).toHaveCount(1);
+    await page.getByRole('button', { name: '删除图片', exact: true }).click(); await page.getByRole('dialog').getByRole('button', { name: '确认删除图片', exact: true }).click();
+    await expect(page.getByRole('button', { name: '返回图册', exact: true })).toHaveCount(0);
+    await expect(groups).toHaveCount(2); await expect(page.locator('.image-gallery-count')).toHaveText('2 组 · 5 个版本');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await openImageGroup(page, parked); await chooseBranch(page, fork.branch.id); await tab(page, '故事图册');
+    await expect(groups).toHaveCount(3); await expect(page.locator('.image-gallery-count')).toHaveText('3 组 · 6 个版本');
+    await expect(portraitGroup).toHaveAttribute('data-cover-image-id', portrait.id); expect(errors).toEqual([]);
+  });
 }
 
 async function browserCacheEntries(page: Page) {
@@ -2773,7 +2847,7 @@ test('小说往返与刷新复用正文资料和图片，更新版本及退出�
   await expect(page.locator('.manuscript h1')).toHaveText('第一章 河岸');
   await tab(page, '故事图册'); await expectImagePixels(page.locator('.image-gallery img'));
   const before = { chapters: chapterRequests(), views: viewRequests(), images: imageRequests() };
-  const blob = await page.locator(`[data-image-id="${portrait.id}"] img`).getAttribute('src');
+  const blob = await page.locator(`[data-cover-image-id="${portrait.id}"] img`).getAttribute('src');
   await expect.poll(() => browserCacheEntries(page)).toBeGreaterThan(0);
   await page.getByRole('button', { name: '返回书架', exact: true }).click();
   await page.getByRole('button', { name: `打开作品 ${other.title}`, exact: true }).click();
@@ -2783,14 +2857,14 @@ test('小说往返与刷新复用正文资料和图片，更新版本及退出�
   await expect(page.locator('.manuscript h1')).toHaveText('第一章 河岸');
   await tab(page, '故事图册'); await expectImagePixels(page.locator('.image-gallery img'));
   expect({ chapters: chapterRequests(), views: viewRequests(), images: imageRequests() }).toEqual(before);
-  expect(await page.locator(`[data-image-id="${portrait.id}"] img`).getAttribute('src')).toBe(blob);
+  expect(await page.locator(`[data-cover-image-id="${portrait.id}"] img`).getAttribute('src')).toBe(blob);
 
   await page.reload();
   await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
   await expect(page.locator('.manuscript h1')).toHaveText('第一章 河岸');
   await tab(page, '故事图册'); await expectImagePixels(page.locator('.image-gallery img'));
   expect(chapterRequests()).toBe(before.chapters); expect(viewRequests()).toBe(before.views);
-  await expect.poll(revalidated).toBeGreaterThanOrEqual(4);
+  await expect.poll(revalidated).toBeGreaterThanOrEqual(3);
   await page.screenshot({ path: testInfo.outputPath('persistent-cache-gallery.png'), animations: 'disabled' });
 
   await page.getByRole('button', { name: '返回书架', exact: true }).click();
@@ -2807,9 +2881,11 @@ test('小说往返与刷新复用正文资料和图片，更新版本及退出�
   await tab(page, '世界资料');
   await expect(page.locator('.workspace')).toContainText('缓存验收：已更新的人物资料。');
   await tab(page, '故事图册');
+  await openImageGroup(page, portrait);
   await expect(page.locator(`[data-image-id="${parked.id}"]`)).toHaveCount(0);
+  await page.getByRole('button', { name: '返回图册', exact: true }).click();
   await expectImagePixels(page.locator('.image-gallery img'));
-  const finalBlob = await page.locator(`[data-image-id="${portrait.id}"] img`).getAttribute('src');
+  const finalBlob = await page.locator(`[data-cover-image-id="${portrait.id}"] img`).getAttribute('src');
   await page.getByRole('button', { name: '返回书架', exact: true }).click();
   await page.getByRole('button', { name: '退出登录', exact: true }).click();
   await expect.poll(() => browserCacheEntries(page)).toBe(0);
@@ -2873,12 +2949,13 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
     await expect(page.locator('.manuscript h1')).toHaveText('第三章 灯塔');
     await showGenerationProcess(page);
-    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(4);
+    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .image-group-card')).toHaveCount(3);
     await expectImagePixels(page.locator('.image-gallery img'));
+    await openImageGroup(page, portrait); await expectImagePixels(page.locator('.image-group-versions img')); await page.getByRole('button', { name: '返回图册', exact: true }).click();
     const authorRequests = () => requests.filter(url => new URL(url).searchParams.get('view') === 'author' && new URL(url).searchParams.get('size') === 'preview');
     for (const image of images) expect(authorRequests().filter(url => url.includes(image.id))).toHaveLength(1);
     const originalRequests = authorRequests().length;
-    const cachedUrl = await page.locator(`[data-image-id="${portrait.id}"] img`).getAttribute('src');
+    const cachedUrl = await page.locator(`[data-cover-image-id="${portrait.id}"] img`).getAttribute('src');
 
     for (let round = 0; round < 2; round++) {
       await tab(page, '世界资料');
@@ -2905,27 +2982,28 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
       await tab(page, '故事图册'); await expectImagePixels(page.locator('.image-gallery img'));
     }
     expect(authorRequests()).toHaveLength(originalRequests);
-    expect(await page.locator(`[data-image-id="${portrait.id}"] img`).getAttribute('src')).toBe(cachedUrl);
+    expect(await page.locator(`[data-cover-image-id="${portrait.id}"] img`).getAttribute('src')).toBe(cachedUrl);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
     // Reading only changes activity visibility; all image bytes remain shared.
     await page.getByRole('button', { name: '阅读视图', exact: true }).click();
-    await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(4);
+    await expect(page.locator('.image-gallery .image-group-card')).toHaveCount(3);
     await expectImagePixels(page.locator('.image-gallery img'));
     for (const source of await page.locator('.image-gallery img').evaluateAll(elements => elements.map(element => element.getAttribute('data-image-source')))) expect(source).toContain('view=author');
-    await expect(page.locator('.image-gallery')).toContainText('仅作者参考场景');
+    await expect(page.locator(`.image-group-card[data-cover-image-id="${images.find(image => image.title === '仅作者参考场景')!.id}"]`)).toBeVisible();
     if (viewport.width < 768) await page.getByRole('button', { name: '打开章节目录', exact: true }).click();
     await page.locator('.chapter-item').filter({ hasText: '第一章 河岸' }).click();
-    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(4);
+    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .image-group-card')).toHaveCount(3);
     await expectImagePixels(page.locator('.image-gallery img'));
-    const firstChapterUrl = await page.locator(`[data-image-id="${portrait.id}"] img`).getAttribute('src');
+    const firstChapterUrl = await page.locator(`[data-cover-image-id="${portrait.id}"] img`).getAttribute('src');
     expect(firstChapterUrl).toBe(cachedUrl);
     await showGenerationProcess(page);
-    await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(4);
+    await expect(page.locator('.image-gallery .image-group-card')).toHaveCount(3);
     await expectImagePixels(page.locator('.image-gallery img'));
     expect(authorRequests()).toHaveLength(originalRequests);
 
     // Unchanged pixels survive a story revision; only the current selection changes.
+    await openImageGroup(page, portrait);
     await page.locator(`[data-image-id="${parked.id}"]`).getByRole('button', { name: '启用图片', exact: true }).click();
     await expect(page.locator(`[data-image-id="${parked.id}"]`)).toHaveAttribute('data-image-active', 'true');
     await expectImagePixels(page.locator('.image-gallery img'));
@@ -2955,12 +3033,16 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
     await showGenerationProcess(page);
     await tab(page, '故事图册');
+    // Inspect the failed cover before opening the group; re-opening a failed
+    // thumbnail is an explicit new display attempt, rather than an automatic retry.
+    await expect(page.locator(`[data-cover-image-id="${portrait.id}"]`).getByRole('status')).toHaveText('图片加载失败');
+    await openImageGroup(page, portrait);
     const parkedCard = page.locator(`[data-image-id="${parked.id}"]`);
     await parkedCard.scrollIntoViewIfNeeded(); await expect.poll(() => delayedRequests).toBe(1);
     await expect(parkedCard.getByRole('status')).toHaveText('图片加载中…');
     await expect(parkedCard.locator('img')).toHaveCSS('visibility', 'hidden');
     const failedCard = page.locator(`[data-image-id="${portrait.id}"]`);
-    await expect(failedCard.getByRole('status')).toHaveText('图片加载失败');
+    await expect(failedCard.getByRole('status')).toHaveText('图片加载中…');
     await expect(failedCard.locator('img')).toHaveCSS('visibility', 'hidden');
     await parkedCard.getByRole('button', { name: /^查看图片/ }).click();
     await expect(page.getByTestId('image-viewer').locator('img')).toHaveAttribute('data-image-load-state', 'pending');
@@ -2990,12 +3072,12 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await details.getByRole('button', { name: '关闭对话框', exact: true }).click();
     await page.getByRole('button', { name: '阅读视图', exact: true }).click();
     finish();
-    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(4);
+    await tab(page, '故事图册'); await expect(page.locator('.image-gallery .image-group-card')).toHaveCount(3);
     await expectImagePixels(page.locator('.image-gallery img'));
-    await expect(page.locator('.image-gallery')).toContainText('未启用立绘版本');
-    await expect(page.locator('.image-gallery')).toContainText('仅作者参考场景');
+    await expect(page.locator('.image-gallery .image-kind-cg')).toHaveCount(2);
     for (const source of await page.locator('.image-gallery img').evaluateAll(elements => elements.map(element => element.getAttribute('data-image-source')))) expect(source).toContain('view=author');
     await showGenerationProcess(page);
+    await openImageGroup(page, parked); await expect(page.locator('.image-gallery')).toContainText('未启用立绘版本');
     await expectImagePixels(parkedCard.locator('img')); await expect(parkedCard.locator('.cached-image-status')).toHaveCount(0);
     await expect(parkedCard.locator('img')).toHaveCSS('visibility', 'visible'); expect(delayedRequests).toBe(2);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -3022,16 +3104,16 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
     }
     const portraits = (await imageList()).filter((image: any) => image.kind === 'portrait'); const [first, second, third] = portraits;
     expect(first.active).toBe(true); expect(second.active).toBe(false); expect(third.active).toBe(false);
-    await tab(page, '故事图册'); const card = (id: string) => page.locator(`.image-gallery [data-image-id="${id}"]`);
+    await tab(page, '故事图册'); await openImageGroup(page, first); const card = (id: string) => page.locator(`.image-gallery [data-image-id="${id}"]`);
     await expect(card(second.id).getByRole('button', { name: '启用后可修改', exact: true })).toBeDisabled();
     await card(third.id).getByRole('button', { name: '启用图片', exact: true }).click(); await expect(card(third.id)).toHaveAttribute('data-image-active', 'true'); await expect(card(first.id)).toHaveAttribute('data-image-active', 'false');
     await card(first.id).getByRole('button', { name: '启用图片', exact: true }).click(); await expect(card(first.id)).toHaveAttribute('data-image-active', 'true'); await expect(card(third.id)).toHaveAttribute('data-image-active', 'false');
     await tab(page, '世界资料'); await expect(person.locator('.entity-image-preview img')).toHaveAttribute('data-image-source', new RegExp(first.id)); await expectImagePixels(person.locator('.entity-image-preview img'));
-    await tab(page, '故事图册'); await card(first.id).getByRole('button', { name: '停用图片', exact: true }).click(); await expect(card(first.id)).toHaveAttribute('data-image-active', 'false');
+    await tab(page, '故事图册'); await openImageGroup(page, first); await card(first.id).getByRole('button', { name: '停用图片', exact: true }).click(); await expect(card(first.id)).toHaveAttribute('data-image-active', 'false');
     await tab(page, '正文'); await page.getByRole('button', { name: '生成本章 CG', exact: true }).click(); await page.getByRole('dialog').getByRole('button', { name: '开始绘制', exact: true }).click(); await expect(page.locator('.chapter-images .image-kind-cg .status-pill.completed')).toHaveCount(1);
     const noReference = await stats(); expect(noReference.lastImageRequest.referenceCount).toBe(0); for (const image of portraits) expect(noReference.lastPromptOptimizationRequest.prompt).not.toContain(image.id);
     const cg = (await imageList()).find((image: any) => image.kind === 'cg'); expect(cg.referenceImageIds).toEqual([]);
-    await tab(page, '故事图册'); await card(second.id).getByRole('button', { name: '删除图片', exact: true }).click();
+    await tab(page, '故事图册'); await openImageGroup(page, second); await card(second.id).getByRole('button', { name: '删除图片', exact: true }).click();
     const confirmation = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: '删除图片', exact: true }) });
     await expect(confirmation).toContainText('历史版本与其他故事线中的引用会保留'); await confirmation.getByRole('button', { name: '取消', exact: true }).click(); await expect(card(second.id)).toBeVisible();
     const deletionMatch = (url: URL) => url.pathname === `/api/branches/${branchId}/images/${second.id}`;
@@ -3042,6 +3124,7 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
     await page.route(`**/api/branches/${branchId}/images/${second.id}/content**`, route => route.fulfill({ contentType: 'image/svg+xml', body: viewerFixture }));
     // Start cold so the geometry fixture is fetched instead of reusing the already viewed PNG.
     await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 图片选择与查看', exact: true }).click(); await showGenerationProcess(page); await tab(page, '故事图册');
+    await openImageGroup(page, second);
     await card(second.id).getByRole('button', { name: /^查看图片/ }).click(); const viewer = page.getByTestId('image-viewer');
     await expect.poll(async () => viewer.locator('.image-viewer-image').evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(2400);
     const detailToggle = viewer.getByRole('button', { name: '生图详情', exact: true }); const details = viewer.locator('.image-viewer-details');
@@ -3125,6 +3208,7 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
       const touchPage = await touchContext.newPage(); touchPage.on('pageerror', error => viewerErrors.push(error.message));
       await touchPage.route(`**/api/branches/${branchId}/images/${second.id}/content**`, route => route.fulfill({ contentType: 'image/svg+xml', body: viewerFixture }));
       await touchPage.goto('/'); await touchPage.getByRole('button', { name: '打开作品 E2E 图片选择与查看', exact: true }).tap(); await showGenerationProcess(touchPage); await tab(touchPage, '故事图册');
+      await openImageGroup(touchPage, second);
       await touchPage.locator(`.image-gallery [data-image-id="${second.id}"]`).getByRole('button', { name: /^查看图片/ }).tap(); const touchViewer = touchPage.getByTestId('image-viewer'); const touchPanel = touchViewer.locator('.image-viewer-panel');
       await touchPanel.evaluate(element => { element.requestFullscreen = () => Promise.reject(new Error('Touch fixture unavailable')); }); await touchViewer.getByRole('button', { name: '全屏查看图片', exact: true }).tap(); await expect(touchPanel).toHaveAttribute('data-fullscreen-mode', 'page');
       await expect(touchPanel).toHaveAttribute('data-chrome-top', 'visible'); await expect(touchPanel).toHaveAttribute('data-chrome-bottom', 'visible');
@@ -3138,7 +3222,8 @@ test('图片启用暂存、停用后 CG 无人物参考、删除确认与失败�
     } finally { await touchContext.close(); }
     await page.setViewportSize({ width: 1440, height: 1000 }); await detailToggle.click(); await expect(details).toBeVisible(); await viewer.getByRole('button', { name: '删除图片', exact: true }).click(); await expect(confirmation).toBeVisible(); await confirmation.getByRole('button', { name: '取消', exact: true }).click(); await expect(viewer).toBeVisible();
     await viewer.getByRole('button', { name: '删除图片', exact: true }).click(); await confirmation.getByRole('button', { name: '确认删除图片', exact: true }).click(); await expect(confirmation).toHaveCount(0); await expect(viewer).toHaveCount(0); await expect(card(second.id)).toHaveCount(0); expect((await imageList()).some((image: any) => image.id === second.id)).toBe(false);
-    await page.getByRole('button', { name: '阅读视图', exact: true }).click(); await expect(page.locator('.image-gallery .image-kind-portrait')).toHaveCount(2); await expect(page.locator('.image-gallery .story-image-card')).toHaveCount(3); await expect(page.getByRole('button', { name: '删除图片', exact: true }).first()).toBeVisible(); expect(viewerErrors).toEqual([]);
+    await page.getByRole('button', { name: '阅读视图', exact: true }).click(); await expect(page.locator('.image-group-versions .image-kind-portrait')).toHaveCount(2); await expect(page.getByRole('button', { name: '删除图片', exact: true }).first()).toBeVisible();
+    await page.getByRole('button', { name: '返回图册', exact: true }).click(); await expect(page.locator('.image-group-card')).toHaveCount(2); expect(viewerErrors).toEqual([]);
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 
@@ -3285,8 +3370,8 @@ test('默认完整作者资料，阅读开关保留私密人物、插画和编�
   await expect(page.getByRole('dialog')).toContainText('幕后身份答案'); await expect(page.getByRole('dialog')).toContainText('未来登塔安排');
   await page.getByRole('button', { name: '关闭对话框', exact: true }).click();
   await tab(page, '故事图册'); await expect(page.locator('.story-image-card')).toHaveCount(3);
-  await expect(page.locator('.story-image-grid')).toContainText('阿岚公开立绘'); await expect(page.locator('.story-image-grid')).toContainText('同章公开场景');
-  await expect(page.locator('.story-image-grid')).toContainText('作者私密插画');
+  await expect(page.locator('.story-image-grid')).toContainText('阿岚 · 立绘'); await expect(page.locator('.story-image-grid')).toContainText('同章会面 · 整章 CG');
+  await expect(page.locator('.story-image-grid')).toContainText('同章会面 · 选段 CG');
   for (const image of await (await page.request.get(`/api/branches/${project.mainBranchId}/images?chapterId=${(await (await page.request.get(`/api/branches/${project.mainBranchId}?view=author`)).json()).state.chapters[1].id}`)).json()) expect((await page.request.get(image.url)).status()).toBe(200);
   await page.screenshot({ path: testInfo.outputPath('same-chapter-reader-desktop.png'), fullPage: true, animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 }); await expect(page.locator('.story-image-card')).toHaveCount(3);

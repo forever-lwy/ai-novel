@@ -46,6 +46,11 @@ describe('story illustration controls', () => {
     const reader = render(createElement(LocationPanel, { entities: [location], relations: [], onCitation: () => {}, onGenerateImage: () => {} }));
     expect(author).toContain('生成世界地图'); expect(reader).not.toContain('生成世界地图');
   });
+  it('renders one selected cover per group and leaves variant images and actions inside the group', () => {
+    const gallery = render(createElement(ImageGallery, { images: [image({ active: true, previewUrl: '/selected-preview.png' }), image({ id: 'variant', active: false, title: '未启用版本', url: '/variant.png' }), image({ id: 'failed', status: 'failed', url: undefined })], entities: [person], chapters: [], author: true, busy: false, onGenerate: () => {}, onAction: () => {}, onChapter: () => {}, onEntity: () => {} }));
+    expect(gallery.match(/class="story-image-card /g)).toHaveLength(1); expect(gallery).toContain('3 个版本'); expect(gallery).toContain('1 项待处理');
+    expect(gallery).toContain('src="/selected-preview.png"'); expect(gallery).not.toContain('src="/variant.png"'); expect(gallery).not.toContain('删除图片'); expect(gallery).toContain('打开图片组 林舟 · 立绘');
+  });
   it('shows explicit reference choices with thumbnails while excluding inactive and unfinished images', () => {
     const html = render(createElement(ImageRequestDialog, { target: { kind: 'cg', chapterId: 'chapter', selectedReferenceImageIds: ['portrait'] }, title: '生成剧情 CG', images: [image(), image({ id: 'inactive', active: false, title: '未启用的另一版' }), image({ id: 'pending', status: 'running', title: '待完成图片' })], busy: false, error: '', onClose: () => {}, onSubmit: async () => {} }));
     for (const text of ['自动选择', '自己选择', '不用参考图', '严格使用勾选的图片', '参考图片 林舟 · 立绘', '参考图 1']) expect(html).toContain(text);

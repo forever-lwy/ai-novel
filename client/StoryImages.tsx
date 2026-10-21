@@ -1,5 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { ArrowUpRight, CheckCircle2, CircleSlash, ImagePlus, Images, RefreshCw, Trash2, WandSparkles, X } from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { ArrowLeft, ArrowUpRight, CheckCircle2, CircleSlash, ImagePlus, Images, Layers, RefreshCw, Trash2, WandSparkles, X } from 'lucide-react';
 import type { ChapterRef, Entity, ImageGenerateInput, Settings, StoryImage, StoryImageKind } from '../shared/types';
 import { imageModelCapabilities, type ImageModelCapabilities } from '../shared/image-capabilities';
 import { normalizeImageSettings } from '../shared/image-settings';
@@ -7,6 +7,7 @@ import { api, dateText, statusNames } from './api';
 import { Empty, Modal, Notice } from './ui';
 import { ImageViewer } from './ImageViewer';
 import { CachedImage } from './CachedImage';
+import { groupStoryImages, type StoryImageGroup } from './image-groups';
 
 export type ImageTarget = Omit<ImageGenerateInput, 'baseRevisionId'>;
 export type ImageAction = 'retry' | 'cancel' | 'activate' | 'deactivate' | 'delete';
@@ -89,6 +90,50 @@ export function StoryImageCards({ images, author = false, busy = false, onGenera
 }
 export function ImageGallery({ images, entities, chapters, author, busy, onGenerate, onAction, onChapter, onEntity }: { images: StoryImage[]; entities: Entity[]; chapters: ChapterRef[]; author: boolean; busy: boolean; onGenerate: (target: ImageTarget) => void; onAction: (image: StoryImage, action: ImageAction) => void; onChapter: (image: StoryImage) => void; onEntity: (id: string) => void }) {
   const [filter, setFilter] = useState<StoryImageKind | 'all'>('all'); const [search, setSearch] = useState('');
-  const filtered = images.filter(image => (filter === 'all' || image.kind === filter) && [image.title, entities.find(entity => entity.id === image.entityId)?.name || '', chapters.find(chapter => chapter.id === image.chapterId)?.title || ''].join(' ').toLowerCase().includes(search.toLowerCase()));
-  return <section className="data-panel image-gallery"><div className="panel-heading"><div><span className="eyebrow">STORY GALLERY</span><h2>故事图册</h2><p>查看当前故事线的立绘、剧情 CG、资料图片和地图；图片保留与剧情及资料的关联。</p></div></div><div className="world-tools"><div className="filter-chips"><button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>全部 {images.length}</button>{Object.entries(imageKindNames).map(([kind, name]) => <button key={kind} className={filter === kind ? 'active' : ''} onClick={() => setFilter(kind as StoryImageKind)}>{name} {images.filter(image => image.kind === kind).length}</button>)}</div><label className="search-input"><input aria-label="查找故事图片" value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索图片、人物或章节…" /></label></div>{filtered.length ? <StoryImageCards images={filtered} author={author} busy={busy} onGenerate={onGenerate} onAction={onAction} onChapter={onChapter} onEntity={onEntity} /> : <Empty icon={<Images size={30} />} title={images.length ? '没有匹配的图片' : '故事图册尚未展开'}>{images.length ? '切换分类，或用人物、章节名称查找。' : author ? '在正文生成剧情 CG，或在世界资料里为人物与其他资料绘制图片。' : '图片完成并公开后，会显示在这里。'}</Empty>}</section>;
+  const [openedId, setOpenedId] = useState<string | null>(null);
+  const panel = useRef<HTMLElement>(null); const heading = useRef<HTMLHeadingElement>(null);
+  const overviewScroll = useRef(0); const previousGroup = useRef<string | null>(null);
+  const groups = useMemo(() => groupStoryImages(author ? images : images.filter(image => image.active !== false), entities, chapters), [images, entities, chapters, author]);
+  const current = groups.find(group => group.id === openedId);
+  const filtered = groups.filter(group => (filter === 'all' || group.images.some(image => image.kind === filter)) && group.searchText.includes(search.trim().toLowerCase()));
+  useEffect(() => { if (openedId && !current) setOpenedId(null); }, [openedId, current]);
+  useLayoutEffect(() => {
+    const id = current?.id ?? null; if (id === previousGroup.current) return;
+    const container = panel.current?.closest('.workspace-main');
+    if (container) container.scrollTop = id ? 0 : overviewScroll.current;
+    if (id) heading.current?.focus({ preventScroll: true });
+    else [...(panel.current?.querySelectorAll<HTMLButtonElement>('[data-open-image-group]') ?? [])].find(button => button.dataset.openImageGroup === previousGroup.current)?.focus({ preventScroll: true });
+    previousGroup.current = id;
+  }, [current?.id]);
+  const open = (group: StoryImageGroup) => { overviewScroll.current = panel.current?.closest('.workspace-main')?.scrollTop ?? 0; setOpenedId(group.id); };
+  return <section ref={panel} className="data-panel image-gallery">
+    {current && <button className="text-button image-gallery-back" onClick={() => setOpenedId(null)}><ArrowLeft size={15} />返回图册</button>}
+    <div className="panel-heading"><div><span className="eyebrow">{current ? 'IMAGE VERSIONS' : 'STORY GALLERY'}</span><h2 ref={heading} tabIndex={-1}>{current?.title ?? '故事图册'}</h2><p>{current ? `${current.images.length} 个版本，按绘制时间从新到旧排列。` : '按人物、剧情场景和资料归组，点击封面查看不同版本。'}</p></div></div>
+    {current ? <div className="image-group-versions" data-image-group={current.id}>
+      {current.excerpt && <blockquote className="image-source-text">{current.excerpt}</blockquote>}
+      <StoryImageCards key={current.id} images={current.images} author={author} busy={busy} onGenerate={onGenerate} onAction={onAction} onChapter={onChapter} onEntity={onEntity} />
+    </div> : <>
+      <div className="world-tools"><div className="filter-chips"><button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>全部 {groups.length}</button>{Object.entries(imageKindNames).map(([kind, name]) => <button key={kind} className={filter === kind ? 'active' : ''} onClick={() => setFilter(kind as StoryImageKind)}>{name} {groups.filter(group => group.images.some(image => image.kind === kind)).length}</button>)}</div><label className="search-input"><input aria-label="查找故事图片" value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索图片、人物或章节…" /></label></div>
+      <p className="hint image-gallery-count">{filtered.length} 组 · {filtered.reduce((count, group) => count + group.images.length, 0)} 个版本</p>
+      {filtered.length ? <div className="story-image-grid image-group-grid">{filtered.map(group => <ImageGroupCard key={group.id} group={group} onOpen={() => open(group)} onChapter={onChapter} onEntity={onEntity} />)}</div> : <Empty icon={<Images size={30} />} title={groups.length ? '没有匹配的图片' : '故事图册尚未展开'}>{groups.length ? '切换分类，或用人物、章节名称查找。' : author ? '在正文生成剧情 CG，或在世界资料里为人物与其他资料绘制图片。' : '图片完成并公开后，会显示在这里。'}</Empty>}
+    </>}
+  </section>;
+}
+
+function ImageGroupCard({ group, onOpen, onChapter, onEntity }: { group: StoryImageGroup; onOpen: () => void; onChapter: (image: StoryImage) => void; onEntity: (id: string) => void }) {
+  const cover = group.cover;
+  const pending = group.images.filter(image => ['queued', 'running'].includes(image.status)).length;
+  const needsAttention = group.images.filter(image => ['failed', 'paused', 'stale'].includes(image.status)).length;
+  const active = group.images.some(image => image.status === 'completed' && image.active !== false);
+  return <article className={`story-image-card image-group-card image-kind-${group.kind}`} data-image-group={group.id} data-cover-image-id={cover.id}>
+    <button className="story-image-preview" data-open-image-group={group.id} onClick={onOpen} aria-label={`打开图片组 ${group.title}`}>
+      {cover.status === 'completed' && cover.url ? <CachedImage src={cover.previewUrl || cover.url} alt={group.title} loading="lazy" /> : <span><Images size={28} /><small>{statusNames[cover.status]}</small></span>}
+      <span className="image-group-badge"><Layers size={13} />{group.images.length} 个版本</span>
+    </button>
+    <div className="story-image-info"><div className="row between"><span>{imageKindNames[group.kind]}</span><span className={`image-selection-pill ${active ? 'is-active' : 'is-inactive'}`}>{active ? '已启用' : '暂无启用图片'}</span></div><h4>{group.title}</h4>
+      {group.excerpt && <p className="image-group-excerpt">{group.excerpt}</p>}
+      {(pending > 0 || needsAttention > 0) && <div className="image-group-status" role="status">{pending > 0 && <span className="status-pill running">{pending} 项绘制中</span>}{needsAttention > 0 && <span className="status-pill failed">{needsAttention} 项待处理</span>}</div>}
+      <div className="story-image-actions"><button className="text-button" onClick={onOpen}>查看 {group.images.length} 个版本<ArrowUpRight size={12} /></button>{cover.entityId && <button className="text-button" onClick={() => onEntity(cover.entityId!)}>关联资料<ArrowUpRight size={12} /></button>}{cover.chapterId && <button className="text-button" onClick={() => onChapter(cover)}>关联剧情<ArrowUpRight size={12} /></button>}</div>
+    </div>
+  </article>;
 }
