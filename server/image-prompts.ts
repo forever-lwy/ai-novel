@@ -5,16 +5,17 @@ import { imageModelCapabilities } from '../shared/image-capabilities.js';
 import { generateStructured, estimateModelRequestInputTokens, structuredRequest } from './providers.js';
 import { HttpError } from './store.js';
 import { compileTaskPrompt } from '../shared/prompt-templates.js';
+import { imageParametersSchema } from './image-store.js';
 
 export interface ImagePromptInput {
-  kind: StoryImageKind; material: string; instruction: string; stylePrompt: string; config: ImageSettings;
+  kind: StoryImageKind; material: string; storyContext?: string; instruction: string; stylePrompt: string; config: ImageSettings;
   characters: { entityId: string; name: string; description: string; imageId?: string }[];
   references: { label: string; entityId?: string; imageId: string }[];
   referenceSelection?: 'manual';
 }
 export interface OptimizedImagePrompt { prompt: string; referenceEntityIds: string[]; parameters: ImageResolvedParameters }
 export type ImagePromptOptimizer = (settings: Settings, input: ImagePromptInput, signal?: AbortSignal) => Promise<OptimizedImagePrompt>;
-const resultSchema = z.object({ prompt: z.string().trim().min(1).max(20000), referenceEntityIds: z.array(z.string().min(1)).max(16).default([]), parameters: z.object({ size: z.string().max(50).optional(), aspectRatio: z.string().max(30).optional(), imageSize: z.enum(['512', '1K', '2K', '4K']).optional(), width: z.number().int().positive().max(8192).optional(), height: z.number().int().positive().max(8192).optional() }).strict().default({}) }).strict();
+const resultSchema = z.object({ prompt: z.string().trim().min(1).max(20000), referenceEntityIds: z.array(z.string().min(1)).max(16).default([]), parameters: imageParametersSchema.default({}) }).strict();
 
 /** Author settings override model suggestions; only supported automatic dimensions may be chosen. */
 export function resolveImageParameters(config: ImageSettings, suggestion: ImageResolvedParameters): ImageResolvedParameters {
@@ -50,7 +51,7 @@ export const optimizeImagePrompt: ImagePromptOptimizer = async (settings, input,
   const provider = { ...resolveModelConfig(normalized, connection, model, 'planning'), stream: false };
   const caps = imageModelCapabilities(input.config);
   const maxCharacterReferences = input.referenceSelection === 'manual' ? 0 : Math.max(0, Math.min(caps.maxCharacterReferences, caps.maxReferences - input.references.length));
-  const prompt = JSON.stringify({ kind: input.kind, material: input.material, instruction: input.instruction, stylePrompt: input.stylePrompt, characters: input.characters, references: input.references, ...(input.referenceSelection === 'manual' ? { referenceSelection: 'manual', referenceInstruction: '作者已确定全部参考图片及顺序，只使用 references 中的图片，不增删或替换；没有图片时仅按文字绘制。referenceEntityIds 返回空数组。' } : {}), config: { protocol: input.config.protocol, model: input.config.model, size: input.config.size, aspectRatio: input.config.aspectRatio, imageSize: input.config.imageSize, width: input.config.width, height: input.config.height }, allowed: { dimensionMode: caps.dimensionMode, sizes: caps.sizes.filter(size => size !== 'auto'), aspectRatios: caps.aspectRatios, imageSizes: caps.imageSizes, customSize: caps.customSize, dimensionMultiple: caps.dimensionMultiple, minDimension: caps.minDimension, maxDimension: caps.maxDimension, minPixels: caps.minPixels, maxPixels: caps.maxPixels, maxAspectRatio: caps.maxAspectRatio, maxCharacterReferences } });
+  const prompt = JSON.stringify({ kind: input.kind, material: input.material, ...(input.storyContext ? { storyContext: input.storyContext } : {}), instruction: input.instruction, stylePrompt: input.stylePrompt, characters: input.characters, references: input.references, ...(input.referenceSelection === 'manual' ? { referenceSelection: 'manual', referenceInstruction: '作者已确定全部参考图片及顺序，只使用 references 中的图片，不增删或替换；没有图片时仅按文字绘制。referenceEntityIds 返回空数组。' } : {}), config: { protocol: input.config.protocol, model: input.config.model, size: input.config.size, aspectRatio: input.config.aspectRatio, imageSize: input.config.imageSize, width: input.config.width, height: input.config.height }, allowed: { dimensionMode: caps.dimensionMode, sizes: caps.sizes.filter(size => size !== 'auto'), aspectRatios: caps.aspectRatios, imageSizes: caps.imageSizes, customSize: caps.customSize, dimensionMultiple: caps.dimensionMultiple, minDimension: caps.minDimension, maxDimension: caps.maxDimension, minPixels: caps.minPixels, maxPixels: caps.maxPixels, maxAspectRatio: caps.maxAspectRatio, maxCharacterReferences } });
   const compiled = compileTaskPrompt(settings.promptTemplates, 'image', {
     imageInput: prompt, imageSystemPrompt: input.config.promptSystemPrompt?.trim() ?? '',
     maxCharacterReferences,

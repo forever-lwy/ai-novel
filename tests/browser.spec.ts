@@ -2486,6 +2486,32 @@ test('无效提示词草稿可继续修正，保存和导入失败不会覆盖�
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 
+test('正文尚未写完时插画已生成，保存后继续使用原图片', async ({ page }, testInfo) => {
+  const previous = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-parallel-images';
+  const release = () => page.request.post(mockUrl.slice(0, -3) + '/__e2e/image-writer-release');
+  expect((await page.request.put('/api/settings', { data: { providers: [{ id: providerId, name: '本地并行图片验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-images-parallel', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture', imageSettings: { providerId, model: 'e2e-image', protocol: 'openai-images', size: '1024x1024', quality: 'auto', stylePrompt: '', autoPortrait: true, autoCG: true, timeoutMs: 120000 } } })).ok()).toBeTruthy();
+  try {
+    await createProject(page, 'E2E 写作与插画并行'); const branchId = await currentBranchId(page);
+    await page.getByRole('button', { name: '从设定开始创作', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '开始生成', exact: true }).click();
+    const images = page.getByRole('region', { name: '本次写作插画', exact: true });
+    await expect(images.locator('.status-pill.completed')).toHaveCount(2); await expect(images).toContainText('待关联正文');
+    await expectImagePixels(images.locator('img'));
+    const draft = await (await page.request.get(`/api/branches/${branchId}/images`)).json();
+    expect(draft.every((image: StoryImage) => image.bindingStatus === 'pending' && !image.chapterId)).toBe(true);
+    const before = await (await page.request.get(`/api/branches/${branchId}`)).json(); expect(before.state.chapters).toHaveLength(0);
+    const stats = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+    expect(stats.lastImageRequest.referenceCount).toBe(1); expect(stats.lastImageRequest.prompt).toContain('WRITER_DIRECT_CG');
+    await page.screenshot({ path: testInfo.outputPath('images-before-writing-completes.png'), animations: 'disabled' });
+    await release();
+    await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}/images`)).json()).every((image: StoryImage) => image.bindingStatus === 'bound')).toBe(true);
+    await expect(page.getByRole('button', { name: '生成本章 CG', exact: true })).toBeVisible();
+    const bound = await (await page.request.get(`/api/branches/${branchId}/images`)).json();
+    expect(bound.map((image: StoryImage) => image.id)).toEqual(draft.map((image: StoryImage) => image.id));
+    expect((await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json()).imageRequests).toBe(stats.imageRequests);
+  } finally { await release(); await page.request.put('/api/settings', { data: previous }); }
+});
+
 test('生图设置、自动人物与场景工具、全文选段 CG、重绘参考图修改及资料地图图册', async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const auth = await (await page.request.get('/api/auth/status')).json();
@@ -2513,12 +2539,24 @@ test('生图设置、自动人物与场景工具、全文选段 CG、重绘参�
     expect(automatic.find((image: any) => image.kind === 'portrait').entityId).toBeTruthy();
     expect(automatic.find((image: any) => image.kind === 'cg').sourceText).toBe('林舟来到白石城，发现城门下藏着一把旧钥匙。');
     const stats = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json(); expect(stats.imageRequests).toBeGreaterThanOrEqual(2);
+    const automaticCG = automatic.find((image: StoryImage) => image.kind === 'cg');
+    expect(automaticCG.promptSource).toBe('writing'); expect(automaticCG.prompt).toContain('WRITER_DIRECT_CG'); expect(automaticCG.storyContext).toBeUndefined();
+    await page.locator(`.chapter-images [data-image-id="${automaticCG.id}"]`).getByRole('button', { name: '生图详情', exact: true }).click();
+    await expect(modal).toContainText('写作 AI 生成的生图提示词'); await expect(modal).toContainText('没有再次调用提示词优化模型'); await modal.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
     await page.getByRole('button', { name: '生成本章 CG', exact: true }).click(); await modal.getByRole('button', { name: '开始绘制', exact: true }).click();
     await expect(page.locator('.chapter-images .status-pill.completed')).toHaveCount(3);
     await page.locator('.prose p').first().evaluate(element => { const range = document.createRange(); range.setStart(element.firstChild!, 3); range.setEnd(element.firstChild!, 17); const selection = getSelection()!; selection.removeAllRanges(); selection.addRange(range); element.parentElement!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); });
     await page.getByRole('button', { name: '生成选段 CG', exact: true }).click();
     await expect(modal.locator('.image-source-text')).toHaveText('到白石城，发现城门下藏着一把');
     await modal.getByRole('button', { name: '开始绘制', exact: true }).click(); await expect(page.locator('.chapter-images .status-pill.completed')).toHaveCount(4);
+    const selectionStats = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+    const selectionInput = JSON.parse(selectionStats.lastPromptOptimizationRequest.prompt);
+    expect(selectionInput.storyContext).toContain('他拾起钥匙，决定沿着石阶寻找守城人留下的线索。');
+    expect(selectionInput.storyContext).toContain('目标片段前文'); expect(selectionInput.storyContext).toContain('目标片段后文');
+    const selectedCG = (await listImages()).find((image: StoryImage) => image.kind === 'cg' && !image.automatic && image.selection);
+    expect(selectedCG.storyContext).toBe(selectionInput.storyContext);
+    await page.locator(`.chapter-images [data-image-id="${selectedCG.id}"]`).getByRole('button', { name: '生图详情', exact: true }).click();
+    await modal.getByText('本次参考上下文', { exact: true }).click(); await expect(modal.getByTestId('image-story-context')).toContainText('守城人留下的线索'); await modal.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
     await page.getByRole('button', { name: '编辑', exact: true }).click(); await page.getByLabel('章节正文', { exact: true }).fill('尚未保存的临时正文');
     await expect(page.getByRole('button', { name: '生成本章 CG', exact: true })).toBeDisabled();
     page.once('dialog', dialog => void dialog.accept()); await page.getByRole('button', { name: '取消编辑', exact: true }).click();

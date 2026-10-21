@@ -47,6 +47,10 @@
 
 ## 图片接口
 
+- 写作工具完整参数校验后同步登记图片并立即返回，图片队列与正文模型异步运行；不等正文或提取完成。`WritingImageRequest.imageId?` 关联原资产，`StoryImage.writingJobId?`、`bindingStatus?:pending|bound|discarded`、`pendingEntityName?` 和 `dependencyImageIds?:string[]` 保存归属与参考图等待关系。未保存的图片仅在所属故事线的图册／内容接口可读，尚未进入 `StoryState.imageIds`，不改变正文起始版本，不进入其他分支或历史快照。
+- 自动 CG 按实际参考人物和型号数量上限选定立绘，只有这些图片处于 queued/running 时等待；等待不占图片运行位置，队列仍最多并行 2 项。所需立绘失败／暂停／取消／删除后明确失败，不隐式换图、忽略或重试；无可用立绘请求时仅按文字绘制，关闭人物参考或明确空名单不等待。
+- 提取成功后核对人物与原文引用，在图片引用和提取进度的同一事务中将原资产转为 bound；保留像素、任务状态及作者取消，不重复生图。写作中的图片可预览、取消或删除（标为 discarded，不修改故事版本），关联前不支持启用、重试或修改。下一章写作不使已关联的旧章图片自动过期；关联章及所用资料、实际参考选择仍须有效。普通暂停／取消写作停止未关联任务，RPG 选择等待可继续；重启及备份恢复不自动重试。备份保留未关联的图片和依赖，恢复时重新映射任务与图片 ID 并校验归属。
+
 - 公开插画按关联章节筛选公开素材，保留 `StoryImage.publicMaterial`、`materialFactIds/materialRelationIds` 等依据标记及备份兼容；工作台不再按这些标记隐藏图片，已有私密图可直接查看，无需修改历史素材标记或重绘。
 - 绑定 `chapterId` 的图片登记、启用、停用和删除会新增该章及后续的章末快照，与当前图册原子保存。更早章节、已有分支与旧快照保留；缺少匹配正文的章末记录时拒绝操作，不拼入最新世界资料。
 
@@ -55,7 +59,7 @@
 - `DELETE /branches/:id/images/:imageId?view=author {baseRevisionId} -> {view:BranchView,images:StoryImage[]}`：从当前版本的图册及启用列表移除；历史及其他故事线引用保留像素，不跨版本破坏资料。删除当前图片不自动换用其他图片。排队／运行任务按所属故事线处理取消与迟到输出，删除后不能通过当前线内容 URL 读取。
 - 图册包含未启用的暂存图，支持预览、重绘和删除；未启用或已删除的图仍不会进入提示词优化候选、实际图片请求及 CG 参考，显式编辑原图也须启用。参考选择在任务期间变化时仍拒绝后续图片请求，显式重试按当前选择重新优化。
 
-- `GET /branches/:id/images -> StoryImage[]`：返回当前故事线完整图册，含私密图片、未启用图片与生成中的记录。完成图带同源原图 `url` 和缩略图 `previewUrl`，URL 的 v 参数随图片记录变化；图片内容接口仍校验当前故事线引用及登录。阅读开关不改变结果。
+- `GET /branches/:id/images -> StoryImage[]`：返回当前故事线完整图册，含私密图片、未启用图片、生成中的记录与该线写作中尚未关联的图片。完成图带同源原图 `url` 和缩略图 `previewUrl`，URL 的 v 参数随图片记录变化；图片内容接口仍校验当前故事线引用及登录。阅读开关不改变结果。
 - `POST /branches/:id/images?view=author`，请求为 `ImageGenerateInput={baseRevisionId,kind:'portrait'|'entity'|'map'|'cg',entityId?,chapterId?,selection?:{start,end},instruction?,referenceImageId?,selectedReferenceImageIds?:string[]}`，返回 `{view:BranchView,image:StoryImage}`。登记引用创建一个新版本，独立图片任务随后运行；调用方更新 `view.branch.revisionId`。资料图必须指定当前实体，地图依据地点与地理关系，CG 必须指定当前章，选段为正文 UTF-16 起止索引，结束位置不包含在选段内。图片修改需同一关联对象的已完成参考图与修改要求，使用实际原图输入，不覆盖旧图。
 - `selectedReferenceImageIds` 省略时保留自动人物参考，空数组表示不用额外参考图，非空时按数组顺序严格使用作者指定图片，文字优化 AI 的参考人物选择不再决定图片输入。允许当前故事线已启用、已完成且有像素的各类图片；重复、跨线／跨作品、未启用、未完成、缺失及超出当前模型参考图总数量上限的选择在登记前拒绝。最多 16 项，编辑原图 `referenceImageId` 另占一张且始终排第一，不得重复选择。显式选择优先于 `useCharacterReferences`，不等待未选人物的排队立绘；作者选择为可选字段，旧请求保持原行为。
 - `GET /branches/:id/images/:imageId/content`：默认返回当前故事线引用的已完成 PNG、JPEG 或 WebP 原始二进制；`size=preview` 返回等比例、最长边不超过 480 像素、不放大小图的 WebP 预览，转换失败返回 422，原图仍可读取。私密和未启用图片也可查看；跨作品、当前故事线不包含或回退后已移除的图片返回 404，未完成返回 409。旧 view、chapterId 及缓存标识 v 参数不改变访问范围。
@@ -65,12 +69,14 @@
 - 图片状态为 `queued/running/completed/failed/paused/stale/cancelled`。服务重启或关闭后排队与运行任务转为 `paused`，不自动重复调用；正文或资料版本变化后迟到结果转为 `stale`。图片二进制持久化在 SQLite，单图上限 20 MiB，作品删除和完整备份／恢复包括图片及历史引用，旧版无图片备份继续可用。
 - 手动登记、修改与重试沿用 session、同源、起始版本校验；文字任务处于等待、运行或暂停时返回 `409`，防止改变写作起始版本。图片失败不重试文字生成。图片提示词、请求与结果不参与正文保存或 TXT 导出。
 - 设置可保存 `imageSettings={providerId,model,protocol:'openai-images'|'gemini',size,quality,stylePrompt,autoPortrait,autoCG,timeoutMs}`，复用加密供应商密钥。默认新人物自动立绘开启、自动 CG 关闭，未配置图片模型时不暴露写作生图工具。旧设置缺失该字段时采用默认；旧客户端省略字段保存时保留已存在配置。
-- 写作工具 `generate_character_portrait {name,description}` 与 `generate_scene_cg {description,sourceText}` 登记自动插画意图，返回 `requested`；不在写作过程中改变正文版本。资料整理完成后按明确姓名／别名匹配新人物，CG 引用须逐字存在于已保存正文，再批量绑定引用并独立生图。自动新人物立绘按提取资料补充，已有立绘不重复请求；自动 CG 只在开关开启时提供，由写作模型判断触发。本章最多 12 个自动插画。
-- 图片任务分为提示词优化与图片生成：登记时保存 `material/instruction` 和 `promptStatus='pending'`；文字模型返回专用 `prompt`、选择的参考人物和自动尺寸，校验后保存 `promptStatus='completed'/optimizedAt`，再调用图片接口。优化失败时不发图片请求，像素失败重试复用已优化结果；资料、图片型号／协议、固定构图参数或参考开关已变化时重新优化。任一阶段取消、回退、删除或版本变化都阻止后续计费请求及迟到应用。
+- 写作工具 `generate_character_portrait {name,description}` 与 `generate_scene_cg {prompt,sourceText,referenceNames?,parameters?}` 登记自动插画意图，返回 `requested`；不在写作过程中改变正文版本。CG 的 `prompt` 由写作模型结合本次写作上下文直接给出，`referenceNames` 指定画面中的人物姓名／别名（空数组表示不用人物参考），`parameters` 只建议自动尺寸、画幅或分辨率，固定设置优先。工具说明包含当前画风、作者提示词要求与型号允许值，预览和发送共用定义。旧会话 `{description,sourceText}` 继续接受并走原来的提示词优化。资料整理完成后按明确姓名／别名匹配人物，CG 引用须逐字存在于已保存正文，再批量关联原资产；旧任务没有已登记图片时兼容生成，仅未请求的新人物立绘按提取资料补充，已有立绘不重复请求。本章最多 12 个自动插画，自动 CG 开关及触发由原规则控制。
+- 图片任务分为提示词准备与图片生成：手动请求及旧自动请求保存 `material/instruction` 和 `promptStatus='pending'`，优化模型返回专用 `prompt`、参考人物和自动尺寸；新自动 CG 使用写作模型的原提示词，不再调用优化模型。程序补充画风及实际参考顺序、验证参数后保存 `promptStatus='completed'/promptSource/optimizedAt`，再调用图片接口。准备失败不发图片请求，像素失败重试复用结果；资料或设置变化时重新准备。写作提示词在故事素材未变的重试中保留，自动参数与新型号不兼容时明确失败，不偷偷换用优化模型。主动重新绘制与 AI 修改仍按当前资料重新优化。任一阶段取消、回退、删除或版本变化都阻止后续计费请求及迟到应用。
+- 手动 CG 的 `storyContext` 保存提示词准备时参考的完整本章前后文、前两章全文、此前摘要（或适用的已确认压缩摘要）及相关人物、地点、物品、规则与关系；不读取目标章节之后的其他章节。目标 `sourceText/selection` 不扩大，后文与未来设定只能辅助理解，不能提前画入目标时刻。沿用原有公开素材／作者补充素材范围，作者固定设定仅进入作者素材上下文；所用档案、事实和关系计入原有依赖检查。上下文完整计入模型输入预算，超限拒绝，持久上下文上限 2000000 字符，不静默截断。新自动 CG 不把事后重建的上下文冒充写作模型的实际输入；实际上下文可在正文写作请求诊断中查看。
+- `StoryImage` 新增可选 `storyContext`、`writingPrompt/writingReferenceNames/writingParameters` 和 `promptSource:'writing'|'optimizer'`，随任务、版本引用及备份保留。写作提示词只在新工具请求携带 `prompt` 时直接使用，旧图片不迁移。图册详情区分来源，手动 CG 可展开本次实际参考上下文。
 - `StoryImage` 可含 `materialEntityIds`（提示词使用的档案依赖）、`selectedReferenceImageIds`（作者指定的额外参考及顺序，空数组表示不用）、`referenceImageIds/referenceEntityIds/referenceCharacters:{entityId,imageId,name}[]`（本次实际输入）、`generationParameters`（本次实际参数）。原 `sourceText/chapterId/selection` 保持剧情证据，不被优化提示词改写；原单一 `referenceImageId` 继续代表编辑原图。手选在优化前持久化并参与依赖检查，中途停用或删除所选图会停止旧任务；失败重试、分支、备份恢复保留决定并重映射图片 ID，手选失效时明确拒绝重试，不自动换图。图册响应保留优化素材、参数、手选 ID 和参考名册，服务端继续检查图片属于当前作品和故事线。
 - `imageSettings` 新增 `promptProviderId/promptModel/promptSystemPrompt/useCharacterReferences`。优化模型默认依次使用已配置的摘要压缩和写作模型，读取摘要压缩用途的参数；输入加完整输出预留超限时请求前停止。所有优化及图片调用均无自动重试。配置未改变时重试像素不重复支付优化请求；旧图片在再次绘制时进入优化步骤，已有数据继续可读取。
 - 旧 `quality` 必需字段为设置兼容保留，只有 OpenAI Images 将其用于生成；Gemini 通过分辨率控制输出，不发送该字段，Together 也不把它当作图片质量参数。原图任务及旧备份字段仍可读取，新增优化和参考字段均为可选字段。
-- 图片协议新增 `together-images`。`size` 接受 `auto` 或合法 `宽x高`；可设 `aspectRatio`、`imageSize`（`auto/512/1K/2K/4K`），自动值由优化 AI 依据型号能力选择，固定值优先。额外图片参数按已知型号能力校验，含 Gemini 的 `systemInstruction/temperature/topP/topK/seed/maxOutputTokens/thinkingLevel/includeThoughts`，OpenAI 的 `quality/background/outputFormat/outputCompression/inputFidelity/moderation`，Together 的 `width/height/steps/guidanceScale/negativePrompt/promptUpsampling/disableSafetyChecker`。不可用参数在保存或请求前明确报错，不静默丢弃。
+- 图片协议新增 `together-images`。`size` 接受 `auto` 或合法 `宽x高`；可设 `aspectRatio`、`imageSize`（`auto/512/1K/2K/4K`），自动值由负责提示词的文字 AI 依据型号能力选择，固定值优先。额外图片参数按已知型号能力校验，含 Gemini 的 `systemInstruction/temperature/topP/topK/seed/maxOutputTokens/thinkingLevel/includeThoughts`，OpenAI 的 `quality/background/outputFormat/outputCompression/inputFidelity/moderation`，Together 的 `width/height/steps/guidanceScale/negativePrompt/promptUpsampling/disableSafetyChecker`。不可用参数在保存或请求前明确报错，不静默丢弃。
 - OpenAI 多图输入为 `images/edits` multipart 的 `image[]`；Gemini 为多条 `inlineData` 及原生 `systemInstruction/generationConfig`；已知 Together 型号为 `/images/generations` JSON，单图 `image_url` 或多图 `reference_images`，响应格式固定 `base64`。自动模式的 CG 仅按已保存剧情和当前版本中的明确人物选择已完成立绘，记录实际参考图对应关系；自动 CG 等同批相关立绘完成或失败后再生成。手动模式只发送指定参考图；不支持人物参考的型号在自动模式下按资料绘制。
 - 全部参考图原始字节合计不超过 20 MiB；Gemini 另检查完整内联 JSON 请求（含 Base64、提示词及系统提示）不超过 20,000,000 字节。Together 的 `data:` 私有参考输入已实现并经本地协议模拟验证，官方资料只明确 URL 输入，真实服务接受情况未验收；拒绝时不上传公开地址、不取消参考后偷偷重试。每个任务固定生成一张图片，不提供图片流式分块或搜索工具。能力与设置说明见 [使用指南](USAGE.md#插画与故事图册)。
 

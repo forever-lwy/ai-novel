@@ -61,6 +61,7 @@ let modelListRequests = 0;
 const modelRequestsByModel = {};
 let lastModelParameters;
 let finishGeminiArgsStream;
+let finishImageWriter;
 let imageRequests = 0; let imageEditRequests = 0; let lastImageRequest;
 let promptOptimizationRequests = 0; let lastPromptOptimizationRequest; let lastOptimizedImagePrompt;
 const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVQImWPw6Sv6DwAEwgJMYzx9CAAAAABJRU5ErkJggg==';
@@ -68,6 +69,7 @@ const modelServer = createServer(async (req, res) => {
   if (req.url === '/__e2e/stats' && req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ modelRequests, chapterTitleRequests, modelListRequests, modelRequestsByModel, lastModelParameters, imageRequests, imageEditRequests, lastImageRequest, promptOptimizationRequests, lastPromptOptimizationRequest, lastOptimizedImagePrompt })); return; }
   if (req.url === '/__e2e/shutdown' && req.method === 'POST') { res.writeHead(200); res.end('stopping test fixture'); setImmediate(() => void close()); return; }
   if (req.url === '/__e2e/gemini-args-release' && req.method === 'POST') { const finish = finishGeminiArgsStream; finishGeminiArgsStream = undefined; finish?.(); res.writeHead(200); res.end('released'); return; }
+  if (req.url === '/__e2e/image-writer-release' && req.method === 'POST') { finishImageWriter?.(); res.writeHead(200); res.end('released'); return; }
   if (req.method === 'POST' && ['/v1/images/generations', '/v1/images/edits'].includes(req.url)) {
     const chunks = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const raw = Buffer.concat(chunks); const edit = req.url.endsWith('/edits');
     imageRequests++; if (edit) imageEditRequests++;
@@ -288,15 +290,20 @@ const modelServer = createServer(async (req, res) => {
       }
       res.end(frames.join('') + 'data: [DONE]\n\n'); return;
     }
-    if (body.model === 'e2e-images' && !body.messages?.some(message => message.role === 'tool')) {
+    if (['e2e-images', 'e2e-images-parallel'].includes(body.model) && !body.messages?.some(message => message.role === 'tool')) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const sourceText = '林舟来到白石城，发现城门下藏着一把旧钥匙。';
       const calls = [
         { index: 0, id: 'image-portrait', type: 'function', function: { name: 'generate_character_portrait', arguments: JSON.stringify({ name: '林舟', description: '一位穿着旅行斗篷的年轻旅人。' }) } },
-        ...(body.tools?.some(tool => tool.function?.name === 'generate_scene_cg') ? [{ index: 1, id: 'image-scene', type: 'function', function: { name: 'generate_scene_cg', arguments: JSON.stringify({ description: '古城门下，一位旅人拾起石阶边的钥匙。', sourceText }) } }] : []),
+        ...(body.tools?.some(tool => tool.function?.name === 'generate_scene_cg') ? [{ index: 1, id: 'image-scene', type: 'function', function: { name: 'generate_scene_cg', arguments: JSON.stringify({ prompt: 'WRITER_DIRECT_CG：古城门下，林舟穿着旅行斗篷拾起石阶边的钥匙，侧面中景，晨光照亮石阶。', referenceNames: ['林舟'], sourceText }) } }] : []),
       ];
       res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: calls }, finish_reason: 'tool_calls' }] })}\n\n`);
       res.end('data: [DONE]\n\n'); return;
+    }
+    if (body.model === 'e2e-images-parallel') {
+      await new Promise(resolve => { finishImageWriter = resolve; res.once('close', resolve); });
+      finishImageWriter = undefined;
+      if (res.destroyed) return;
     }
     if (body.model === 'e2e-public-activities') {
       const queried = body.messages?.some(message => message.role === 'tool');

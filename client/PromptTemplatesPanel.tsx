@@ -36,7 +36,7 @@ function sampleValue(key: string) {
     unrevealedForeshadows: '[]', plotSummaries: '第一章：林舟收到船长失踪前寄出的信，决定赶往码头。',
     recentChapters: '林舟拿着神秘来信，在城门关闭之前赶到了雾港。', currentChapterPlan: '{"chapter":2,"title":"雨夜码头","goal":"在码头发现船长留下的怀表"}',
     writingTarget: '从最近保存的正文结尾接着写下一章，只写当前这一章。', sourceText: '雨水浸透了林舟的斗篷。他沿着码头寻找失踪船长。', originalReference: '',
-    imageInput: '{"kind":"cg","material":"林舟身披深灰斗篷，站在雨夜的码头查看怀表。","instruction":"画出发现怀表的一刻","stylePrompt":"自然光，写实插画","characters":[],"references":[],"config":{"size":"1024x1024"},"allowed":{"dimensionMode":"size","sizes":["1024x1024"],"maxCharacterReferences":0}}', imageSystemPrompt: '', maxCharacterReferences: '0',
+    imageInput: '{"kind":"cg","material":"林舟身披深灰斗篷，站在雨夜的码头查看怀表。","storyContext":"此前他冒雨来到码头寻找船主。本章前文交代了深灰斗篷和怀表的来历，后文是他收起怀表离开；只绘制发现怀表的瞬间。","instruction":"画出发现怀表的一刻","stylePrompt":"自然光，写实插画","characters":[],"references":[],"config":{"size":"1024x1024"},"allowed":{"dimensionMode":"size","sizes":["1024x1024"],"maxCharacterReferences":0}}', imageSystemPrompt: '', maxCharacterReferences: '0',
   };
   return samples[key] ?? `示例${key}`;
 }

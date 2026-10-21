@@ -15,6 +15,8 @@ import { buildWritingContext } from './writing-context.js';
 import { chapterNamingRequest, parseGeneratedChapterTitle } from './chapter-naming.js';
 import type { ImageService } from './images.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
+import { imageModelCapabilities } from '../shared/image-capabilities.js';
+import { imageParametersSchema } from './image-store.js';
 import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, StoryReference } from '../shared/types.js';
 export { extractionSchema } from './extraction.js';
 
@@ -57,7 +59,7 @@ export class StoryEngine {
   private closed = false;
   private chargedExtractionErrors = new WeakSet<ModelOutputError>();
   private nonRetryableExtractionErrors = new WeakSet<Error>();
-  constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'>) {}
+  constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'> & Partial<Pick<ImageService, 'generateDuringWriting' | 'writingProgress'>>) {}
   start() {
     if (this.started) return; this.started = true;
     for (const job of this.jobsInternal()) if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary' && ['queued', 'running', 'paused', 'failed'].includes(job.status)) {
@@ -268,6 +270,7 @@ export class StoryEngine {
   private get(jobId: string): Job { const row = this.store.db.prepare('SELECT data FROM jobs WHERE id=?').get(jobId); if (!row) throw new HttpError('任务不存在', 404); return JSON.parse(String(row.data)); }
   private save(job: Job, publish = true) {
     job.updatedAt = now(); this.store.db.prepare('INSERT INTO jobs(id,branch_id,project_id,status,data) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET branch_id=excluded.branch_id,project_id=excluded.project_id,status=excluded.status,data=excluded.data').run(job.id, job.branchId, job.projectId, job.status, JSON.stringify(job));
+    if (job.kind === 'generate' || job.payload.writingJobId) this.images?.writingProgress?.(job.branchId);
     if (job.kind === 'generate') {
       const activities = ['completed', 'failed', 'cancelled', 'stale', 'paused'].includes(job.status) && !(job.status === 'paused' && job.payload.rpgChoice && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice)
         ? this.store.finishWritingActivities(job.id, job.status === 'completed' ? undefined : this.redact(job.error || job.message)) : [];
@@ -581,7 +584,7 @@ export class StoryEngine {
     this.applyGeneratedTitle(this.live(jobId), output, result.value.title, false);
   }
   private imageTools(jobId: string, preview?: PromptRuntime['illustrations']): { tools: ModelTool[] } {
-    const config = preview ? { autoPortrait: preview.portrait, autoCG: preview.cg } : normalizeImageSettings(this.getSettings().imageSettings);
+    const config = { ...normalizeImageSettings(this.getSettings().imageSettings), ...(preview ? { autoPortrait: preview.portrait, autoCG: preview.cg } : {}) };
     if (!preview && (!this.images || !('providerId' in config) || !config.providerId || !config.model)) return { tools: [] };
     const tools: ModelTool[] = [];
     const register = (request: WritingImageRequest) => {
@@ -589,17 +592,31 @@ export class StoryEngine {
       const requests = (live.payload.imageRequests ?? []) as WritingImageRequest[];
       if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? previous.name === request.name : previous.sourceText === request.sourceText))) return { status: 'requested', message: '同一人物或场景已请求生图，请继续写作。' };
       if (requests.length >= 12) throw new HttpError('本章最多接受 12 个自动生图请求，请完成正文后由作者补充。');
-      live.payload.imageRequests = [...requests, request]; this.save(live);
-      return { status: 'requested', message: '已登记生图请求；正文保存、资料确认后独立生成并绑定，不影响正文继续写作。' };
+      // Persist the owner link before the deferred image pump runs; never await pixels here.
+      let imageId: string | undefined;
+      try { imageId = this.images?.generateDuringWriting?.(live, request)?.id; }
+      catch (error) { live.payload.imageError = this.redact(error instanceof Error ? error.message : '自动插画启动失败'); }
+      live.payload.imageRequests = [...requests, { ...request, ...(imageId ? { imageId } : {}) }]; this.save(live);
+      return { status: 'requested', ...(imageId ? { imageId } : {}), message: '已提交后台生图，正文可立即继续。仅所需参考图未完成时等待；正文与资料保存后自动关联图片。' };
     };
-    if (config.autoPortrait) tools.push({ name: 'generate_character_portrait', description: '新人物在本章首次出场时主动调用，按明确姓名请求生成对应立绘。只使用正文已描述的外观，不推断秘密身份。资料整理后绑定到该人物并展示。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物明确姓名或已有别名' }, description: { type: 'string', description: '正文已描述的外观与衣着' } }, required: ['name', 'description'], additionalProperties: false }, execute: args => {
+    if (config.autoPortrait) tools.push({ name: 'generate_character_portrait', description: '新人物在本章首次出场时主动调用，按明确姓名请求生成对应立绘。只使用正文已描述的外观，不推断秘密身份。立即后台绘制，资料整理后绑定到该人物。需要该立绘的 CG 应在提交此请求后再请求。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物明确姓名或已有别名' }, description: { type: 'string', description: '正文已描述的外观与衣着' } }, required: ['name', 'description'], additionalProperties: false }, execute: args => {
       const value = z.object({ name: z.string().trim().min(1).max(300), description: z.string().trim().min(1).max(6000) }).strict().parse(args);
       return register({ kind: 'portrait', ...value });
     } });
-    if (config.autoCG) tools.push({ name: 'generate_scene_cg', description: '正文切换到新的场景或出现大场面时主动调用生成场景 CG。sourceText 必须逐字引用本章实际正文片段，图片绑定该剧情。每个场景只请求一次。', parameters: { type: 'object', properties: { description: { type: 'string', description: '场景构图、人物动作、环境与氛围' }, sourceText: { type: 'string', description: '逐字引用本章正文中对应场景的文字，不得编造引用' } }, required: ['description', 'sourceText'], additionalProperties: false }, execute: args => {
-      const value = z.object({ description: z.string().trim().min(1).max(6000), sourceText: z.string().trim().min(1).max(10000) }).strict().parse(args);
-      return register({ kind: 'cg', ...value });
-    } });
+    if (config.autoCG) {
+      const caps = imageModelCapabilities(config);
+      const imageGuide = { stylePrompt: config.stylePrompt, promptInstruction: config.promptSystemPrompt ?? '', fixedParameters: { size: config.size, aspectRatio: config.aspectRatio, imageSize: config.imageSize, width: config.width, height: config.height }, allowed: { dimensionMode: caps.dimensionMode, sizes: caps.sizes.filter(size => size !== 'auto'), aspectRatios: caps.aspectRatios, imageSizes: caps.imageSizes, customSize: caps.customSize, dimensionMultiple: caps.dimensionMultiple, minDimension: caps.minDimension, maxDimension: caps.maxDimension, minPixels: caps.minPixels, maxPixels: caps.maxPixels, maxAspectRatio: caps.maxAspectRatio } };
+      tools.push({ name: 'generate_scene_cg', description: `正文切换到新的场景或出现大场面时主动请求 CG，提交后继续写作，不必等待图片。需要尚未请求的新人物立绘时先请求立绘，再请求 CG。由你结合本次完整写作上下文直接编写可独立使用的最终 prompt，不再交给另一个 AI 改写。明确主体姓名、外貌衣着、动作、环境、时段、光线与构图，只画对应瞬间，不添加后续剧情。sourceText 必须逐字引用本章实际正文，每个场景只请求一次。referenceNames 只填本画面实际出场且需参考立绘的人物名称，[] 表示不用人物参考。仅为 auto 尺寸／画幅／分辨率选择 allowed 内的具体 parameters；固定值由程序保留，不自行修改。当前绘图要求：${JSON.stringify(imageGuide)}`, parameters: { type: 'object', properties: {
+        prompt: { type: 'string', description: '结合完整写作上下文生成的最终绘图提示词，主体、衣着、环境与剧情时刻完整明确；不依赖图片模型阅读原文。' },
+        sourceText: { type: 'string', description: '逐字引用本章正文中对应场景的文字，不得编造引用' },
+        referenceNames: { type: 'array', items: { type: 'string' }, maxItems: 16, description: '画面中实际出场且需要立绘参考的人物姓名或别名；没有则填 []。' },
+        parameters: { type: 'object', properties: { size: { type: 'string' }, aspectRatio: { type: 'string' }, imageSize: { type: 'string', enum: ['512', '1K', '2K', '4K'] }, width: { type: 'integer' }, height: { type: 'integer' } }, additionalProperties: false },
+      }, required: ['prompt', 'sourceText'], additionalProperties: false }, execute: args => {
+        // Older saved conversations may still submit the former description field.
+        const value = z.object({ prompt: z.string().trim().min(1).max(20000).optional(), description: z.string().trim().min(1).max(6000).optional(), sourceText: z.string().trim().min(1).max(10000), referenceNames: z.array(z.string().trim().min(1).max(300)).max(16).optional(), parameters: imageParametersSchema.optional() }).strict().refine(value => value.prompt || value.description, '请提供完整绘图提示词').parse(args);
+        return register({ kind: 'cg', description: value.prompt ?? value.description!, sourceText: value.sourceText, ...(value.prompt ? { prompt: value.prompt, ...(value.referenceNames ? { referenceNames: value.referenceNames } : {}), ...(value.parameters ? { parameters: value.parameters } : {}) } : {}) });
+      } });
+    }
     return { tools };
   }
 

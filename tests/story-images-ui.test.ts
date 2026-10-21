@@ -13,6 +13,11 @@ const image = (patch: Partial<StoryImage> = {}): StoryImage => ({ id: 'portrait'
 const render = (component: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(component);
 
 describe('story illustration controls', () => {
+  it('previews in-progress writing assets while reserving activation and redraw for saved bindings', () => {
+    const html = render(createElement(StoryImageCards, { images: [image({ bindingStatus: 'pending', active: false, entityId: undefined }), image({ id: 'running', bindingStatus: 'pending', status: 'running', url: undefined })], author: true, onGenerate: () => {}, onAction: () => {} }));
+    expect(html).toContain('待关联正文'); expect(html).toContain('取消绘制'); expect(html).toContain('删除图片'); expect(html).toContain('src="/api/image.png"');
+    expect(html).not.toContain('启用图片'); expect(html).not.toContain('重新绘制'); expect(html).not.toContain('AI 修改');
+  });
   it('reader cards show only images and bindings, without author materials or generation actions', () => {
     const html = render(createElement(StoryImageCards, { images: [image({ chapterId: 'chapter', error: 'SECRET_IMAGE_ERROR' })], author: false, onGenerate: () => {}, onAction: () => {}, onChapter: () => {}, onEntity: () => {} }));
     expect(html).toContain('alt="林舟 · 立绘"'); expect(html).toContain('关联剧情'); expect(html).toContain('关联资料');
@@ -50,6 +55,12 @@ describe('story illustration controls', () => {
     const gallery = render(createElement(ImageGallery, { images: [image({ active: true, previewUrl: '/selected-preview.png' }), image({ id: 'variant', active: false, title: '未启用版本', url: '/variant.png' }), image({ id: 'failed', status: 'failed', url: undefined })], entities: [person], chapters: [], author: true, busy: false, onGenerate: () => {}, onAction: () => {}, onChapter: () => {}, onEntity: () => {} }));
     expect(gallery.match(/class="story-image-card /g)).toHaveLength(1); expect(gallery).toContain('3 个版本'); expect(gallery).toContain('1 项待处理');
     expect(gallery).toContain('src="/selected-preview.png"'); expect(gallery).not.toContain('src="/variant.png"'); expect(gallery).not.toContain('删除图片'); expect(gallery).toContain('打开图片组 林舟 · 立绘');
+  });
+  it('distinguishes a writing-model prompt from optimization and exposes the actual captured context for manual CG', () => {
+    const writing = render(createElement(ImageGenerationDetails, { image: image({ writingPrompt: '写作模型直接给出的完整画面', prompt: '', promptStatus: 'pending' }) }));
+    expect(writing).toContain('没有再次调用提示词优化模型'); expect(writing).toContain('写作模型直接给出的完整画面'); expect(writing).not.toContain('提示词优化完成后');
+    const manual = render(createElement(ImageGenerationDetails, { image: image({ storyContext: '本章完整前后文及此前剧情', promptSource: 'optimizer' }) }));
+    expect(manual).toContain('本次参考上下文'); expect(manual).toContain('本章完整前后文及此前剧情');
   });
   it('shows explicit reference choices with thumbnails while excluding inactive and unfinished images', () => {
     const html = render(createElement(ImageRequestDialog, { target: { kind: 'cg', chapterId: 'chapter', selectedReferenceImageIds: ['portrait'] }, title: '生成剧情 CG', images: [image(), image({ id: 'inactive', active: false, title: '未启用的另一版' }), image({ id: 'pending', status: 'running', title: '待完成图片' })], busy: false, error: '', onClose: () => {}, onSubmit: async () => {} }));

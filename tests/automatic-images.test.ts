@@ -45,7 +45,8 @@ function harness(turns: Turn[], options: { autoCG?: boolean; autoPortrait?: bool
     if (options.failImage) throw new Error('模拟图片模型失败');
     return { bytes: png, mimeType: 'image/png' };
   });
-  const images = new ImageService(store, () => settings, generator, async (_settings, input) => ({ prompt: `优化后的小说插画：${input.material}`, referenceEntityIds: [], parameters: {} }));
+  const optimizer = vi.fn(async (_settings, input) => ({ prompt: `优化后的小说插画：${input.material}`, referenceEntityIds: [], parameters: {} }));
+  const images = new ImageService(store, () => settings, generator, optimizer);
   const requests: ModelRequest[] = [];
   let currentTurn = -1; let failedExtraction = false;
   const models: TextModels = {
@@ -54,7 +55,7 @@ function harness(turns: Turn[], options: { autoCG?: boolean; autoPortrait?: bool
       for (const image of turn.images) {
         const name = image.kind === 'portrait' ? 'generate_character_portrait' : 'generate_scene_cg';
         const tool = request.tools?.find(tool => tool.name === name);
-        if (tool) await tool.execute(image.kind === 'portrait' ? { name: image.name, description: image.description } : { sourceText: image.sourceText, description: image.description });
+        if (tool) await tool.execute(image.kind === 'portrait' ? { name: image.name, description: image.description } : image.prompt ? { sourceText: image.sourceText, prompt: image.prompt, referenceNames: image.referenceNames, parameters: image.parameters } : { sourceText: image.sourceText, description: image.description });
       }
       request.onTextDelta?.(turn.text);
       return { text: turn.text, inputTokens: 10, outputTokens: 20 };
@@ -67,7 +68,7 @@ function harness(turns: Turn[], options: { autoCG?: boolean; autoPortrait?: bool
   const engine = new StoryEngine(store, () => settings, models, images);
   const fixture = { store, engines: [engine], images }; fixtures.push(fixture); engine.start();
   const start = (branchId = project.mainBranchId, selectedEngine = engine) => selectedEngine.enqueue(branchId, 'generate', { title: '新章节', baseRevisionId: store.getBranch(branchId).revisionId, mode: 'original', instruction: '继续创作' });
-  return { ...fixture, project, engine, start, settings, models, generator, requests };
+  return { ...fixture, project, engine, start, settings, models, generator, optimizer, requests };
 }
 async function finish(ctx: ReturnType<typeof harness>, imageCount: number, projectId = ctx.project.id) {
   await until(() => ctx.engine.listJobs(projectId).filter(job => job.kind === 'extract').some(job => job.status === 'completed') && ctx.engine.listJobs(projectId).every(job => job.status === 'completed') && ctx.store.images.all(projectId).length === imageCount && ctx.store.images.all(projectId).every(image => ['completed', 'failed'].includes(image.status)));
@@ -75,6 +76,50 @@ async function finish(ctx: ReturnType<typeof harness>, imageCount: number, proje
 const requested = (cgText = scene): WritingImageRequest[] => [{ kind: 'portrait', name: '林舟', description: '青色长袍，站立在城门边' }, { kind: 'cg', sourceText: cgText, description: '千军万马交战的远景' }];
 
 describe('automatic images across writing, extraction and image persistence', () => {
+  it('uses the writing model final prompt and parameter suggestions directly, with explicit character references', async () => {
+    const prompt = '林舟身穿青色长袍站在城门边，远处千军万马交战，日光穿过烟尘，低机位广角构图。';
+    const cg: WritingImageRequest = { kind: 'cg', description: prompt, prompt, sourceText: scene, referenceNames: ['林舟'], parameters: { size: '1536x1024' } };
+    const ctx = harness([{ text: prose, extraction: extracted(), images: [requested()[0], cg] }]); ctx.settings.imageSettings!.size = 'auto';
+    // The portrait still uses its optimizer, so give it a valid auto size.
+    ctx.optimizer.mockImplementation(async (_settings, input) => ({ prompt: `PORTRAIT_ONLY ${input.material}`, referenceEntityIds: [], parameters: { size: '1024x1536' } }));
+    ctx.start(); await finish(ctx, 2);
+    const asset = ctx.images.list(ctx.project.mainBranchId, true).find(image => image.kind === 'cg')!;
+    expect(asset).toMatchObject({ writingPrompt: prompt, promptSource: 'writing', generationParameters: { size: '1536x1024' }, sourceText: scene });
+    expect(asset.prompt).toContain(prompt); expect(asset.prompt).toContain('参考图 1：人物 林舟'); expect(asset.prompt).not.toContain('PORTRAIT_ONLY');
+    expect(asset.storyContext).toBeUndefined(); expect(ctx.optimizer).toHaveBeenCalledTimes(1);
+    expect(ctx.generator.mock.calls.find(call => call[2].includes(prompt))?.[4]).toHaveLength(1);
+    const tool = ctx.requests[0].tools!.find(tool => tool.name === 'generate_scene_cg')!;
+    expect(tool.parameters.required).toEqual(['prompt', 'sourceText']); expect(tool.description).toContain('不再交给另一个 AI 改写');
+    const restored = ctx.store.restoreProject(ctx.store.exportProject(ctx.project.id));
+    expect(ctx.store.images.all(restored.id).find(image => image.kind === 'cg')).toMatchObject({ writingPrompt: prompt, promptSource: 'writing', writingReferenceNames: ['林舟'] });
+  });
+
+  it('keeps the writing prompt through pixel retry and honors no-reference intent and fixed dimensions', async () => {
+    const prompt = '城外千军万马交战，远景构图。';
+    const ctx = harness([{ text: prose, extraction: extracted(), images: [{ kind: 'cg', description: prompt, prompt, sourceText: scene, referenceNames: [], parameters: { size: '1536x1024' } }] }], { autoPortrait: false, failImage: true });
+    ctx.start(); await finish(ctx, 1); const previous = ctx.images.list(ctx.project.mainBranchId, true)[0];
+    expect(previous.promptSource).toBe('writing'); expect(ctx.optimizer).not.toHaveBeenCalled(); expect(previous.generationParameters?.size).toBe('1024x1024');
+    ctx.generator.mockResolvedValue({ bytes: png, mimeType: 'image/png' });
+    const retry = ctx.images.retry(ctx.project.mainBranchId, previous.id, ctx.store.getBranch(ctx.project.mainBranchId).revisionId);
+    await until(() => ctx.store.images.get(retry.image.id)?.status === 'completed');
+    expect(ctx.optimizer).not.toHaveBeenCalled(); expect(ctx.generator.mock.calls.at(-1)![2]).toBe(previous.prompt); expect(ctx.generator.mock.calls.at(-1)![4]).toBeUndefined();
+    ctx.settings.imageSettings!.size = '1024x1536';
+    const changed = ctx.images.retry(ctx.project.mainBranchId, retry.image.id, ctx.store.getBranch(ctx.project.mainBranchId).revisionId);
+    await until(() => ctx.store.images.get(changed.image.id)?.status === 'completed'); expect(ctx.optimizer).not.toHaveBeenCalled();
+    expect(ctx.store.images.get(changed.image.id)).toMatchObject({ writingPrompt: prompt, promptSource: 'writing', generationParameters: { size: '1024x1536' } });
+    const redraw = ctx.images.generate(ctx.project.mainBranchId, { baseRevisionId: ctx.store.getBranch(ctx.project.mainBranchId).revisionId, kind: 'cg', chapterId: previous.chapterId, selection: previous.selection });
+    await until(() => ctx.store.images.get(redraw.image.id)?.status === 'completed'); expect(ctx.optimizer).toHaveBeenCalledTimes(1);
+    expect(ctx.optimizer.mock.calls[0][1].storyContext).toContain('林舟身穿青色长袍');
+  });
+  it('ignores automatic portrait requests when character references are disabled, while preserving the writing prompt', async () => {
+    const prompt = '古城墙外的战场远景。';
+    const ctx = harness([{ text: prose, extraction: extracted(), images: [{ kind: 'cg', description: prompt, prompt, sourceText: scene, referenceNames: ['不存在的参考名'] }] }], { autoPortrait: false });
+    ctx.settings.imageSettings!.useCharacterReferences = false;
+    ctx.start(); await finish(ctx, 1);
+    const image = ctx.images.list(ctx.project.mainBranchId, true)[0]; expect(image.status).toBe('completed');
+    expect(image.prompt).toContain(prompt); expect(image.referenceImageIds).toEqual([]); expect(ctx.optimizer).not.toHaveBeenCalled();
+  });
+
   it('runs actual ImageService after tool requests and binds portrait and CG to the saved chapter', async () => {
     const ctx = harness([{ text: prose, extraction: extracted(), images: requested() }]);
     const writing = ctx.start(); await finish(ctx, 2);
@@ -123,10 +168,12 @@ describe('automatic images across writing, extraction and image persistence', ()
     expect(ctx.models.generateText).toHaveBeenCalledTimes(2);
   });
 
-  it('skips invented CG source text and unbound character names', async () => {
+  it('retains invalid requests for diagnosis without binding invented CG text or character names', async () => {
     const ctx = harness([{ text: prose, extraction: emptyExtraction(), images: [{ kind: 'portrait', name: '未出场的人物', description: '银甲' }, { kind: 'cg', description: '未来大场面', sourceText: '这里根本没有出现在正文。' }] }]);
-    ctx.start(); await finish(ctx, 0);
-    expect(ctx.generator).not.toHaveBeenCalled();
+    ctx.start(); await until(() => ctx.engine.listJobs().some(job => job.kind === 'extract' && job.status === 'completed'));
+    expect(ctx.store.images.all()).toHaveLength(2);
+    expect(ctx.store.images.all().every(image => image.status === 'stale' && image.bindingStatus === 'pending')).toBe(true);
+    expect(ctx.store.state(ctx.project.mainBranchId).imageIds ?? []).toEqual([]);
     expect(ctx.store.state(ctx.project.mainBranchId).chapters[0].status).toBe('ready');
   });
 
@@ -136,8 +183,9 @@ describe('automatic images across writing, extraction and image persistence', ()
     const ctx = harness([{ text: prose, extraction, images: [{ kind: 'portrait', name: '从未出场的人物', description: '银色盔甲' }] }]);
     ctx.start();
     await until(() => ctx.engine.listJobs().some(job => job.kind === 'extract' && job.status === 'completed'));
-    expect(ctx.store.images.all()).toEqual([]);
-    expect(ctx.generator).not.toHaveBeenCalled();
+    expect(ctx.store.images.all()).toHaveLength(1);
+    expect(ctx.store.images.all()[0]).toMatchObject({ status: 'stale', bindingStatus: 'pending' });
+    expect(ctx.store.state(ctx.project.mainBranchId).imageIds ?? []).toEqual([]);
   });
 
   it('does not confuse same-name characters or assign an ambiguous request to either entity', async () => {
@@ -170,7 +218,6 @@ describe('automatic images across writing, extraction and image persistence', ()
   it('resumes saved illustration requests after extraction fails without regenerating prose', async () => {
     const ctx = harness([{ text: prose, extraction: extracted(), images: requested() }], { failExtractionOnce: true });
     ctx.start(); await until(() => ctx.engine.listJobs().some(job => job.kind === 'extract' && job.status === 'failed'));
-    expect(ctx.generator).not.toHaveBeenCalled();
     const background = ctx.engine.listJobs().find(job => job.kind === 'extract')!;
     ctx.engine.action(background.id, 'retry'); await finish(ctx, 2);
     expect(ctx.models.generateText).toHaveBeenCalledTimes(1);

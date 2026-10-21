@@ -337,7 +337,7 @@ export function ImageSettingsEditor({ settings, onChange }: { settings: Settings
     <label>图片接口<select aria-label="图片接口" value={image.protocol} onChange={event => changeImageModel({ protocol: event.target.value as ImageSettings['protocol'] })}><option value="openai-images">OpenAI 兼容 · Images</option><option value="gemini">Gemini · 图片生成</option><option value="together-images">Together · 图片生成</option></select></label>
     <label>图片模型名称<input aria-label="图片模型名称" maxLength={300} value={image.model} onChange={event => changeImageModel({ model: event.target.value })} placeholder="填写供应商提供的图片生成模型 ID" /></label>
     <p className="hint">图片接口复用供应商连接的服务地址和密钥。下方参数与参考图能力按所选协议和型号显示。</p>
-    <section className="image-optimization-settings form-stack"><h3>AI 生图提示词</h3><p className="hint">绘图前，文字 AI 根据剧情、资料、人物参考和画风编写专用提示词。选择“AI 自行决定”时，还会选择适合本次画面的尺寸。</p><div className="form-grid">
+    <section className="image-optimization-settings form-stack"><h3>AI 生图提示词</h3><p className="hint">手动绘图及其他插画使用此模型整理提示词；CG 同时参考前后文与相关资料。写作中的新自动 CG 由写作 AI 直接给出提示词，提交后与正文同时生成；所需参考图未完成时等待，不再调用此优化模型。自动尺寸由相应的文字 AI 建议，固定设置优先。</p><div className="form-grid">
       <label>生图提示词优化供应商<select aria-label="生图提示词优化供应商" value={image.promptProviderId || ''} onChange={event => patch({ promptProviderId: event.target.value, promptModel: '' })}><option value="">自动使用摘要压缩或正文写作模型</option>{settings.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
       <label>生图提示词优化模型<input aria-label="生图提示词优化模型" maxLength={300} value={image.promptModel || ''} onChange={event => patch({ promptModel: event.target.value })} placeholder={image.promptProviderId ? '填写此供应商的文字模型 ID' : fallbackModel || '自动使用已配置的文字模型'} /></label>
     </div>{!image.promptProviderId && <p className="hint">默认先使用摘要压缩模型，再使用正文写作模型。{fallbackName && fallbackModel ? `当前默认：${fallbackName} · ${fallbackModel}。` : '请先配置至少一个文字模型。'}</p>}<label>提示词优化系统要求（可选）<textarea aria-label="提示词优化系统要求" maxLength={10000} rows={3} value={image.promptSystemPrompt || ''} onChange={event => patch({ promptSystemPrompt: event.target.value })} placeholder="例如：按画面主体、构图、服装、环境、光线组织提示词，保留已确认的角色外貌。" /></label></section>
@@ -365,6 +365,6 @@ export function ImageSettingsEditor({ settings, onChange }: { settings: Settings
     <p className="hint image-reference-capability">{!capabilities.knownModel ? '自定义型号按所选图片协议发送请求，请使用支持对应生图与参考图能力的图片模型。' : capabilities.referenceMode === 'multiple' ? `当前型号支持多张参考图；本工作台最多使用 ${capabilities.maxReferences} 张，其中人物参考最多 ${capabilities.maxCharacterReferences} 人。` : capabilities.referenceMode === 'single' ? '当前型号支持一张参考图；修改已有 CG 时，这个位置用于原图。' : '当前型号不提供人物参考图，CG 根据人物资料绘制。'}AI 从对应场景选择人物，尚未完成的立绘不会作为参考图。</p>
     <label className="checkbox"><input type="checkbox" checked={image.autoPortrait} onChange={event => patch({ autoPortrait: event.target.checked })} />新人物自动生成立绘</label>
     <label className="checkbox"><input type="checkbox" checked={image.autoCG} onChange={event => patch({ autoCG: event.target.checked })} />场景变化或大场面时自动生成 CG</label>
-    <p className="hint">插画请求在正文保存和资料整理完成后绑定到人物或剧情。图片独立生成，作者可在图册查看优化后的提示词、实际画幅与人物参考；失败和中断只由作者手动重试。</p>
+    <p className="hint">插画与正文同时生成，仅等待实际需要的参考图；正文和资料保存后自动关联原图片。写作页面和图册可查看进度、提示词及人物参考，失败和中断由作者手动重试。</p>
   </>;
 }

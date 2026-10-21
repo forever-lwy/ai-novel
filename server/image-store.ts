@@ -6,6 +6,7 @@ import { readerEntityMaterial } from './reader-materials.js';
 import { imageGroupKey } from '../shared/image-groups.js';
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+export const imageParametersSchema = z.object({ size: z.string().max(50).optional(), aspectRatio: z.string().max(30).optional(), imageSize: z.enum(['512', '1K', '2K', '4K']).optional(), width: z.number().int().positive().max(8192).optional(), height: z.number().int().positive().max(8192).optional() }).strict();
 const generationParametersSchema = z.object({
   model: z.string().max(300).optional(), protocol: z.enum(['openai-images', 'gemini', 'together-images']).optional(),
   size: z.string().max(50).regex(/^(?:auto|\d+x\d+)$/).optional(), aspectRatio: z.string().max(30).optional(), imageSize: z.enum(['512', '1K', '2K', '4K']).optional(), width: z.number().int().min(64).max(8192).optional(), height: z.number().int().min(64).max(8192).optional(),
@@ -20,7 +21,9 @@ export const imageSchema = z.object({
   kind: z.enum(['portrait', 'entity', 'map', 'cg']), status: z.enum(['queued', 'running', 'completed', 'failed', 'paused', 'stale', 'cancelled']),
   title: z.string().max(500), prompt: z.string().max(100000), entityId: z.string().optional(), chapterId: z.string().optional(), sourceText: z.string().max(2000000).optional(),
   selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), referenceImageId: z.string().optional(),
-  material: z.string().max(100000).optional(), instruction: z.string().max(20000).optional(),
+  material: z.string().max(100000).optional(), storyContext: z.string().max(2000000).optional(), instruction: z.string().max(20000).optional(),
+  writingPrompt: z.string().max(20000).optional(), writingReferenceNames: z.array(z.string().max(300)).max(16).optional(), writingParameters: imageParametersSchema.optional(), promptSource: z.enum(['writing', 'optimizer']).optional(),
+  writingJobId: z.string().min(1).optional(), bindingStatus: z.enum(['pending', 'bound', 'discarded']).optional(), pendingEntityName: z.string().max(300).optional(), dependencyImageIds: z.array(z.string().min(1)).max(16).optional(),
   selectedReferenceImageIds: z.array(z.string().min(1)).max(16).optional(),
   referenceImageIds: z.array(z.string().min(1)).max(16).optional(), referenceEntityIds: z.array(z.string().min(1)).max(16).optional(),
   materialEntityIds: z.array(z.string().min(1)).max(10000).optional(),

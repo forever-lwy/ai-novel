@@ -39,6 +39,19 @@ describe('image prompt model and parameter selection', () => {
     const [provider, request] = textModel.generateStructured.mock.calls[0]; expect(provider.model).toBe('image-prompt-model'); expect(provider.id).toBe('text'); expect(provider.stream).toBe(false);
     expect(request.system).toContain('IMAGE_PROMPT_OPTIMIZATION'); expect(request.system).toContain('优先使用中文画面描述'); expect(JSON.parse(request.messages.findLast((message: { role: string; content: string }) => message.role === 'user').content)).toMatchObject({ material: data.material, instruction: data.instruction, characters: data.characters, config: { protocol: 'openai-images' } });
   });
+  it('sends the complete captured story context through the shared image prompt compilation', async () => {
+    const data = input({ storyContext: '前章：林月穿着银色斗篷来到庭院。\n本章前文：程川递出信封。\n目标：她接住了它。\n本章后文：她读完后把信收好。' });
+    await optimizeImagePrompt(settings(), data);
+    const request = textModel.generateStructured.mock.calls[0][1];
+    const payload = JSON.parse(request.messages.findLast((message: { role: string }) => message.role === 'user').content);
+    expect(payload.storyContext).toBe(data.storyContext); expect(payload.material).toBe(data.material);
+    expect(request.system).toContain('不得将后文事件'); expect(request.system).toContain('只选择目标瞬间真正需要的人物');
+  });
+  it('counts the full story context in the request budget and refuses before sending instead of silently truncating it', async () => {
+    const saved = settings(); saved.modelParameters = [{ role: 'planning', providerId: 'text', model: 'image-prompt-model', contextTokens: 8192, maxOutputTokens: 1024 }];
+    await expect(optimizeImagePrompt(saved, input({ storyContext: '上下文原文不能被静默截断。'.repeat(1000) }))).rejects.toThrow('超出模型上下文');
+    expect(textModel.generateStructured).not.toHaveBeenCalled();
+  });
   it('falls back to planning without an explicit optimizer connection and fails clearly when text models are missing', async () => {
     const data = input(); data.config.promptProviderId = ''; data.config.promptModel = ''; await optimizeImagePrompt(settings(), data); expect(textModel.generateStructured.mock.calls[0][0].model).toBe('planner');
     textModel.generateStructured.mockClear(); await expect(optimizeImagePrompt({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '' }, data)).rejects.toThrow('配置生图提示词'); expect(textModel.generateStructured).not.toHaveBeenCalled();
@@ -80,6 +93,22 @@ function harness(generator: ImageGenerator = async () => ({ bytes: png, mimeType
 async function until(check: () => boolean) { for (let count = 0; count < 200 && !check(); count++) await new Promise(resolve => setTimeout(resolve, 5)); expect(check()).toBe(true); }
 
 describe('persisted prompt and image generation phases', () => {
+  it('captures CG context for selection and redraw, persists it through backup, and reuses it for a pixel-only retry', async () => {
+    let calls = 0; const generator = vi.fn<ImageGenerator>(async () => { if (++calls === 1) throw new Error('pixel failure'); return { bytes: png, mimeType: 'image/png' }; });
+    const optimizer = vi.fn<ImagePromptOptimizer>(defaultOptimizer); const ctx = harness(generator, optimizer);
+    const target = ctx.store.chapter(ctx.branchId, ctx.chapter.id).text; const start = target.indexOf('共同');
+    const first = ctx.service.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selection: { start, end: target.length } });
+    await until(() => ctx.store.images.get(first.image.id)?.status === 'failed');
+    const saved = ctx.store.images.get(first.image.id)!;
+    expect(saved.storyContext).toContain('林月和程川站在庭院里'); expect(saved.sourceText).toBe(target.slice(start)); expect(optimizer.mock.calls[0][1].storyContext).toBe(saved.storyContext);
+    const retry = ctx.service.retry(ctx.branchId, first.image.id, ctx.base()); await until(() => ctx.store.images.get(retry.image.id)?.status === 'completed');
+    expect(optimizer).toHaveBeenCalledTimes(1); expect(ctx.store.images.get(retry.image.id)?.storyContext).toBe(saved.storyContext);
+    const restored = ctx.store.restoreProject(ctx.store.exportProject(ctx.store.getBranch(ctx.branchId).projectId));
+    expect(ctx.store.images.all(restored.id).every(image => image.storyContext === saved.storyContext)).toBe(true);
+    const redraw = ctx.service.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, selection: { start, end: target.length } });
+    await until(() => ctx.store.images.get(redraw.image.id)?.status === 'completed'); expect(optimizer).toHaveBeenCalledTimes(2);
+    expect(optimizer.mock.calls[1][1].storyContext).toBe(saved.storyContext); expect(ctx.service.list(ctx.branchId, false).every(image => image.storyContext === undefined)).toBe(true);
+  });
   it('persists the optimized prompt separately and sends that final prompt to the image service', async () => {
     const imageModel = vi.fn<ImageGenerator>(async () => ({ bytes: png, mimeType: 'image/png' })); const optimizer = vi.fn<ImagePromptOptimizer>(defaultOptimizer); const ctx = harness(imageModel, optimizer);
     const result = ctx.service.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'portrait', entityId: 'moon' }); await until(() => ctx.store.images.get(result.image.id)?.status === 'completed'); const asset = ctx.store.images.get(result.image.id)!;

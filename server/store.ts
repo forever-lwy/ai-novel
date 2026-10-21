@@ -849,7 +849,7 @@ export class Store {
         return sourceIdMap[sourceId];
       });
       if (key === 'writingActivities' && Array.isArray(value)) return value.map(entry => ({ jobId: map.get(entry.jobId) ?? entry.jobId, activities: clone(entry.activities) }));
-      if (typeof value === 'string') { if (key === 'sourceId') return Object.hasOwn(sourceIdMap, value) ? sourceIdMap[value] : undefined; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds' || key === 'imageIds' || key === 'activeImageIds' || key === 'imageStartingEntityIds' || key === 'imagesRequestedFor' || key === 'selectedReferenceImageIds' || key === 'referenceImageIds' || key === 'referenceEntityIds' || key === 'materialEntityIds' || key === 'materialFactIds' || key === 'materialRelationIds') return map.get(value) ?? value; return value; }
+      if (typeof value === 'string') { if (key === 'sourceId') return Object.hasOwn(sourceIdMap, value) ? sourceIdMap[value] : undefined; if (key.endsWith('Id') || key === 'id' || key === 'mergedInto' || key === 'relatedEntityIds' || key === 'chapterIds' || key === 'summaryChapterIds' || key === 'imageIds' || key === 'activeImageIds' || key === 'imageStartingEntityIds' || key === 'imagesRequestedFor' || key === 'dependencyImageIds' || key === 'selectedReferenceImageIds' || key === 'referenceImageIds' || key === 'referenceEntityIds' || key === 'materialEntityIds' || key === 'materialFactIds' || key === 'materialRelationIds') return map.get(value) ?? value; return value; }
       if (Array.isArray(value)) return value.map(v => remap(v, key)); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, remap(v, k)])); return value;
     };
     const restored = remap({ ...data, revisions: data.revisions.map(entry => ({ revision: entry.revision })) }) as typeof data;
@@ -874,11 +874,19 @@ export class Store {
       if (image.projectId !== restored.project.id || !branchIds.has(image.branchId) || !revisionIds.has(image.baseRevisionId) || (image.chapterId && !chapterIds.has(image.chapterId)) || references.some(referenceId => !imageIds.has(referenceId) || referenceId === image.id) || new Set(image.selectedReferenceImageIds ?? []).size !== (image.selectedReferenceImageIds ?? []).length || new Set(image.referenceImageIds ?? []).size !== (image.referenceImageIds ?? []).length || new Set(image.referenceEntityIds ?? []).size !== (image.referenceEntityIds ?? []).length || new Set(image.materialEntityIds ?? []).size !== (image.materialEntityIds ?? []).length) throw new HttpError('备份图片关联无效');
       const imageRevision = restored.revisions.find(entry => entry.revision.id === image.baseRevisionId)!;
       const baseState = restoredState(restored.revisions.indexOf(imageRevision));
-      if (imageRevision.revision.branchId !== image.branchId || !baseState.imageIds?.includes(image.id) || image.entityId && !baseState.entities.some(entity => entity.id === image.entityId) || image.chapterId && !baseState.chapters.some(chapter => chapter.id === image.chapterId)) throw new HttpError('备份图片起始版本无效');
-      if (references.some(referenceId => !baseState.imageIds?.includes(referenceId) || imagesById.get(referenceId)?.status !== 'completed') || [...(image.materialEntityIds ?? []), ...(image.referenceEntityIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.entityId)].some(entityId => !baseState.entities.some(entity => entity.id === entityId))) throw new HttpError('备份图片参考素材不属于起始版本');
+      const draft = image.bindingStatus === 'pending' || image.bindingStatus === 'discarded';
+      const owner = image.writingJobId ? restored.jobs.find(job => job.id === image.writingJobId) : undefined;
+      if (draft && (!owner || owner.kind !== 'generate' || owner.branchId !== image.branchId || owner.projectId !== image.projectId || !image.automatic || image.visibility !== 'secret' || image.publicMaterial !== false || !['portrait', 'cg'].includes(image.kind) || image.chapterId || image.entityId)) throw new HttpError('备份写作中图片的任务关联无效');
+      if (imageRevision.revision.branchId !== image.branchId || !draft && !baseState.imageIds?.includes(image.id) || image.entityId && !baseState.entities.some(entity => entity.id === image.entityId) || image.chapterId && !baseState.chapters.some(chapter => chapter.id === image.chapterId)) throw new HttpError('备份图片起始版本无效');
+      const validReference = (id: string) => {
+        const reference = imagesById.get(id);
+        return reference && id !== image.id && (baseState.imageIds?.includes(id) || draft && reference.kind === 'portrait' && reference.writingJobId === image.writingJobId && reference.branchId === image.branchId);
+      };
+      if (image.dependencyImageIds?.some(id => !validReference(id) || imagesById.get(id)?.kind !== 'portrait') || new Set(image.dependencyImageIds ?? []).size !== (image.dependencyImageIds ?? []).length) throw new HttpError('备份图片等待的参考图关联无效');
+      if (references.some(referenceId => !validReference(referenceId) || imagesById.get(referenceId)?.status !== 'completed') || [...(image.materialEntityIds ?? []), ...(image.referenceEntityIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.entityId)].some(entityId => !baseState.entities.some(entity => entity.id === entityId))) throw new HttpError('备份图片参考素材不属于起始版本');
       if (image.materialFactIds?.some(id => !baseState.entities.some(entity => entity.facts.some(fact => fact.id === id))) || image.materialRelationIds?.some(id => !baseState.relations.some(relation => relation.id === id))) throw new HttpError('备份图片公开依据不属于起始版本');
       if ((image.referenceCharacters ?? []).some(character => { const portrait = imagesById.get(character.imageId); return portrait?.kind !== 'portrait' || !portrait.entityId || imageEntity(baseState, portrait.entityId)?.id !== imageEntity(baseState, character.entityId)?.id; })) throw new HttpError('备份人物参考图与身份不匹配');
-      if (image.kind === 'cg') {
+      if (image.kind === 'cg' && !draft) {
         const chapter = restored.chapters.find(chapter => chapter.id === image.chapterId);
         const source = image.selection && chapter ? chapter.text.slice(image.selection.start, image.selection.end) : chapter?.text;
         if (!chapter || !source?.trim() || source !== image.sourceText || image.selection && (image.selection.start >= image.selection.end || image.selection.end > chapter.text.length)) throw new HttpError('备份 CG 剧情引用无效');
@@ -900,7 +908,8 @@ export class Store {
         if (validatedImageReferences.has(next.id)) continue;
         if (visiting.has(next.id)) throw new HttpError('备份图片存在循环参考');
         visiting.add(next.id); pending.push({ id: next.id, finished: true });
-        for (const referenceId of imageReferences(imagesById.get(next.id)!)) pending.push({ id: referenceId, finished: false });
+        const image = imagesById.get(next.id)!;
+        for (const referenceId of [...imageReferences(image), ...(image.dependencyImageIds ?? [])]) pending.push({ id: referenceId, finished: false });
       }
     }
     for (let index = 0; index < restored.revisions.length; index++) {
@@ -909,7 +918,7 @@ export class Store {
       const included = new Set(state.chapters.map(c => c.id)); const entities = new Set(state.entities.map(e => e.id));
       if ((state.imageIds ?? []).some(imageId => !imageIds.has(imageId)) || new Set(state.imageIds ?? []).size !== (state.imageIds ?? []).length) throw new HttpError('备份版本图片引用无效');
       if ((state.activeImageIds ?? []).some(imageId => !state.imageIds?.includes(imageId)) || new Set(state.activeImageIds ?? []).size !== (state.activeImageIds ?? []).length) throw new HttpError('备份版本启用图片引用无效');
-      for (const imageId of state.imageIds ?? []) { const image = restored.images.find(asset => asset.image.id === imageId)!.image; if ((image.entityId && !entities.has(image.entityId)) || (image.chapterId && !included.has(image.chapterId))) throw new HttpError('备份图片不属于当前资料或章节'); }
+      for (const imageId of state.imageIds ?? []) { const image = restored.images.find(asset => asset.image.id === imageId)!.image; if (image.bindingStatus === 'pending' || image.bindingStatus === 'discarded' || (image.entityId && !entities.has(image.entityId)) || (image.chapterId && !included.has(image.chapterId))) throw new HttpError('备份图片不属于当前资料或章节'); }
       const compression = state.outline.summaryCompression;
       if (compression && (!compression.text.trim() || !compression.chapterIds.length || new Set(compression.chapterIds).size !== compression.chapterIds.length || compression.chapterIds.some(chapterId => !included.has(chapterId)))) throw new HttpError('备份压缩摘要存在无效章节关联');
       const validCitation = (c: { chapterId: string; paragraph: number; quote: string } | undefined) => !c || (included.has(c.chapterId) && chapterLookup.get(c.chapterId)?.[c.paragraph - 1]?.includes(c.quote));
