@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered, Image, ShieldCheck } from 'lucide-react';
 import type { CapturedModelResponse, ImageSettings, ModelParameters, ModelRole, ProviderConnection, ProviderModel, ProviderProtocol, Settings, TaskSettings } from '../shared/types';
 import { defaultModelParameters, getModelParameters, upsertModelParameters } from '../shared/model-settings';
@@ -30,7 +30,7 @@ type ModelRequest = { signature: string; controller: AbortController; timer?: Re
 const connectionSignature = (provider: ProviderConnection) => JSON.stringify([provider.id, provider.protocol, provider.baseUrl, provider.apiKey || '', !!provider.clearApiKey, !!provider.hasKey]);
 const sections = [
   { id: 'providers', label: '供应商连接', icon: KeyRound, description: '管理服务地址、接口协议和 API 密钥。密钥保存在服务端，作品备份不包含密钥。' },
-  { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '为各类任务选择模型，设置资料提取输出方式与自动重试。每个任务独立保存参数，同模型用于不同任务也不共用。' },
+  { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '切换下方任务，分别选择模型和设置参数。切换保留未保存的修改，点击“保存设置”后统一生效。' },
   { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '管理通用预设和四类任务提示词、调整消息顺序，并预览编排后的内容。' },
   { id: 'images', label: '生图与自动插画', icon: Image, description: '选择图片模型，设置作品画风、新人物立绘与场景 CG 的自动生成。' },
   { id: 'account', label: '账号安全', icon: ShieldCheck, description: '修改登录密码，管理其他设备的登录。' },
@@ -78,6 +78,7 @@ function UpstreamModelSelect({ label, model, list, onChange }: { label: string; 
 export function SettingsPage({ onBack }: { onBack: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null); const [error, setError] = useState(''); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false);
   const [section, setSection] = useState<SettingsSection>('providers');
+  const [modelRole, setModelRole] = useState<ModelRole>('writing');
   const [accountBusy, setAccountBusy] = useState(false);
   const [savedSignature, setSavedSignature] = useState('');
   const [inputDraftInvalid, setInputDraftInvalid] = useState(false);
@@ -107,13 +108,24 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   useEffect(() => () => { for (const request of requests.current.values()) { clearTimeout(request.timer); request.controller.abort(); } }, []);
 
   function back() { if (!busy && !accountBusy && (!dirty || window.confirm('设置尚未保存，返回作品会放弃这些修改。确定返回吗？'))) onBack(); }
-  function showIssue(target: SettingsSection, text: string, field?: HTMLElement) {
+  function showIssue(target: SettingsSection, text: string, field?: HTMLElement, task?: ModelRole) {
     setSection(target); setMessage(''); setError(text);
+    const issueRole = task || roles.find(role => role.role === field?.closest('[data-model-role]')?.getAttribute('data-model-role'))?.role;
+    if (issueRole) setModelRole(issueRole);
     if (field) requestAnimationFrame(() => {
       let parent = field.parentElement;
       while (parent && parent !== form.current) { if (parent instanceof HTMLDetailsElement) parent.open = true; parent = parent.parentElement; }
       field.focus(); field.scrollIntoView({ block: 'center' });
     });
+  }
+  function selectModelRole(role: ModelRole) { setModelRole(role); setMessage(''); }
+  function navigateModelTabs(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const next = event.key === 'ArrowRight' ? (index + 1) % roles.length
+      : event.key === 'ArrowLeft' ? (index + roles.length - 1) % roles.length
+      : event.key === 'Home' ? 0 : event.key === 'End' ? roles.length - 1 : undefined;
+    if (next === undefined) return;
+    event.preventDefault(); selectModelRole(roles[next].role);
+    form.current?.querySelector<HTMLButtonElement>(`#settings-model-tab-${roles[next].role}`)?.focus();
   }
   function invalidField() {
     for (const target of sections) {
@@ -206,9 +218,9 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
     const invalid = settings.modelParameters?.map(profile => {
       const provider = settings.providers.find(value => value.id === profile.providerId);
       const roleName = roles.find(value => value.role === profile.role)?.label || '模型设置';
-      return { name: `${roleName} · ${provider?.name || '供应商'} · ${profile.model}`, error: profile.maxOutputTokens >= profile.contextTokens ? '单次最大输出 tokens 必须小于上下文上限 tokens。' : provider && parameterError(profile, provider.protocol) };
+      return { role: profile.role, name: `${roleName} · ${provider?.name || '供应商'} · ${profile.model}`, error: profile.maxOutputTokens >= profile.contextTokens ? '单次最大输出 tokens 必须小于上下文上限 tokens。' : provider && parameterError(profile, provider.protocol) };
     }).find(profile => profile.error);
-    if (invalid) { showIssue('models', `${invalid.name}：${invalid.error}`); return; }
+    if (invalid) { showIssue('models', `${invalid.name}：${invalid.error}`, undefined, invalid.role); return; }
     setBusy(true); setError(''); setMessage(''); if (testRole) setLastTest(null);
     try {
       const saved = await put<Settings>('/settings', settings); setSettings(saved); setSavedSignature(JSON.stringify(saved)); setInputDraftInvalid(false);
@@ -247,12 +259,14 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
     <section className="settings-role-card" data-settings-section="models" hidden={section !== 'models'} aria-label="任务模型设置">
     <div className="settings-section-heading"><h2>任务模型</h2><p>{sections[1].description}</p></div>
     <fieldset className="settings-section-fields form-stack" disabled={busy}>
+    <div className="settings-model-tabs" role="tablist" aria-label="任务模型分页">{roles.map((role, index) => <button type="button" role="tab" key={role.role} id={`settings-model-tab-${role.role}`} aria-controls={`settings-model-panel-${role.role}`} aria-selected={modelRole === role.role} tabIndex={modelRole === role.role ? 0 : -1} onClick={() => selectModelRole(role.role)} onKeyDown={event => navigateModelTabs(event, index)}>{role.label}</button>)}</div>
     <div className="settings-task-grid">{roles.map(role => {
       const provider = settings.providers.find(value => value.id === settings[role.providerKey]);
       const list = provider && modelLists[provider.id]?.signature === connectionSignature(provider) ? modelLists[provider.id] : undefined;
       const model = settings[role.modelKey] || '';
       const modelName = model.trim();
-      return <section className="settings-task-card form-stack" key={role.providerKey} aria-label={`${role.label}模型设置`}>
+      return <div key={role.role} id={`settings-model-panel-${role.role}`} className="settings-model-panel" role="tabpanel" aria-labelledby={`settings-model-tab-${role.role}`} data-model-role={role.role} hidden={modelRole !== role.role}>
+      <section className="settings-task-card form-stack" aria-label={`${role.label}模型设置`}>
         <h4>{role.label}</h4>
         {role.role === 'extraction' && <>
           <label>输出模式<select aria-label="资料提取输出模式" value={tasks.extraction.outputMode ?? 'prompt'} onChange={e => updateTaskSettings('extraction', { outputMode: e.target.value as NonNullable<TaskSettings['extraction']['outputMode']> })}>
@@ -277,7 +291,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
           {modelName ? <ProviderParameters writing={role.role === 'writing'} key={JSON.stringify([role.role, provider.id, modelName])} protocol={provider.protocol} parameters={getModelParameters(settings, role.role, provider.id, modelName)} onChange={patch => updateParameters(role.role, provider.id, modelName, patch)} onReset={() => resetParameters(role.role, provider.id, modelName)} /> : <p className="hint">选择或填写模型名称后，可设置此任务的模型参数；新模型自动使用通用默认值。</p>}
           <button type="button" className="button secondary small" aria-label={`${role.label}保存并测试连接`} disabled={busy || !model.trim() || !provider.baseUrl} onClick={() => void save(role)}><PlugZap size={15} />保存并测试连接</button>
         </>}
-      </section>;
+      </section></div>;
     })}</div><p className="hint">测试会保存全部设置，并按该任务所选模型的生成参数和输出上限发送一次真实请求，可能产生用量，不会自动重试。</p>
     {lastTest && <section className="settings-test-result"><div className="row between wrap"><h3>最近连接测试 · {lastTest.name}</h3><span className={`status-pill ${lastTest.ok ? 'completed' : 'failed'}`}>{lastTest.ok ? '成功' : '失败'}</span></div><p className="hint">以下是这一次测试留下的记录，之后修改设置不会改变它。</p><RequestDiagnostics key={`${lastTest.name}-${lastTest.capture?.request?.startedAt || lastTest.message}`} capture={lastTest.capture} filename="connection-test-diagnostics" showResponse /></section>}
     </fieldset></section>

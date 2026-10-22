@@ -80,6 +80,10 @@ async function openModelParameters(role: Locator) {
   if (await details.getAttribute('open') === null) await details.locator('summary').click();
 }
 
+async function selectModelTask(settings: Locator, name: string) {
+  await settings.getByRole('tablist', { name: '任务模型分页', exact: true }).getByRole('tab', { name, exact: true }).click();
+}
+
 async function completedJobs(page: Page, count: number) {
   await tab(page, '任务');
   await expect(page.locator('.job-card .status-pill.failed')).toHaveCount(0);
@@ -326,12 +330,15 @@ test('初始账号登录，一个供应商自动获取模型，三个任务各�
   await modal.getByRole('combobox', { name: '正文写作供应商', exact: true }).selectOption({ index: 1 });
   await expect(modal.getByRole('combobox', { name: '正文写作上游模型', exact: true })).toBeEnabled();
   await expect(modal.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('');
-  await modal.getByRole('combobox', { name: '摘要压缩供应商', exact: true }).selectOption({ index: 1 });
-  await modal.getByRole('combobox', { name: '资料提取供应商', exact: true }).selectOption({ index: 1 });
   await modal.getByRole('combobox', { name: '正文写作上游模型', exact: true }).selectOption('e2e-fixture');
+  await selectModelTask(modal, '摘要压缩');
+  await modal.getByRole('combobox', { name: '摘要压缩供应商', exact: true }).selectOption({ index: 1 });
   await modal.getByRole('combobox', { name: '摘要压缩上游模型', exact: true }).selectOption('e2e-planning');
+  await selectModelTask(modal, '资料提取');
+  await modal.getByRole('combobox', { name: '资料提取供应商', exact: true }).selectOption({ index: 1 });
   await modal.getByLabel('资料提取模型名称', { exact: true }).fill('e2e-custom-extraction');
   expect(listRequests).toBe(1);
+  await selectModelTask(modal, '正文写作');
   await modal.locator('.settings-role-card').scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('supplier-task-models-desktop.png'), animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -387,12 +394,15 @@ test('上游模型搜索按名称或 ID 筛选，保留已选与自定义模型�
     expect(saveRequests).toBe(0); expect(listRequests).toBe(1);
     await search.fill('中文显示');
     await expect(models.locator('option')).toHaveText(['选择上游模型', '中文显示名称 · gpt-pro']);
+    await selectModelTask(settings, '摘要压缩');
     await settings.getByRole('searchbox', { name: '摘要压缩搜索模型', exact: true }).fill('GPT-MINI');
     const planningModels = settings.getByRole('combobox', { name: '摘要压缩上游模型', exact: true });
     await expect(planningModels.locator('option')).toHaveText(['选择上游模型', 'GPT Mini · gpt-mini']);
+    await selectModelTask(settings, '资料提取');
     await settings.getByRole('searchbox', { name: '资料提取搜索模型', exact: true }).fill('claude');
     await expect(settings.getByRole('combobox', { name: '资料提取上游模型', exact: true }).locator('option')).toHaveText(['选择上游模型', 'Claude Fast · claude-fast']);
     await expect(settings.getByLabel('资料提取模型名称', { exact: true })).toHaveValue('private-custom');
+    await selectModelTask(settings, '正文写作');
     await expect(search).toHaveValue('中文显示');
     await search.fill('claude');
     await expect(models).toHaveValue('gpt-pro');
@@ -411,6 +421,11 @@ test('上游模型搜索按名称或 ID 筛选，保留已选与自定义模型�
     await writing.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath('model-search-desktop.png'), animations: 'disabled' });
     await page.setViewportSize({ width: 390, height: 844 });
+    await selectModelTask(settings, '摘要压缩');
+    await expect(settings.getByRole('searchbox', { name: '摘要压缩搜索模型', exact: true })).toHaveValue('GPT-MINI');
+    await selectModelTask(settings, '资料提取');
+    await expect(settings.getByRole('searchbox', { name: '资料提取搜索模型', exact: true })).toHaveValue('claude');
+    await selectModelTask(settings, '正文写作');
     await search.scrollIntoViewIfNeeded();
     expect(await settings.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
     await models.selectOption('gemini-pro');
@@ -466,9 +481,27 @@ test('独立设置页面切换分类保留草稿，保存检查隐藏字段，�
     await expect(providers).toBeHidden();
     await expect(models).toBeVisible();
     await expect(prompts).toBeHidden();
+    const taskTabs = settings.getByRole('tablist', { name: '任务模型分页', exact: true });
+    await expect(taskTabs.getByRole('tab')).toHaveCount(3);
+    await expect(models.getByRole('tabpanel')).toHaveCount(1);
+    await expect(taskTabs.getByRole('tab', { selected: true })).toHaveText('正文写作');
+    await taskTabs.getByRole('tab', { name: '正文写作', exact: true }).press('ArrowRight');
+    await expect(taskTabs.getByRole('tab', { name: '摘要压缩', exact: true })).toBeFocused();
+    await expect(models.getByRole('tabpanel', { name: '摘要压缩', exact: true })).toBeVisible();
+    await taskTabs.getByRole('tab', { selected: true }).press('End');
+    await expect(models.getByRole('tabpanel', { name: '资料提取', exact: true })).toBeVisible();
+    await taskTabs.getByRole('tab', { selected: true }).press('Home');
+    await expect(models.getByRole('tabpanel', { name: '正文写作', exact: true })).toBeVisible();
     await models.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-draft-writing');
     const writing = models.getByRole('region', { name: '正文写作模型设置', exact: true });
     await writing.getByLabel('单次最大输出 tokens', { exact: true }).fill('');
+    await selectModelTask(settings, '摘要压缩');
+    await models.getByLabel('摘要压缩模型名称', { exact: true }).fill('e2e-draft-compression');
+    const planning = models.getByRole('region', { name: '摘要压缩模型设置', exact: true });
+    await planning.getByLabel('单次最大输出 tokens', { exact: true }).fill('64000');
+    await selectModelTask(settings, '资料提取');
+    await models.getByLabel('资料提取输出模式', { exact: true }).selectOption('tool');
+    await expect(models.getByRole('tabpanel')).toHaveCount(1);
     await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
     await expect(providers).toBeHidden();
     await expect(models).toBeHidden();
@@ -478,6 +511,7 @@ test('独立设置页面切换分类保留草稿，保存检查隐藏字段，�
     page.on('request', request => { if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/settings') saves++; });
     await settings.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(models).toBeVisible();
+    await expect(taskTabs.getByRole('tab', { selected: true })).toHaveText('正文写作');
     await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('');
     await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toBeFocused();
     expect(saves).toBe(0);
@@ -489,11 +523,19 @@ test('独立设置页面切换分类保留草稿，保存检查隐藏字段，�
     await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
     await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('分类切换保留的提示词草稿');
     await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+    await expect(taskTabs.getByRole('tab', { selected: true })).toHaveText('摘要压缩');
+    await expect(settings.getByRole('alert')).toContainText('单次最大输出 tokens 必须小于上下文上限');
+    expect(saves).toBe(0);
+    await expect(planning.getByLabel('摘要压缩模型名称', { exact: true })).toHaveValue('e2e-draft-compression');
+    await planning.getByLabel('单次最大输出 tokens', { exact: true }).fill('2048');
+    await settings.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(settings.getByRole('status')).toContainText('设置已保存');
     expect(saves).toBe(1);
     const saved = await (await page.request.get('/api/settings')).json();
     expect(saved.providers[0].name).toBe('分类切换保留的供应商草稿');
     expect(saved.writingModel).toBe('e2e-draft-writing');
+    expect(saved.planningModel).toBe('e2e-draft-compression');
+    expect(saved.taskSettings.extraction.outputMode).toBe('tool');
     expect(saved.promptTemplates.presets.writing[0].name).toBe('分类切换保留的提示词草稿');
     await settings.getByRole('button', { name: '返回作品', exact: true }).click();
     await expect(settings).toHaveCount(0);
@@ -505,6 +547,14 @@ test('独立设置页面切换分类保留草稿，保存检查隐藏字段，�
     await page.screenshot({ path: testInfo.outputPath('settings-page-mobile.png'), animations: 'disabled' });
     await settings.getByRole('button', { name: '任务模型', exact: true }).click();
     await expect(models.getByLabel('正文写作模型名称', { exact: true })).toHaveValue('e2e-draft-writing');
+    await selectModelTask(settings, '资料提取');
+    await expect(models.getByLabel('资料提取输出模式', { exact: true })).toHaveValue('tool');
+    await settings.getByRole('button', { name: '供应商连接', exact: true }).click();
+    await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await expect(taskTabs.getByRole('tab', { selected: true })).toHaveText('资料提取');
+    await expect(models.getByRole('tabpanel')).toHaveCount(1);
+    await taskTabs.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('task-model-tabs-mobile.png'), animations: 'disabled' });
     await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
     await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('分类切换保留的提示词草稿');
     await panel.getByLabel('提示词预设名称', { exact: true }).fill('未保存，取消返回时继续保留');
@@ -1597,7 +1647,7 @@ test('三任务使用同一模型时参数互不影响，切换恢复且清空�
   const planning = modal.getByRole('region', { name: '摘要压缩模型设置', exact: true });
   const extraction = modal.getByRole('region', { name: '资料提取模型设置', exact: true });
   await expect(modal.locator('.provider-card .provider-parameters')).toHaveCount(0);
-  for (const role of [writing, planning, extraction]) await role.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
+  await openModelParameters(writing);
   await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('4096');
   await expect(writing.getByLabel('上下文上限 tokens', { exact: true })).toHaveValue('64000');
   await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('1');
@@ -1607,19 +1657,24 @@ test('三任务使用同一模型时参数互不影响，切换恢复且清空�
   await expect(writing.getByLabel(/^返回方式/)).toHaveValue('false');
   await writing.getByLabel(/^温度（temperature）/).fill('0.6');
   await writing.getByLabel('单次最大输出 tokens', { exact: true }).fill('8192');
+  await selectModelTask(modal, '摘要压缩');
+  await openModelParameters(planning);
   await expect(planning.getByLabel(/^温度（temperature）/)).toHaveValue('1');
   await expect(planning.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('4096');
-  await expect(extraction.getByLabel(/^温度（temperature）/)).toHaveValue('1');
   await planning.getByLabel(/^温度（temperature）/).fill('0.3');
   await planning.getByLabel('单次最大输出 tokens', { exact: true }).fill('2048');
   await planning.getByLabel(/^思考等级（OpenAI）/).selectOption('low');
+  await selectModelTask(modal, '资料提取');
+  await openModelParameters(extraction);
   await expect(extraction.getByLabel(/^温度（temperature）/)).toHaveValue('1');
   await expect(extraction.getByLabel(/^思考等级（OpenAI）/)).toHaveValue('');
   await extraction.getByLabel(/^温度（temperature）/).fill('0.2');
   await extraction.getByLabel('单次最大输出 tokens', { exact: true }).fill('16384');
   await extraction.getByLabel(/^思考等级（OpenAI）/).selectOption('high');
+  await selectModelTask(modal, '摘要压缩');
   await expect(planning.getByLabel(/^温度（temperature）/)).toHaveValue('0.3');
   await expect(planning.getByLabel(/^思考等级（OpenAI）/)).toHaveValue('low');
+  await selectModelTask(modal, '正文写作');
   await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('0.6');
   await writing.getByLabel('正文写作模型名称', { exact: true }).fill('custom-new-model');
   await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('1');
@@ -1657,9 +1712,14 @@ test('三任务使用同一模型时参数互不影响，切换恢复且清空�
   await writing.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
   await expect(writing.getByLabel(/^Top P/)).toHaveValue('');
   await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('0.6');
+  await selectModelTask(modal, '摘要压缩');
+  await openModelParameters(planning);
   await expect(planning.getByLabel(/^温度（temperature）/)).toHaveValue('0.3');
+  await selectModelTask(modal, '资料提取');
+  await openModelParameters(extraction);
   await expect(extraction.getByLabel(/^温度（temperature）/)).toHaveValue('0.2');
   for (const [task, role, temperature, maxTokens, effort] of [[planning, 'planning', 0.3, 2048, 'low'], [extraction, 'extraction', 0.2, 16384, 'high']] as const) {
+    await selectModelTask(modal, role === 'planning' ? '摘要压缩' : '资料提取');
     const testing = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/settings/test');
     await task.getByRole('button', { name: role === 'planning' ? '摘要压缩保存并测试连接' : '资料提取保存并测试连接', exact: true }).click();
     const response = await testing; const captured = await response.json();
@@ -1667,11 +1727,14 @@ test('三任务使用同一模型时参数互不影响，切换恢复且清空�
     expect(captured.ok).toBe(true);
     expect(JSON.parse(captured.capture.request.body)).toMatchObject({ model: 'e2e-fixture', temperature, max_tokens: maxTokens, reasoning_effort: effort });
   }
+  await selectModelTask(modal, '摘要压缩');
   await planning.getByRole('button', { name: '恢复通用默认值', exact: true }).click();
   await expect(planning.getByLabel(/^温度（temperature）/)).toHaveValue('1');
   await expect(planning.getByLabel(/^思考等级（OpenAI）/)).toHaveValue('');
+  await selectModelTask(modal, '资料提取');
   await expect(extraction.getByLabel(/^温度（temperature）/)).toHaveValue('0.2');
   await expect(extraction.getByLabel(/^思考等级（OpenAI）/)).toHaveValue('high');
+  await selectModelTask(modal, '正文写作');
   await expect(writing.getByLabel(/^温度（temperature）/)).toHaveValue('0.6');
   await page.setViewportSize({ width: 390, height: 844 });
   await writing.getByLabel(/^温度（temperature）/).scrollIntoViewIfNeeded();
@@ -1702,6 +1765,7 @@ test('统一上下文限制保留 64000 输出，不再显示或发送任务累�
   const modal = page.getByTestId('settings-page');
   await modal.getByRole('button', { name: '任务模型', exact: true }).click();
   await expect(modal.getByLabel('每项任务用量上限（tokens）', { exact: true })).toHaveCount(0);
+  await selectModelTask(modal, '资料提取');
   const extraction = modal.getByRole('region', { name: '资料提取模型设置', exact: true });
   await extraction.locator('summary').filter({ hasText: '生成参数与思考设置' }).click();
   await extraction.getByLabel('单次最大输出 tokens', { exact: true }).fill('64000');
@@ -2264,7 +2328,7 @@ test('四类任务和通用预设可用，规划入口移除，世界设定与�
   try {
     await page.request.put('/api/settings',{data:{...previous,promptTemplates:defaultPromptTemplates()}});
     await page.goto('/');await page.getByRole('button',{name:'设置',exact:true}).click();const settings=page.getByTestId('settings-page');
-    await settings.getByRole('button',{name:'任务模型',exact:true}).click();await expect(settings.getByLabel('启用剧情规划',{exact:true})).toHaveCount(0);await expect(settings.getByRole('region',{name:'剧情规划模型设置',exact:true})).toHaveCount(0);await expect(settings.getByRole('region',{name:'摘要压缩模型设置',exact:true})).toBeVisible();
+    await settings.getByRole('button',{name:'任务模型',exact:true}).click();await selectModelTask(settings, '摘要压缩');await expect(settings.getByLabel('启用剧情规划',{exact:true})).toHaveCount(0);await expect(settings.getByRole('region',{name:'剧情规划模型设置',exact:true})).toHaveCount(0);await expect(settings.getByRole('region',{name:'摘要压缩模型设置',exact:true})).toBeVisible();
     await settings.getByRole('button',{name:'提示词编排',exact:true}).click();const panel=settings.getByTestId('prompt-templates-panel');
     await expect(panel.getByRole('tab',{name:'剧情规划',exact:true})).toHaveCount(0);await expect(panel.getByRole('tab')).toHaveCount(5);
     await expect(panel.getByLabel('提示词块 1 内容',{exact:true})).toHaveValue(/# 小说正文写作/);await expect(panel.getByLabel('提示词块 1 内容',{exact:true})).not.toHaveValue(/日式视觉小说/);
@@ -3289,6 +3353,7 @@ for (const mode of ['structured', 'tool'] as const) test(`资料提取 ${mode} �
     await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
     const settings = page.getByTestId('settings-page');
     await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await selectModelTask(settings, '资料提取');
     const selector = settings.getByRole('combobox', { name: '资料提取输出模式', exact: true });
     await expect(selector).toHaveValue('prompt'); await selector.selectOption(mode);
     await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
@@ -3305,6 +3370,7 @@ for (const mode of ['structured', 'tool'] as const) test(`资料提取 ${mode} �
     await settings.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(settings.getByRole('status')).toContainText('设置已保存');
     await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click(); await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await selectModelTask(settings, '资料提取');
     await expect(selector).toHaveValue(mode);
     await selector.scrollIntoViewIfNeeded(); await page.screenshot({ path: testInfo.outputPath('extraction-output-desktop.png'), animations: 'disabled', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 }); await selector.scrollIntoViewIfNeeded();
@@ -3341,6 +3407,7 @@ test('任务控制设置保留数字草稿，校验重试范围并保存秒到�
     await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
     const settings = page.getByTestId('settings-page');
     await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await selectModelTask(settings, '资料提取');
     const extraction = settings.getByRole('region', { name: '资料提取模型设置', exact: true });
     await expect(extraction.getByRole('checkbox', { name: '资料提取自动重试', exact: true })).not.toBeChecked();
     await expect(extraction.getByRole('spinbutton', { name: '资料提取最多重试次数', exact: true })).toBeHidden();
@@ -3352,10 +3419,13 @@ test('任务控制设置保留数字草稿，校验重试范围并保存秒到�
     await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
     await settings.getByRole('button', { name: '任务模型', exact: true }).click();
     await expect(retries).toHaveValue('11'); await expect(delay).toHaveValue('');
+    await selectModelTask(settings, '正文写作');
     let saves = 0;
     page.on('request', request => { if (request.method() === 'PUT' && new URL(request.url()).pathname === '/api/settings') saves++; });
     await settings.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(settings.locator('.settings-feedback')).toContainText('数值不能大于 10'); expect(saves).toBe(0);
+    await expect(settings.getByRole('tab', { name: '资料提取', selected: true, exact: true })).toBeVisible();
+    await expect(retries).toBeFocused();
     await retries.fill('3'); await settings.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(settings.locator('.settings-feedback')).toContainText('请填写此项'); expect(saves).toBe(0);
     await delay.fill('1.25');
@@ -3372,6 +3442,7 @@ test('任务控制设置保留数字草稿，校验重试范围并保存秒到�
     await settings.getByRole('button', { name: '返回作品', exact: true }).click();
     await page.getByRole('button', { name: '设置', exact: true }).click();
     await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+    await selectModelTask(settings, '资料提取');
     await expect(retries).toHaveValue('3'); await expect(delay).toHaveValue('1.25');
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });

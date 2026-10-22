@@ -290,6 +290,13 @@
 .settings-page .provider-card>.row>.eyebrow{overflow-wrap:anywhere}
 .settings-page .settings-task-card{padding:20px;gap:16px}
 .settings-page .settings-task-grid{gap:20px}
+.settings-model-tabs{position:sticky;top:var(--settings-header-height);z-index:3;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;padding:10px 0;border-bottom:1px solid var(--line);background:var(--paper)}
+.settings-model-tabs>button{min-height:42px;padding:10px 8px;border-radius:7px;font-size:12px;color:#788d72}
+.settings-model-tabs>button:hover:not(:disabled){background:#eef3e8;color:#476735}
+.settings-model-tabs>button[aria-selected=true]{background:#e7eedf;color:#345b40;font-weight:600}
+.settings-model-tabs>button:focus-visible{outline:2px solid #476735;outline-offset:2px}
+.settings-model-panel{min-width:0}
+.settings-model-panel[hidden]{display:none}
 .settings-page .prompt-templates-embedded{border:0;background:transparent;border-radius:0;overflow:visible}
 .settings-page .prompt-templates-embedded>.prompt-templates-body{padding:0}
 .settings-feedback:empty{display:none}
