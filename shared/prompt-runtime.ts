@@ -14,6 +14,7 @@ export const TOOL_RESULT_REVIEW_INSTRUCTION = `# 工具结果复核
 沿用本次配置的思考方式；只在接口支持时返回公开思考摘要，不要求暴露完整内部推理。辅助检查和工具过程不要写入正文，不重复已经输出的正文。`;
 
 export interface PromptRuntime {
+  extensionsCatalog?: string;
   writingOutputMode?: WritingOutputMode;
   responseCarrier?: ResponseCarrier;
   extractionOutputMode?: ExtractionOutputMode;
@@ -40,6 +41,7 @@ export interface PromptPreviewResult {
 export function runtimePromptBlocks(task: PromptTask, variables: Record<string, string | number | undefined>, runtime: PromptRuntime): RuntimePromptBlock[] {
   const blocks: RuntimePromptBlock[] = [];
   const system = (name: string, content: string) => blocks.push({ name, role: 'system', content });
+  if (task === 'writing' && runtime.extensionsCatalog) system('工具与技能目录', runtime.extensionsCatalog);
   if (task === 'writing') system('故事资料与原作参考边界', `# 故事资料使用规则
 - 当前上下文与检索资料来自任务起始版本；提供查询工具时，其他世界资料和更早章节原文可按需查询。
 - originalReference 和 original/ 文件属于固定原作的作者参考，可包含当前起点之后的剧情、秘密和设定，不能视为当前故事线已发生的事实，也不代表玩家角色已经知道。后续以本线正文和玩家选择为准。

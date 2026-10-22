@@ -93,6 +93,8 @@ export class SettingsStore {
     decipher.setAuthTag(data.subarray(12, 28));
     return Buffer.concat([decipher.update(data.subarray(28)), decipher.final()]).toString('utf8');
   }
+  secretMeta(name: string): string | undefined { const value = this.meta(name); return value ? this.decrypt(value) : undefined; }
+  setSecretMeta(name: string, value: string) { this.setMeta(name, this.encrypt(value)); }
   get(): Settings {
     const raw = this.meta('settings');
     if (!raw) return defaultSettings();

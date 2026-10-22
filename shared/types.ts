@@ -112,6 +112,7 @@ export interface ModelTool { name: string; description: string; parameters: Reco
 export interface ModelToolCall { id: string; name: string; arguments: unknown }
 /** Wire history is preserved verbatim so tool calls and signed model content survive a user decision. */
 export interface ModelToolContinuation {
+  extensionLoads?: Record<string, string>;
   protocol: ProviderProtocol; model: string; body: Record<string, unknown>; text: string;
   inputTokens: number; outputTokens: number; round: number; callCount: number; usageEstimated?: boolean;
   writingOutputMode?: WritingOutputMode;
@@ -122,7 +123,7 @@ export interface ModelToolContinuation {
 }
 /** A submission tool only returns data; it is never executed or continued. */
 export interface ModelStructuredOutput { mode: 'json_schema' | 'tool'; name: string; description: string; schema: Record<string, unknown> }
-export interface ModelRequest { system: string; prompt: string; messages?: PromptMessage[]; writingOutputMode?: WritingOutputMode; responseCarrier?: ResponseCarrier; messageTransform?: 'reborn'; presetMessageCount?: number; textFilter?: PromptTextFilter; structuredOutput?: ModelStructuredOutput; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
+export interface ModelRequest { extensionLoads?: Record<string, string>; system: string; prompt: string; messages?: PromptMessage[]; writingOutputMode?: WritingOutputMode; responseCarrier?: ResponseCarrier; messageTransform?: 'reborn'; presetMessageCount?: number; textFilter?: PromptTextFilter; structuredOutput?: ModelStructuredOutput; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
 export type OutputStage = 'planning' | 'compression' | 'writing' | 'chapter-title' | 'extraction';
 export interface OutputIssue { path: string; message: string; paragraph?: number; quote?: string; sourceText?: string }
 export interface ModelOutputRecord extends CapturedModelResponse {

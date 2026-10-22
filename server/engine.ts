@@ -14,6 +14,7 @@ import { extractionContext, normalizeExtraction, splitExtractionBlocks as splitB
 import { buildWritingContext } from './writing-context.js';
 import { chapterNamingRequest, parseGeneratedChapterTitle } from './chapter-naming.js';
 import type { ImageService } from './images.js';
+import type { ExtensionService } from './extensions.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
 import { imageModelCapabilities } from '../shared/image-capabilities.js';
 import { imageParametersSchema } from './image-store.js';
@@ -59,7 +60,7 @@ export class StoryEngine {
   private closed = false;
   private chargedExtractionErrors = new WeakSet<ModelOutputError>();
   private nonRetryableExtractionErrors = new WeakSet<Error>();
-  constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'> & Partial<Pick<ImageService, 'generateDuringWriting' | 'writingProgress'>>) {}
+  constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'> & Partial<Pick<ImageService, 'generateDuringWriting' | 'writingProgress'>>, private extensions?: ExtensionService) {}
   start() {
     if (this.started) return; this.started = true;
     for (const job of this.jobsInternal()) if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary' && ['queued', 'running', 'paused', 'failed'].includes(job.status)) {
@@ -173,7 +174,7 @@ export class StoryEngine {
     return [{ path: '$', message: error instanceof Error ? error.message : '输出未通过校验' }];
   }
   private failOutput(output: ModelOutputRecord, error: unknown) { if (this.store.outputs.get(output.id)?.status !== 'applied') this.store.outputs.update(output.id, { status: 'invalid', error: this.redact(error instanceof Error ? error.message : '输出未通过校验，可在作者模式中修正'), issues: this.issues(error).map(issue => ({ ...issue, path: this.redact(issue.path), message: this.redact(issue.message), ...(issue.quote !== undefined ? { quote: this.redact(issue.quote) } : {}), ...(issue.sourceText !== undefined ? { sourceText: this.redact(issue.sourceText) } : {}) })) }); }
-  private redact(text: string): string { return redactModelPayload(text, this.getSettings().providers.flatMap(config => config.apiKey ? [config.apiKey] : [])); }
+  private redact(text: string): string { return redactModelPayload(text, [...this.getSettings().providers.flatMap(config => config.apiKey ? [config.apiKey] : []), ...(this.extensions?.secrets() ?? [])]); }
   importOutput(jobId: string, text: string): ModelOutputRecord {
     const job = this.get(jobId); if (job.payload.purpose !== 'compress-summary' && (job.kind === 'plan' || job.payload.generatedChapterId && job.payload.pendingStage === 'planning')) throw new HttpError('剧情规划功能已移除，历史输出仅供查看', 410); if (!['failed', 'paused'].includes(job.status) || this.controllers.has(job.id)) throw new HttpError('仅可为已暂停或失败且请求已结束的任务导入输出', 409);
     this.store.assertVersion(job.branchId, job.baseRevisionId);
@@ -480,13 +481,15 @@ export class StoryEngine {
   /** Read-only preview: uses actual prompt and tool builders, never executes a tool or reads a work. */
   previewPrompt(input: PromptPreviewInput): PromptPreviewResult {
     const { task, templates, variables, runtime, protocol } = input;
-    const compiled = compileTaskPrompt(templates, task, variables, runtime);
+    const extensions = task === 'writing' ? this.extensions?.session() : undefined;
+    const compiled = compileTaskPrompt(templates, task, variables, { ...runtime, extensionsCatalog: extensions?.catalog });
     const tools: ModelTool[] = [];
     if (task === 'writing') tools.push(...buildWritingContext({ state: emptyState(), chapterText: () => '' }).tools);
     if (task === 'writing') {
       tools.push(...this.imageTools('', runtime.illustrations ?? { portrait: false, cg: false }).tools);
       if (variables.mode === 'rpg' && runtime.rpg) tools.push(...this.rpgTools('').tools);
     }
+    if (extensions) tools.push(...extensions.tools);
     const request: ModelRequest = { ...compiled, tools, ...(task === 'writing' && variables.mode === 'rpg' ? { chapterBudget: { targetWords: normalizeChapterWords(Number(variables.maxWords)) } } : {}) };
     const body = buildRequestSnapshot({ id: 'preview', name: '提示词预览', protocol, baseUrl: 'https://preview.invalid', model: 'preview-model', maxOutputTokens: 4096, contextTokens: 2000000 }, request).body;
     const native = JSON.parse(body);
@@ -821,6 +824,7 @@ export class StoryEngine {
         const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
         const selected = original ? input.selection ? String(original.text).slice(input.selection.start, input.selection.end) : String(original.text) : undefined;
         const continuation = input.mode === 'rpg' ? job.payload.rpgContinuation as ModelToolContinuation | undefined : undefined;
+        const extensions = this.extensions?.session(controller.signal, continuation?.extensionLoads);
         if (!continuation) {
           this.store.clearWritingActivities(job.id);
           this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, '');
@@ -834,9 +838,9 @@ export class StoryEngine {
           ...this.promptVariables(job, state), ...context.variables, context: context.text, mode: input.mode,
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
           writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : state.chapters.length ? '从 continuationAnchor 指定的最新正文结尾接着写下一章，直接推进结尾之后的事件，不按标题编号寻找或重写旧章节。' : '从作者设定开始写新的正文。',
-        }, { rpg: state.rpg, illustrations: { portrait: illustrations.tools.some(tool => tool.name === 'generate_character_portrait'), cg: illustrations.tools.some(tool => tool.name === 'generate_scene_cg') }, chapterAnswer: job.payload.rpgChapterAnswer ? JSON.stringify(job.payload.rpgChapterAnswer) : undefined });
+        }, { extensionsCatalog: extensions?.catalog, rpg: state.rpg, illustrations: { portrait: illustrations.tools.some(tool => tool.name === 'generate_character_portrait'), cg: illustrations.tools.some(tool => tool.name === 'generate_scene_cg') }, chapterAnswer: job.payload.rpgChapterAnswer ? JSON.stringify(job.payload.rpgChapterAnswer) : undefined });
         const retrievalTools = aliases ? context.tools.map(tool => ({ ...tool, execute: (args: Record<string, unknown>) => tool.execute({ ...args, ...(typeof args.id === 'string' ? { id: aliases[args.id] ?? args.id } : {}), ...(typeof args.chapterId === 'string' ? { chapterId: aliases[args.chapterId] ?? args.chapterId } : {}) }) })) : context.tools;
-        const tools = [...retrievalTools, ...illustrations.tools, ...rpg.tools];
+        const tools = [...retrievalTools, ...illustrations.tools, ...rpg.tools, ...(extensions?.tools ?? [])];
         if (continuation) {
           const declared = (continuation.body.tools ?? []) as Record<string, any>[];
           const names = declared.flatMap(tool => tool.functionDeclarations ?? [tool.function ?? tool]).flatMap(tool => [tool.name ?? '', ...((tool.parameters ?? tool.parametersJsonSchema ?? tool.input_schema)?.properties?.toolCalls?.items?.properties?.name?.enum ?? [])]);
@@ -847,7 +851,7 @@ export class StoryEngine {
           if (continuation && previous && (previous.id !== provider.id || previous.protocol !== provider.protocol || previous.model !== provider.model || previous.baseUrl !== provider.baseUrl)) throw new HttpError('RPG 续接需要使用原供应商、协议、服务地址和模型，请恢复原配置后继续');
           job.payload.rpgProvider = { id: provider.id, protocol: provider.protocol, model: provider.model, baseUrl: provider.baseUrl }; this.save(job);
         }
-        const request = this.budget(job, provider, { ...prompt, signal: controller.signal, tools, onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event), ...(input.mode === 'rpg' ? { continuation, chapterBudget: { targetWords: normalizeChapterWords(input.maxWords) }, maxToolRounds: 24, onContinuation: (value: ModelToolContinuation) => { const fresh = this.live(jobId); fresh.payload.rpgContinuation = JSON.parse(this.redact(JSON.stringify(value))) as ModelToolContinuation; this.save(fresh); } } : {}) });
+        const request = this.budget(job, provider, { ...prompt, signal: controller.signal, tools, ...(extensions?.tools.length ? { maxToolRounds: 16, extensionLoads: extensions.loaded } : {}), onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event), ...(input.mode === 'rpg' ? { continuation, chapterBudget: { targetWords: normalizeChapterWords(input.maxWords) }, maxToolRounds: 24, onContinuation: (value: ModelToolContinuation) => { const fresh = this.live(jobId); fresh.payload.rpgContinuation = JSON.parse(this.redact(JSON.stringify(value))) as ModelToolContinuation; this.save(fresh); } } : {}) });
         const { result, output } = await this.requestCaptured(jobId, 'writing', request, req => this.models.generateText(provider, req), result => result.text);
         this.applyWriting(this.live(jobId), output, result.text, false);
         return;

@@ -1,0 +1,97 @@
+import { expect, test, type Page } from '@playwright/test';
+import { zipSync, strToU8 } from 'fflate';
+import { resolve } from 'node:path';
+
+test.describe.configure({ mode: 'serial' });
+async function open(page: Page) {
+  await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+  await page.getByRole('button', { name: '工具与技能', exact: true }).click();
+  const panel = page.getByRole('form', { name: '工具与技能设置' }); await expect(panel).toBeVisible(); return panel;
+}
+test.beforeEach(async ({ page }) => {
+  expect((await page.request.post('/api/auth/login', { data: { password: 'browser-test-password-123' } })).ok()).toBeTruthy();
+  const config = await (await page.request.get('/api/extensions')).json();
+  expect((await page.request.put('/api/extensions', { data: { ...config, scripts: [], mcpServers: [], skills: [] } })).ok()).toBeTruthy();
+});
+test('工具与技能：脚本草稿跨分类保留、参数校验、保存和真实试运行', async ({ page }, testInfo) => {
+  const panel = await open(page);
+  await panel.getByRole('button', { name: '添加脚本工具' }).click();
+  await panel.getByLabel('脚本名称', { exact: true }).fill('我的字数统计');
+  await panel.getByLabel('启用脚本 我的字数统计', { exact: true }).check();
+  await panel.getByLabel('参数 JSON Schema', { exact: true }).fill('{invalid');
+  await page.getByRole('button', { name: '任务模型', exact: true }).click();
+  await page.getByRole('button', { name: '工具与技能', exact: true }).click();
+  await expect(panel.getByLabel('脚本名称', { exact: true })).toHaveValue('我的字数统计');
+  await expect(panel.getByLabel('参数 JSON Schema', { exact: true })).toHaveValue('{invalid');
+  await panel.getByRole('button', { name: '保存工具与技能', exact: true }).click();
+  await expect(panel).toContainText('不是有效 JSON');
+  expect((await (await page.request.get('/api/extensions')).json()).scripts).toHaveLength(0);
+  await panel.getByLabel('参数 JSON Schema', { exact: true }).fill(JSON.stringify({ type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false }));
+  await panel.getByRole('button', { name: '保存工具与技能', exact: true }).click();
+  await expect(panel).toContainText('工具与技能已保存');
+  await panel.locator('summary').filter({ hasText: '测试脚本' }).click();
+  await panel.getByLabel('测试参数 JSON').fill('{"text":"三 个 字"}');
+  await panel.getByRole('button', { name: '运行测试', exact: true }).click();
+  await expect(panel.getByLabel('脚本测试结果')).toContainText('"characters": 3');
+  expect((await page.locator('.settings-header').boundingBox())?.y).toBe(0);
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath('extensions-desktop.png'), animations: 'disabled' });
+  await page.getByRole('button', { name: '返回作品', exact: true }).click();
+  await open(page); await expect(panel).toContainText('我的字数统计');
+  await expect(panel.getByLabel('启用脚本 我的字数统计', { exact: true })).toBeChecked();
+  await expect(panel.getByLabel('JavaScript 代码')).not.toBeVisible();
+});
+test('工具与技能：技能 ZIP 导入默认停用、按需展开附件、移动端无横向溢出', async ({ page }, testInfo) => {
+  const panel = await open(page);
+  await panel.getByRole('tab', { name: /脚本工具/ }).focus(); await page.keyboard.press('End');
+  await expect(panel.getByRole('tab', { name: /技能/ })).toHaveAttribute('aria-selected', 'true');
+  const bytes = zipSync({ 'scene-check/SKILL.md': strToU8('---\nname: scene-check\ndescription: 检查场景衔接\n---\n按 references/check.md 核对时间和地点。'), 'scene-check/references/check.md': strToU8('这是按需读取的场景核验清单。') });
+  await panel.getByLabel('技能文件', { exact: true }).setInputFiles({ name: 'scene-check.zip', mimeType: 'application/zip', buffer: Buffer.from(bytes) });
+  await expect(panel).toContainText('技能已导入草稿');
+  await expect(panel.getByLabel('启用技能 scene-check', { exact: true })).not.toBeChecked();
+  await expect(panel.getByText('这是按需读取的场景核验清单。', { exact: true })).not.toBeVisible();
+  await panel.locator('summary').filter({ hasText: 'references/check.md' }).click();
+  await expect(panel.getByText('这是按需读取的场景核验清单。', { exact: true })).toBeVisible();
+  await panel.getByLabel('启用技能 scene-check', { exact: true }).check();
+  await panel.getByRole('button', { name: '保存工具与技能', exact: true }).click(); await expect(panel).toContainText('工具与技能已保存');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole('button', { name: '返回作品', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect((await page.locator('.settings-header').boundingBox())?.y).toBe(0);
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath('extensions-mobile.png'), animations: 'disabled' });
+  const saved = await (await page.request.get('/api/extensions')).json(); expect(saved.skills[0]).toMatchObject({ enabled: true, name: 'scene-check' }); expect(saved.skills[0].files).toHaveLength(2);
+});
+test('工具与技能：MCP stdio 连接发现、凭据隐藏、目录折叠与停用', async ({ page }) => {
+  const panel = await open(page); await panel.getByRole('tab', { name: /MCP 服务/ }).click();
+  await panel.getByRole('button', { name: '添加 MCP 服务' }).click();
+  await panel.getByLabel('MCP 名称', { exact: true }).fill('本地测试 MCP');
+  await panel.getByLabel('MCP 连接方式', { exact: true }).selectOption('stdio');
+  await panel.getByLabel('MCP 命令', { exact: true }).fill(process.execPath);
+  await panel.getByLabel('MCP 命令参数 JSON', { exact: true }).fill(JSON.stringify([resolve('tests/fixtures/extension-mcp.mjs')]));
+  await panel.getByLabel('MCP 环境变量 JSON', { exact: true }).fill('{"MCP_FIXTURE_SECRET":"browser-fixture-secret"}');
+  await panel.getByLabel('启用 MCP 本地测试 MCP', { exact: true }).check();
+  await expect(panel.getByRole('button', { name: '连接并发现工具', exact: true })).toBeDisabled();
+  await panel.getByRole('button', { name: '保存工具与技能', exact: true }).click();
+  await expect(panel.getByRole('button', { name: '连接并发现工具', exact: true })).toBeEnabled();
+  await expect(panel.getByLabel('MCP 环境变量 JSON', { exact: true })).toHaveValue('{}');
+  await panel.getByRole('button', { name: '连接并发现工具', exact: true }).click();
+  await expect(panel).toContainText('连接成功，发现 1 个工具');
+  await panel.locator('summary').filter({ hasText: '已发现的工具' }).click();
+  await panel.locator('summary').filter({ hasText: /^echo$/ }).click(); await expect(panel).toContainText('回传测试文字');
+  await panel.getByLabel('启用 MCP 本地测试 MCP', { exact: true }).uncheck();
+  await panel.getByRole('button', { name: '保存工具与技能', exact: true }).click(); await expect(panel).toContainText('工具与技能已保存');
+  const result = await (await page.request.get('/api/extensions')).json(); expect(result.mcpServers[0]).toMatchObject({ enabled: false, hasSecrets: true, env: {}, tools: [{ name: 'echo' }] });
+});
+test('工具与技能：离开保护、导入失败保留草稿及并发保存冲突', async ({ page }) => {
+  const panel = await open(page); await panel.getByRole('button', { name: '添加脚本工具' }).click();
+  page.once('dialog', dialog => dialog.dismiss()); await page.getByRole('button', { name: '返回作品', exact: true }).click(); await expect(panel).toBeVisible();
+  await panel.getByRole('tab', { name: /技能/ }).click();
+  await panel.getByLabel('技能文件', { exact: true }).setInputFiles({ name: 'bad.md', mimeType: 'text/markdown', buffer: Buffer.from('不是技能文件') });
+  await expect(panel).toContainText('YAML');
+  await panel.getByRole('tab', { name: /脚本工具/ }).click(); await expect(panel.getByLabel('JavaScript 代码')).toContainText('return');
+  const current = await (await page.request.get('/api/extensions')).json();
+  expect((await page.request.put('/api/extensions', { data: current })).ok()).toBeTruthy();
+  await panel.getByRole('button', { name: '保存工具与技能', exact: true }).click(); await expect(panel).toContainText('已在其他页面修改');
+  await expect(panel.getByLabel('JavaScript 代码')).toContainText('return');
+});

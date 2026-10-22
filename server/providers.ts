@@ -713,7 +713,7 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
   const complete = (): ModelResult => ({ text: text.trim(), ...tokens, ...(usageEstimated ? { usageEstimated: true } : {}) });
   const chapterComplete = () => Boolean(request.chapterBudget && chapterBudgetReached(text, request.chapterBudget.targetWords));
   const checkpoint = async () => {
-    if (request.onContinuation) await request.onContinuation(structuredClone({ protocol: config.protocol, model: config.model, body, text, ...tokens, round, callCount, ...(request.writingOutputMode ? { writingOutputMode: request.writingOutputMode } : {}), ...(request.responseCarrier ? { responseCarrier: request.responseCarrier } : {}), ...(request.messageTransform ? { messageTransform: request.messageTransform } : {}), ...(request.textFilter ? { textFilter: request.textFilter } : {}), ...(usageEstimated ? { usageEstimated: true } : {}), ...(pending ? { pending } : {}) } satisfies ModelToolContinuation));
+    if (request.onContinuation) await request.onContinuation(structuredClone({ protocol: config.protocol, model: config.model, body, text, ...tokens, round, callCount, ...(request.extensionLoads ? { extensionLoads: request.extensionLoads } : {}), ...(request.writingOutputMode ? { writingOutputMode: request.writingOutputMode } : {}), ...(request.responseCarrier ? { responseCarrier: request.responseCarrier } : {}), ...(request.messageTransform ? { messageTransform: request.messageTransform } : {}), ...(request.textFilter ? { textFilter: request.textFilter } : {}), ...(usageEstimated ? { usageEstimated: true } : {}), ...(pending ? { pending } : {}) } satisfies ModelToolContinuation));
   };
   try {
     while (round < maxRounds || pending) {

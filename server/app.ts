@@ -9,6 +9,7 @@ import { join, resolve, basename, dirname } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { Store, rpgSetupSchema } from './store.js';
 import { StoryEngine } from './engine.js';
+import { ExtensionService, registerExtensionRoutes } from './extensions.js';
 import { ImageService } from './images.js';
 import { ImagePreviews } from './image-previews.js';
 import { validateImageParameters } from './image-provider.js';
@@ -84,7 +85,8 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     const oldSetupPath = join(dataDir, '.setup-token'); if (existsSync(oldSetupPath)) unlinkSync(oldSetupPath);
   } catch (error) { store.close(); throw error; }
   const images = new ImageService(store, () => settings.get());
-  const engine = new StoryEngine(store, () => settings.get(), undefined, images);
+  const extensions = new ExtensionService(settings, dataDir);
+  const engine = new StoryEngine(store, () => settings.get(), undefined, images, extensions);
   store.db.exec(`CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, filename TEXT NOT NULL, format TEXT NOT NULL, chapter_count INTEGER NOT NULL, created_at TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, preview TEXT NOT NULL, storage_name TEXT NOT NULL)`);
   const app = Fastify({ logger: options.logger ? { serializers: { req: safeRequestLog }, redact: ['req.headers.cookie', 'req.headers.authorization'] } : false,
     bodyLimit: 2 * 1024 * 1024, requestTimeout: 120_000, keepAliveTimeout: 15_000, maxRequestsPerSocket: 100, trustProxy: config.trustedProxies });
@@ -158,6 +160,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   });
   app.get('/api/health', async () => ({ ok: true }));
   registerAuthRoutes(app, { settings, store, secureCookies: config.secureCookies, loginAttempts: options.rateLimits?.login });
+  registerExtensionRoutes(app, extensions);
   const param = (req: any, key = 'id'): string => z.string().min(1).max(100).parse(req.params[key]);
   const base = (body: unknown) => z.object({ baseRevisionId: revision }).parse(body).baseRevisionId;
   const source = (id: string): SourceRow => (store.db.prepare('SELECT * FROM sources WHERE id=?').get(id) as SourceRow | undefined) || fail('找不到原文文件。', 404);
@@ -460,7 +463,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     await app.register(staticFiles, { root: staticDir, prefix: '/' });
     app.setNotFoundHandler((request, reply) => request.url.startsWith('/api/') ? reply.status(404).send({ error: '接口不存在。' }) : reply.sendFile('index.html'));
   }
-  app.addHook('onClose', async () => { await Promise.all([engine.close(), images.close()]); store.close(); });
+  app.addHook('onClose', async () => { extensions.close(); await Promise.all([engine.close(), images.close()]); store.close(); });
   if (options.startEngine !== false) engine.start();
-  return { app, store, engine, images, settings, dataDir };
+  return { app, store, engine, images, settings, extensions, dataDir };
 }

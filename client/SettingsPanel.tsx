@@ -12,6 +12,7 @@ import { normalizeImageSettings } from '../shared/image-settings';
 import { imageModelCapabilities } from '../shared/image-capabilities';
 import { normalizeTaskSettings } from '../shared/task-settings';
 import { AccountSecurity } from './AccountSecurity';
+import { ExtensionsPanel } from './ExtensionsPanel';
 
 const protocols: Record<ProviderProtocol, { name: string; url: string }> = {
   'openai-chat': { name: 'OpenAI · Chat Completions', url: 'https://api.openai.com/v1' },
@@ -33,6 +34,7 @@ const sections = [
   { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '切换下方任务，分别选择模型和设置参数。切换保留未保存的修改，点击“保存设置”后统一生效。' },
   { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '管理通用预设和四类任务提示词、调整消息顺序，并预览编排后的内容。' },
   { id: 'images', label: '生图与自动插画', icon: Image, description: '选择图片模型，设置作品画风、新人物立绘与场景 CG 的自动生成。' },
+  { id: 'extensions', label: '工具与技能', icon: PlugZap, description: '管理脚本、MCP 与技能，按需向模型披露。' },
   { id: 'account', label: '账号安全', icon: ShieldCheck, description: '修改登录密码，管理其他设备的登录。' },
 ] as const;
 type SettingsSection = typeof sections[number]['id'];
@@ -80,6 +82,9 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   const [section, setSection] = useState<SettingsSection>('providers');
   const [modelRole, setModelRole] = useState<ModelRole>('writing');
   const [accountBusy, setAccountBusy] = useState(false);
+  const [extensionsBusy, setExtensionsBusy] = useState(false);
+  const [extensionsDirty, setExtensionsDirty] = useState(false);
+  const [extensionsVisited, setExtensionsVisited] = useState(false);
   const [savedSignature, setSavedSignature] = useState('');
   const [inputDraftInvalid, setInputDraftInvalid] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -100,14 +105,14 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
     return () => controller.abort();
   }, [loadAttempt]);
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty && !extensionsDirty) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
-  }, [dirty]);
+  }, [dirty, extensionsDirty]);
   useEffect(() => () => { for (const request of requests.current.values()) { clearTimeout(request.timer); request.controller.abort(); } }, []);
 
-  function back() { if (!busy && !accountBusy && (!dirty || window.confirm('设置尚未保存，返回作品会放弃这些修改。确定返回吗？'))) onBack(); }
+  function back() { if (!busy && !accountBusy && !extensionsBusy && ((!dirty && !extensionsDirty) || window.confirm('设置尚未保存，返回作品会放弃这些修改。确定返回吗？'))) onBack(); }
   function showIssue(target: SettingsSection, text: string, field?: HTMLElement, task?: ModelRole) {
     setSection(target); setMessage(''); setError(text);
     const issueRole = task || roles.find(role => role.role === field?.closest('[data-model-role]')?.getAttribute('data-model-role'))?.role;
@@ -236,12 +241,12 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   }
   const tasks = normalizeTaskSettings(settings?.taskSettings);
   return <main className="settings-page" data-testid="settings-page" aria-label="设置页面">
-    <header className="settings-header"><Brand /><button type="button" className="text-button" disabled={busy || accountBusy} onClick={back}><ArrowLeft size={16} />返回作品</button></header>
+    <header className="settings-header"><Brand /><button type="button" className="text-button" disabled={busy || accountBusy || extensionsBusy} onClick={back}><ArrowLeft size={16} />返回作品</button></header>
     <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>设置</h1><p>配置模型服务、任务参数与提示词，管理工作台的账号安全。</p></div>
     <div className="settings-layout">
-      <nav className="settings-navigation" aria-label="设置分类">{sections.map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || accountBusy || !settings} onClick={() => { setSection(item.id); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">模型与创作设置的修改可跨分类保留，保存后统一生效。账号安全操作单独生效。</p></nav>
+      <nav className="settings-navigation" aria-label="设置分类">{sections.map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || accountBusy || extensionsBusy || !settings} onClick={() => { setSection(item.id); if (item.id === 'extensions') setExtensionsVisited(true); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">修改可跨分类保留。模型与创作设置统一保存；工具与技能单独保存，账号安全操作单独生效。</p></nav>
       <div className="settings-content">
-        {!settings ? <section className="settings-loading" aria-label="设置加载状态">{loading ? <Spinner /> : <><Notice error={error} /><button type="button" className="button secondary" onClick={() => setLoadAttempt(value => value + 1)}><RefreshCw size={15} />重新加载设置</button></>}</section> : <form ref={form} className="settings-form form-stack" hidden={section === 'account'} inert={section === 'account'} noValidate onChange={() => setInputDraftInvalid(!!invalidField())} onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
+        {!settings ? <section className="settings-loading" aria-label="设置加载状态">{loading ? <Spinner /> : <><Notice error={error} /><button type="button" className="button secondary" onClick={() => setLoadAttempt(value => value + 1)}><RefreshCw size={15} />重新加载设置</button></>}</section> : <form ref={form} className="settings-form form-stack" hidden={section === 'account' || section === 'extensions'} inert={section === 'account' || section === 'extensions'} noValidate onChange={() => setInputDraftInvalid(!!invalidField())} onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
     <section data-settings-section="providers" hidden={section !== 'providers'} aria-label="供应商连接设置">
     <div className="settings-section-heading"><h2>供应商连接</h2><p>{sections[0].description}</p></div>
     <fieldset className="settings-section-fields form-stack" disabled={busy}>
@@ -307,6 +312,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
     <footer className="settings-save-footer"><p className="hint">{dirty ? '有未保存的修改。保存会同时应用模型与创作设置。' : '模型与创作设置共用一份配置，保存后统一生效。'}</p><button type="submit" className="button primary" disabled={busy}><Save size={16} />{busy ? '正在处理…' : '保存设置'}</button></footer>
   </form>}
         {settings && section === 'account' && <AccountSecurity onBusyChange={setAccountBusy} />}
+        {settings && extensionsVisited && <div hidden={section !== 'extensions'} inert={section !== 'extensions'}><ExtensionsPanel onDirtyChange={setExtensionsDirty} onBusyChange={setExtensionsBusy} /></div>}
       </div>
     </div>
   </main>;
