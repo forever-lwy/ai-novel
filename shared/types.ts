@@ -89,6 +89,11 @@ export interface TaskSettings {
   planning?: { enabled: boolean; mode: 'separate' | 'tool' };
 }
 export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings; taskSettings?: TaskSettings }
+/** Missing groups inherit the current global settings; provider connections are always global. */
+export interface ProjectModelSettings { providerId: string; model: string; modelParameters: ModelParameterProfile[]; extraction?: TaskSettings['extraction'] }
+export interface ProjectSettingsOverrides { tasks?: Partial<Record<ModelRole, ProjectModelSettings>>; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings }
+export interface ProjectSettingsRecord { revision: string; overrides: ProjectSettingsOverrides }
+export interface ProjectSettingsView extends ProjectSettingsRecord { global: Settings; effective: Settings }
 export type JobKind = 'import' | 'extract' | 'generate' | 'plan';
 export type JobStatus = 'queued' | 'running' | 'paused' | 'failed' | 'completed' | 'cancelled' | 'stale';
 export interface Job { id: string; projectId: string; branchId: string; kind: JobKind; status: JobStatus; baseRevisionId: string; progress: number; total: number; message: string; error?: string; inputTokens: number; outputTokens: number; usageEstimated?: boolean; createdAt: string; updatedAt: string; payload: Record<string, unknown>; generatedChapterId?: string; chapterStartChoiceId?: string; title?: string; purpose?: 'compress-summary'; generationInput?: Pick<GenerateInput, 'mode' | 'instruction' | 'maxWords' | 'title' | 'rpg'>; pendingChoice?: RpgChoice }

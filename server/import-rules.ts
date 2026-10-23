@@ -120,7 +120,7 @@ export function registerImportRuleRoutes(app: FastifyInstance, deps: Dependencie
       titles.push(line.title);
     }
     if (titles.length !== requested.size || new Set(titles).size < 2) throw new HttpError('请从原文选择至少两个不同的有效章节名。');
-    const settings = deps.settings.get();
+    const settings = deps.settings.get(deps.sourcePublic(source).projectId);
     const role = (['extraction', 'writing', 'planning'] as const).find(role => settings[`${role}ProviderId`] && settings[`${role}Model`]);
     const connection = role && settings.providers.find(value => value.id === settings[`${role}ProviderId`]);
     if (!role || !connection) throw new HttpError('请先在设置里配置资料提取或正文写作模型，再生成分章规则。');

@@ -273,6 +273,13 @@
 .settings-page-heading{margin:36px 0 30px}
 .settings-page-heading h1{font-family:"Songti SC","SimSun",serif;font-size:34px;font-weight:400;color:var(--ink);margin:13px 0 10px;outline:none}
 .settings-page-heading>p{font-size:13px;color:var(--muted);margin:0;line-height:1.8}
+.settings-scope{display:flex;gap:6px;margin-top:20px;flex-wrap:wrap}
+.settings-scope>button{padding:10px 20px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--muted);cursor:pointer}
+.settings-scope>button[aria-pressed="true"]{color:var(--ink);border-color:var(--green);background:#edf3eb}
+.settings-inheritance{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:14px 16px;margin-bottom:18px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
+.settings-inheritance strong{font-size:13px;color:var(--ink)}
+.settings-inheritance .hint{margin:5px 0 0}
+.settings-page-heading h1{overflow-wrap:anywhere}
 .settings-layout{display:grid;grid-template-columns:205px minmax(0,1fr);gap:30px;align-items:start}
 .settings-navigation{position:sticky;top:calc(var(--settings-header-height) + 24px);display:flex;flex-direction:column;gap:7px;min-width:0}
 .settings-navigation>button{display:flex;align-items:center;gap:10px;padding:14px 15px;border-radius:8px;text-align:left;font-size:13px;color:#788d72;min-width:0}

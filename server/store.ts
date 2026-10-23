@@ -1,3 +1,5 @@
+import { readProjectSettings, saveProjectSettings } from './project-settings.js';
+import { parseProjectSettingsOverrides } from './settings-schema.js';
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -74,7 +76,7 @@ const sourceReferenceSchema = z.object({ branchId: z.string().min(1), revisionId
 const stateSchema = z.object({ sourceReference: sourceReferenceSchema.optional(), rpg: rpgSessionSchema.optional(), activeImageIds: z.array(z.string().min(1)).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
 const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
 const writingActivitySchema = z.object({ id: z.string().min(1), kind: z.enum(['thinking', 'tool']), text: z.string().optional(), thinkingSource: z.enum(['native', 'preset']).optional(), thinkingTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), name: z.string().optional(), arguments: z.record(z.string(), z.unknown()).optional(), result: z.unknown().optional(), status: z.enum(['running', 'completed', 'failed']), error: z.string().optional(), proseOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() });
-const backupSchema = z.object({ images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), forkChapterTitle: z.string().max(500).optional(), createdAt: z.string(), deletedAt: z.string().datetime().optional() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), restoredFromRevisionId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: z.unknown().optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1).max(RESTORE_MAX_REVISIONS), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
+const backupSchema = z.object({ projectSettings: z.unknown().optional(), images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), forkChapterTitle: z.string().max(500).optional(), createdAt: z.string(), deletedAt: z.string().datetime().optional() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), restoredFromRevisionId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: z.unknown().optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1).max(RESTORE_MAX_REVISIONS), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
 
 /** Decode each historical state once, sharing one cumulative expansion budget. */
 export function readBackupStates(entries: readonly { state?: unknown; snapshot?: string }[], overrides: Partial<RestoreLimits> = {}): StoryState[] {
@@ -127,6 +129,7 @@ export class Store {
     if (process.platform !== 'win32') chmodSync(join(dataDir, 'novel.sqlite'), 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS project_settings (project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, revision TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS branches (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS revisions (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, parent_id TEXT, data TEXT NOT NULL, state BLOB NOT NULL);
       CREATE INDEX IF NOT EXISTS revision_branch ON revisions(branch_id);
@@ -830,20 +833,23 @@ export class Store {
     const importChapters = this.db.prepare('SELECT c.job_id AS jobId,c.position,c.title,c.text FROM job_import_chapters c JOIN jobs j ON j.id=c.job_id WHERE j.project_id=? ORDER BY c.job_id,c.position').all(projectId);
     const writingDrafts = this.db.prepare('SELECT d.job_id AS jobId,d.text FROM job_writing_drafts d JOIN jobs j ON j.id=d.job_id WHERE j.project_id=?').all(projectId);
     const writingActivities = jobs.filter(job => job.kind === 'generate').map(job => ({ jobId: job.id, activities: this.listWritingActivities(job.id) })).filter(entry => entry.activities.length);
-    return { version: 1, project, branches, revisions, chapters, jobs, importChapters, writingDrafts, writingActivities, outputs: this.outputs.all(projectId), images: this.images.export(projectId) };
+    return { version: 1, project, projectSettings: readProjectSettings(this.db, projectId).overrides, branches, revisions, chapters, jobs, importChapters, writingDrafts, writingActivities, outputs: this.outputs.all(projectId), images: this.images.export(projectId) };
   }
   restoreProject(input: unknown, sourceIdMap: Record<string, string> = {}, onRestore?: (project: Project) => void): Project {
     if (input && typeof input === 'object' && Array.isArray((input as { revisions?: unknown }).revisions) && (input as { revisions: unknown[] }).revisions.length > RESTORE_MAX_REVISIONS) throw restoreCapacityError();
     validateBackupStructure(input);
     const parsed = backupSchema.safeParse(input); if (!parsed.success) throw new HttpError('作品备份格式不正确或缺少正文与世界资料字段');
     const data = parsed.data;
+    let projectSettings;
+    try { projectSettings = parseProjectSettingsOverrides(data.projectSettings === undefined ? {} : data.projectSettings); }
+    catch { throw new HttpError('备份中的作品设置无效'); }
     const states = readBackupStates(data.revisions);
     const map = new Map<string, string>(); const register = (value: string) => { if (value && !map.has(value)) map.set(value, id()); };
     register(data.project.id); for (const b of data.branches) register(b.id); for (const c of data.chapters) register(c.id); for (const job of data.jobs) register(job.id); for (const output of data.outputs) register(output.id); for (const asset of data.images) register(asset.image.id);
     for (let index = 0; index < data.revisions.length; index++) { register(data.revisions[index].revision.id); const state = states[index]; for (const e of state.entities) { register(e.id); for (const f of e.facts) register(f.id); } for (const relation of state.relations) register(relation.id); for (const f of state.foreshadows) register(f.id); }
     const remap = (value: unknown, key = ''): unknown => {
       // Process payloads are historical observations, like raw model responses. Only their owning job is remapped.
-      if (key === 'rpgContinuation') return clone(value);
+      if (key === 'rpgContinuation' || key === 'projectSettings') return clone(value);
       if (key === 'sourceIds' && Array.isArray(value)) return value.map(sourceId => {
         if (typeof sourceId !== 'string' || !Object.hasOwn(sourceIdMap, sourceId) || typeof sourceIdMap[sourceId] !== 'string' || !sourceIdMap[sourceId]) throw new HttpError('备份原作参考缺少原文件映射，请使用包含原文件的完整作品备份');
         return sourceIdMap[sourceId];
@@ -966,6 +972,7 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare('INSERT INTO projects VALUES(?,?)').run(restored.project.id, JSON.stringify(restored.project));
+      saveProjectSettings(this.db, restored.project.id, '0', projectSettings);
       for (const branch of restored.branches) this.db.prepare('INSERT INTO branches VALUES(?,?,?)').run(branch.id, restored.project.id, JSON.stringify(branch));
       for (let index = 0; index < restored.revisions.length; index++) { const revision = restored.revisions[index].revision; this.db.prepare('INSERT INTO revisions VALUES(?,?,?,?,?)').run(revision.id, revision.branchId, revision.parentId ?? null, JSON.stringify(revision), pack(restoredState(index))); }
       for (const chapter of restored.chapters) { const { text, ...ref } = chapter; this.db.prepare('INSERT INTO chapter_texts VALUES(?,?,?)').run(ref.id, JSON.stringify(ref), text); this.db.prepare('INSERT INTO chapter_search(id,title,text) VALUES(?,?,?)').run(ref.id, ref.title, text); }

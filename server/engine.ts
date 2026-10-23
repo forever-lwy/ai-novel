@@ -60,7 +60,7 @@ export class StoryEngine {
   private closed = false;
   private chargedExtractionErrors = new WeakSet<ModelOutputError>();
   private nonRetryableExtractionErrors = new WeakSet<Error>();
-  constructor(private store: Store, private getSettings: () => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'> & Partial<Pick<ImageService, 'generateDuringWriting' | 'writingProgress'>>, private extensions?: ExtensionService) {}
+  constructor(private store: Store, private getSettings: (projectId?: string) => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'> & Partial<Pick<ImageService, 'generateDuringWriting' | 'writingProgress'>>, private extensions?: ExtensionService) {}
   start() {
     if (this.started) return; this.started = true;
     for (const job of this.jobsInternal()) if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary' && ['queued', 'running', 'paused', 'failed'].includes(job.status)) {
@@ -120,7 +120,7 @@ export class StoryEngine {
   reextractChapter(branchId: string, base: string, chapterId: string) {
     this.assertIdle(branchId); this.store.assertVersion(branchId, base); this.store.chapter(branchId, chapterId);
     // Missing model configuration must not clear already extracted materials.
-    this.provider('extraction');
+    this.provider('extraction', this.store.getBranch(branchId).projectId);
     let job!: Job;
     const view = this.store.clearChapterExtraction(branchId, base, chapterId, revisionId => {
       job = { id: randomUUID(), projectId: this.store.getBranch(branchId).projectId, branchId, baseRevisionId: revisionId, kind: 'extract', status: 'queued', progress: 0, total: 1, message: '等待重新提取所选章节', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { targetChapterId: chapterId, extractChapterId: chapterId, blockIndex: 0 } };
@@ -422,7 +422,7 @@ export class StoryEngine {
     return option ? { choiceId: choice.id, optionId: option.id, text: option.label, ...(option.description ? { description: option.description } : {}) } : { choiceId: choice.id, customText, text: customText! };
   }
   private assertRpgProvider(job: Job) {
-    const provider = this.provider('writing'); const previous = job.payload.rpgProvider as { id: string; protocol: string; model: string; baseUrl: string } | undefined;
+    const provider = this.provider('writing', job.projectId); const previous = job.payload.rpgProvider as { id: string; protocol: string; model: string; baseUrl: string } | undefined;
     if (previous && (previous.id !== provider.id || previous.protocol !== provider.protocol || previous.model !== provider.model || previous.baseUrl !== provider.baseUrl)) throw new HttpError('RPG 续接需要使用原供应商、协议、服务地址和模型，请恢复原配置后继续', 409);
   }
   private pump() {
@@ -432,8 +432,8 @@ export class StoryEngine {
     }
   }
   private live(jobId: string): Job { const job = this.get(jobId); if (this.closed || job.status !== 'running') throw new DOMException('任务已停止', 'AbortError'); this.store.assertVersion(job.branchId, job.baseRevisionId); return job; }
-  private provider(role: 'writing' | 'planning' | 'extraction'): ProviderConfig {
-    const settings = normalizeModelSettings(this.getSettings()); const providerId = settings[`${role}ProviderId`]; const config = settings.providers.find(p => p.id === providerId);
+  private provider(role: 'writing' | 'planning' | 'extraction', projectId: string): ProviderConfig {
+    const settings = normalizeModelSettings(this.getSettings(projectId)); const providerId = settings[`${role}ProviderId`]; const config = settings.providers.find(p => p.id === providerId);
     const task = role === 'writing' ? '写作' : role === 'planning' ? '摘要压缩' : '资料提取';
     if (!config) throw new HttpError(`请先在供应商配置中选择${task}供应商`);
     const model = (settings[`${role}Model`] ?? config.model ?? '').trim();
@@ -475,8 +475,8 @@ export class StoryEngine {
     }
     return reference && !(job.kind === 'generate' && job.payload.mode === 'original' && !reference.sourceIds?.length) ? this.store.originalReference(job.branchId, reference) : undefined;
   }
-  private taskPrompt(task: PromptTask, variables: Record<string, string>, runtime: PromptRuntime = {}): ModelRequest {
-    return compileTaskPrompt(this.getSettings().promptTemplates, task, variables, runtime);
+  private taskPrompt(projectId: string, task: PromptTask, variables: Record<string, string>, runtime: PromptRuntime = {}): ModelRequest {
+    return compileTaskPrompt(this.getSettings(projectId).promptTemplates, task, variables, runtime);
   }
   /** Read-only preview: uses actual prompt and tool builders, never executes a tool or reads a work. */
   previewPrompt(input: PromptPreviewInput): PromptPreviewResult {
@@ -503,7 +503,7 @@ export class StoryEngine {
     return { messages, runtimeBlocks: compiled.runtimeBlocks, tools: previewTools, body };
   }
   private compressionSegments(source: string, provider: ProviderConfig, job: Job): string[] {
-    const config = normalizePromptTemplates(this.getSettings().promptTemplates);
+    const config = normalizePromptTemplates(this.getSettings(job.projectId).promptTemplates);
     const variables = this.promptVariables(job);
     return compressionChunks(source, provider, summaryText => compileTaskPrompt(config, 'compression', { ...variables, summaryText }));
   }
@@ -580,14 +580,14 @@ export class StoryEngine {
     this.notifyWriting(writing);
   }
   private async nameChapter(jobId: string, chapterId: string, signal: AbortSignal) {
-    const job = this.live(jobId); const chapter = this.store.chapter(job.branchId, chapterId); const provider = this.provider('writing');
+    const job = this.live(jobId); const chapter = this.store.chapter(job.branchId, chapterId); const provider = this.provider('writing', job.projectId);
     job.message = '正文已保存，正在根据本章内容生成章节名'; this.save(job);
     const request = this.budget(job, provider, { ...chapterNamingRequest(chapter.text), signal });
     const { result, output } = await this.requestCaptured(jobId, 'chapter-title', request, req => this.models.generateStructured(provider, req, parseGeneratedChapterTitle), result => JSON.stringify(result.value), chapterId);
     this.applyGeneratedTitle(this.live(jobId), output, result.value.title, false);
   }
   private imageTools(jobId: string, preview?: PromptRuntime['illustrations']): { tools: ModelTool[] } {
-    const config = { ...normalizeImageSettings(this.getSettings().imageSettings), ...(preview ? { autoPortrait: preview.portrait, autoCG: preview.cg } : {}) };
+    const config = { ...normalizeImageSettings(this.getSettings(preview ? undefined : this.get(jobId).projectId).imageSettings), ...(preview ? { autoPortrait: preview.portrait, autoCG: preview.cg } : {}) };
     if (!preview && (!this.images || !('providerId' in config) || !config.providerId || !config.model)) return { tools: [] };
     const tools: ModelTool[] = [];
     const register = (request: WritingImageRequest) => {
@@ -668,7 +668,7 @@ export class StoryEngine {
   }
   private finishCompressionPass(job: Job) {
     const work = job.payload.compressionWork as CompressionWork;
-    const combined = work.results.join('\n\n'); const provider = this.provider('planning');
+    const combined = work.results.join('\n\n'); const provider = this.provider('planning', job.projectId);
     const nextChunks = this.compressionSegments(combined, provider, job);
     if (work.chunks.length === 1 || (work.pass + 1 >= MAX_COMPRESSION_PASSES && nextChunks.length === 1)) {
       if (estimateTokens(combined) >= estimateTokens(String(job.payload.summarySource ?? ''))) throw new HttpError('最终压缩候选没有比完整原摘要更短，请重新生成压缩候选');
@@ -697,16 +697,16 @@ export class StoryEngine {
       const state = this.store.state(job.branchId);
       if (!state.chapters.length || state.chapters.some(chapter => chapter.status !== 'ready' || !chapter.summary.trim())) throw new HttpError('请先完成所有章节的剧情摘要整理');
       const source = state.chapters.map(chapter => `${chapter.title}\n${chapter.summary}`).join('\n\n');
-      const chunks = this.compressionSegments(source, this.provider('planning'), job);
+      const chunks = this.compressionSegments(source, this.provider('planning', job.projectId), job);
       job.payload = { ...job.payload, summarySource: source, summaryChapterIds: state.chapters.map(chapter => chapter.id), compressionWork: { pass: 0, chunks, index: 0, results: [], completed: 0 } satisfies CompressionWork };
       job.total = chunks.length; job.progress = 0; this.save(job);
     }
     for (;;) {
       job = this.live(jobId); const work = job.payload.compressionWork as CompressionWork;
       if (work.index === work.chunks.length) { this.finishCompressionPass(job); if (job.status === 'completed') return; continue; }
-      const provider = this.provider('planning');
+      const provider = this.provider('planning', job.projectId);
       job.message = `第 ${work.pass + 1} 轮压缩片段 ${work.index + 1}/${work.chunks.length}`; this.save(job);
-      const request = this.budget(job, provider, { ...this.taskPrompt('compression', { ...this.promptVariables(job), summaryText: work.chunks[work.index] }), signal });
+      const request = this.budget(job, provider, { ...this.taskPrompt(job.projectId, 'compression', { ...this.promptVariables(job), summaryText: work.chunks[work.index] }), signal });
       const { result, output } = await this.requestCaptured(jobId, 'compression', request, req => this.models.generateStructured(provider, req, value => z.object({ text: z.string().min(1) }).parse(value)), result => JSON.stringify(result.value), undefined, work.completed);
       this.applyCompression(this.live(jobId), output, result.value.text);
       if (this.get(jobId).status === 'completed') return;
@@ -736,16 +736,16 @@ export class StoryEngine {
     for (; blockIndex < blocks.length; blockIndex++) {
       let lastFailure: unknown;
       for (;;) {
-        job = this.live(jobId); const provider = this.provider('extraction'); const state = this.store.state(job.branchId);
+        job = this.live(jobId); const provider = this.provider('extraction', job.projectId); const state = this.store.state(job.branchId);
         const context = extractionContext(this.store.readingState(job.branchId, chapterId, false), blocks[blockIndex]);
         const retry = job.payload.extractionRetry as { chapterId?: string; blockIndex?: number; failedAttempts?: number } | undefined;
         const failedAttempts = retry?.chapterId === chapterId && retry.blockIndex === blockIndex ? Number(retry.failedAttempts ?? 0) : 0;
-        const retryConfig = normalizeTaskSettings(this.getSettings().taskSettings).extraction;
+        const retryConfig = normalizeTaskSettings(this.getSettings(job.projectId).taskSettings).extraction;
         if (failedAttempts && (!retryConfig.autoRetry || failedAttempts > retryConfig.maxRetries)) throw lastFailure ?? new HttpError('资料提取自动重试已关闭或次数已用完，请检查设置后手动继续');
         const message = `整理「${chapter.title}」片段 ${blockIndex + 1}/${blocks.length}`;
         job.message = failedAttempts ? `${message}；正在第 ${failedAttempts} 次自动重试` : message; this.save(job);
         // Configuration and context-budget failures require an author change, not another request.
-        const request = this.budget(job, provider, { ...this.taskPrompt('extraction', { ...this.promptVariables(job, state), context, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }, { extractionOutputMode: retryConfig.outputMode }), signal });
+        const request = this.budget(job, provider, { ...this.taskPrompt(job.projectId, 'extraction', { ...this.promptVariables(job, state), context, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }, { extractionOutputMode: retryConfig.outputMode }), signal });
         validateProviderOptions(provider, request.maxOutputTokens);
         let url: URL;
         try { url = new URL(provider.baseUrl); } catch { throw new HttpError('模型服务地址无效，请填写完整的 HTTP 或 HTTPS 地址。'); }
@@ -769,7 +769,7 @@ export class StoryEngine {
           if (output && output.status !== 'applied') this.failOutput(output, error);
           if (this.closed || signal.aborted || job.status !== 'running') throw error;
           this.live(jobId);
-          const config = normalizeTaskSettings(this.getSettings().taskSettings).extraction;
+          const config = normalizeTaskSettings(this.getSettings(job.projectId).taskSettings).extraction;
           const attempts = failedAttempts + 1;
           job.payload.extractionRetry = { chapterId, blockIndex, failedAttempts: attempts }; this.save(job);
           const nonRetryable = error instanceof HttpError && !(error instanceof OutputValidationError)
@@ -780,7 +780,7 @@ export class StoryEngine {
           if (!config.autoRetry || attempts > config.maxRetries || nonRetryable) throw error;
           job.message = `${message}；等待第 ${attempts}/${config.maxRetries} 次自动重试`; this.save(job);
           await this.waitExtractionRetry(jobId, signal, config.retryDelayMs);
-          if (!normalizeTaskSettings(this.getSettings().taskSettings).extraction.autoRetry) throw error;
+          if (!normalizeTaskSettings(this.getSettings(job.projectId).taskSettings).extraction.autoRetry) throw error;
         }
       }
     }
@@ -818,7 +818,7 @@ export class StoryEngine {
           this.notifyWriting(job); return;
         }
         const input = job.payload as unknown as GenerateInput;
-        const state = this.store.state(job.branchId); const provider = { ...this.provider('writing'), stream: true };
+        const state = this.store.state(job.branchId); const provider = { ...this.provider('writing', job.projectId), stream: true };
         const aliases = job.payload.rpgLookupAliases as Record<string, string> | undefined;
         const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original: this.writingReference(job), lookupAliases: aliases });
         const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
@@ -834,7 +834,7 @@ export class StoryEngine {
         if (!continuation) { job.payload.imageStartingEntityIds = state.entities.map(entity => entity.id); job.payload.imageRequests = []; delete job.payload.pendingPlotPlan; this.save(job); }
         const illustrations = this.imageTools(jobId);
         const rpg = input.mode === 'rpg' && state.rpg ? this.rpgTools(jobId) : { tools: [] };
-        const prompt: ModelRequest = continuation ? { system: '', prompt: '', writingOutputMode: continuation.writingOutputMode } : this.taskPrompt('writing', {
+        const prompt: ModelRequest = continuation ? { system: '', prompt: '', writingOutputMode: continuation.writingOutputMode } : this.taskPrompt(job.projectId, 'writing', {
           ...this.promptVariables(job, state), ...context.variables, context: context.text, mode: input.mode,
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
           writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : state.chapters.length ? '从 continuationAnchor 指定的最新正文结尾接着写下一章，直接推进结尾之后的事件，不按标题编号寻找或重写旧章节。' : '从作者设定开始写新的正文。',

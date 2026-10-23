@@ -4,6 +4,16 @@
 
 工作台统一使用完整作者资料。`view=author`、`view=reader` 作为旧客户端参数继续接受，均不改变返回资料和操作权限；省略参数效果相同。阅读视图仅在客户端隐藏思维链与工具调用过程，不过滤资料、图片、任务或 RPG 选项。资料查询上的旧 `chapterId` 参数不再限定阅读进度；章节操作、图片关联和分支起点的 `chapterId` 仍按原规则校验。所有接口继续校验登录、来源和适用的作品／故事线／版本边界。
 
+## 作品级设置
+
+- `GET /projects/:id/settings -> {revision,overrides,global,effective}`：读取作品覆盖、当前全局值及合并后的生效配置。供应商仅来自全局，返回沿用密钥和 URL 凭据脱敏；作品不存在返回 404。旧作品无记录时返回 `revision:"0",overrides:{}`，读取不创建副本。
+- `PUT /projects/:id/settings {revision,overrides}`：完整替换本作品的覆盖，返回同上。`revision` 必须与上次读取一致，冲突返回 409；空 `overrides:{}` 恢复全部继承，省略某组恢复该组继承。请求体最多 8 MiB。接口校验任务、模型参数、提示词和生图设置，拒绝供应商连接、地址、密钥等额外配置字段；不会写入全局设置。
+- `overrides.tasks?:{writing?,planning?,extraction?}`：每项为 `{providerId,model,modelParameters}`，参数条目使用现有 `ModelParameterProfile`，`role` 必须与任务一致；`extraction` 项另须包含 `extraction:{outputMode?,autoRetry,maxRetries,retryDelayMs}`。覆盖按整个任务生效，包括曾用模型的参数；参数的省略值保持省略，空供应商／模型表示该作品暂不配置。
+- `overrides.promptTemplates?` 沿用完整 `PromptTemplateSettings` 的格式与限制，通用及四类任务目录作为一组；`overrides.imageSettings?` 沿用完整生图设置格式，包含优化模型、画风、参数、参考图与自动插画开关。未提供的组每次读取最新全局值，不把首次读取的全局值冻结到作品。
+- `POST /settings/test` 额外接受可选 `projectId`，带该字段时使用该作品生效的任务模型参数，供应商凭据仍从全局获取；省略保持原行为。`POST /settings/prompt-preview` 保持只读示例预览，作品页面传入当前有效的提示词与提取／插画选项，仍不调用模型。
+- 写作／RPG、导入与重新提取、自动命名、标题修复、AI 分章规则、摘要压缩、生图提示词优化及手动／自动生图均按所属作品读取配置。设置保存不重发请求、不改正文版本；已发出的请求及历史记录保留原配置。RPG 已保存的工具对话沿用原消息与提示词，原会话模型一致性校验继续生效。
+- 完整备份 v1 新增可选 `projectSettings`，仅保存本作品覆盖，不含 revision、全局默认值或供应商连接／密钥。恢复校验结构但保留尚未在当前实例配置的供应商 ID，不替换连接、不重映射提示词 ID；缺失该字段的旧备份全部继承全局。覆盖大小计入备份容量预检；删除作品一并删除其设置。设置不属于正文历史快照，故事线切换和章节回退不改变作品级配置。
+
 ## 原作参考与文本查询工具
 
 续写请求以 `continuationAnchor={chapterId,title,ending,instruction}` 标记最后保存的正文结尾，同时提供最近完整正文；自定义预设省略上下文块时，运行规则仍带入该起点。内部章节数量和索引不映射到章节编号变量；旧 `chapterNumber` 展开为“待写章节／当前章节”，新建章节缺省标题为“新章节”，EPUB 缺题名时为“未命名章节”。原文标题里的真实编号和原文段落／行号保留。

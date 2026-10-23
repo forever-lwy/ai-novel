@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered, Image, ShieldCheck } from 'lucide-react';
-import type { CapturedModelResponse, ImageSettings, ModelParameters, ModelRole, ProviderConnection, ProviderModel, ProviderProtocol, Settings, TaskSettings } from '../shared/types';
+import type { CapturedModelResponse, ImageSettings, ModelParameters, ModelRole, Project, ProjectSettingsOverrides, ProjectSettingsView, ProviderConnection, ProviderModel, ProviderProtocol, Settings, TaskSettings } from '../shared/types';
+import { collectProjectOverrides, projectModelSettings, resolveProjectSettings } from '../shared/project-settings';
 import { defaultModelParameters, getModelParameters, upsertModelParameters } from '../shared/model-settings';
 import { api, post, put } from './api';
 import { Brand, Notice, Spinner } from './ui';
@@ -40,7 +41,7 @@ const sections = [
 type SettingsSection = typeof sections[number]['id'];
 
 function fieldError(field: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
-  if (field.disabled || field instanceof HTMLInputElement && field.type === 'file') return '';
+  if (field.matches(':disabled') || field instanceof HTMLInputElement && field.type === 'file') return '';
   if (field.validity.badInput) return '请填写有效的数字。';
   if (field.validity.valid) return '';
   if (field.validity.valueMissing) return '请填写此项。';
@@ -77,9 +78,18 @@ function UpstreamModelSelect({ label, model, list, onChange }: { label: string; 
   </>;
 }
 
-export function SettingsPage({ onBack }: { onBack: () => void }) {
+export function SettingsPage({ onBack, project }: { onBack: () => void; project?: Project }) {
+  const [scope, setScope] = useState<'global' | 'project'>('global');
+  return <SettingsForm key={scope} onBack={onBack} project={project} scope={scope} onScopeChange={setScope} />;
+}
+
+function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () => void; project?: Project; scope: 'global' | 'project'; onScopeChange: (scope: 'global' | 'project') => void }) {
+  const projectId = scope === 'project' ? project?.id : undefined;
+  const [globalSettings, setGlobalSettings] = useState<Settings | null>(null);
+  const [overrides, setOverrides] = useState<ProjectSettingsOverrides>({});
+  const [revision, setRevision] = useState('0');
   const [settings, setSettings] = useState<Settings | null>(null); const [error, setError] = useState(''); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false);
-  const [section, setSection] = useState<SettingsSection>('providers');
+  const [section, setSection] = useState<SettingsSection>(projectId ? 'models' : 'providers');
   const [modelRole, setModelRole] = useState<ModelRole>('writing');
   const [accountBusy, setAccountBusy] = useState(false);
   const [extensionsBusy, setExtensionsBusy] = useState(false);
@@ -91,19 +101,23 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
   const form = useRef<HTMLFormElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
-  const dirty = !!settings && (JSON.stringify(settings) !== savedSignature || inputDraftInvalid);
+  const signature = (value: Settings, local: ProjectSettingsOverrides = overrides) => JSON.stringify(projectId ? collectProjectOverrides(value, local) : value);
+  const dirty = !!settings && (signature(settings) !== savedSignature || inputDraftInvalid);
   const [modelLists, setModelLists] = useState<Record<string, ModelList>>({});
   const requests = useRef(new Map<string, ModelRequest>());
   const [lastTest, setLastTest] = useState<{ name: string; ok: boolean; message: string; capture?: CapturedModelResponse } | null>(null);
   useEffect(() => title.current?.focus(), []);
   useEffect(() => {
     const controller = new AbortController(); setLoading(true); setError('');
-    api<Settings>('/settings', { signal: controller.signal }).then(value => {
+    api<Settings | ProjectSettingsView>(projectId ? `/projects/${projectId}/settings` : '/settings', { signal: controller.signal }).then(value => {
       if (controller.signal.aborted) return;
-      setSettings(value); setSavedSignature(JSON.stringify(value)); setInputDraftInvalid(false);
+      if ('effective' in value) {
+        setSettings(value.effective); setGlobalSettings(value.global); setOverrides(value.overrides); setRevision(value.revision); setSavedSignature(signature(value.effective, value.overrides));
+      } else { setSettings(value); setSavedSignature(signature(value)); }
+      setInputDraftInvalid(false);
     }).catch(e => { if (!controller.signal.aborted) setError(e.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [loadAttempt]);
+  }, [loadAttempt, projectId]);
   useEffect(() => {
     if (!dirty && !extensionsDirty) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
@@ -113,6 +127,21 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   useEffect(() => () => { for (const request of requests.current.values()) { clearTimeout(request.timer); request.controller.abort(); } }, []);
 
   function back() { if (!busy && !accountBusy && !extensionsBusy && ((!dirty && !extensionsDirty) || window.confirm('设置尚未保存，返回作品会放弃这些修改。确定返回吗？'))) onBack(); }
+  function switchScope(next: 'global' | 'project') {
+    if (next !== scope && ((!dirty && !extensionsDirty) || window.confirm('当前设置尚未保存，切换范围会放弃这些修改。确定切换吗？'))) onScopeChange(next);
+  }
+  function inheritance(group: ModelRole | 'promptTemplates' | 'imageSettings', label: string) {
+    if (!projectId || !settings || !globalSettings) return null;
+    const custom = group === 'promptTemplates' || group === 'imageSettings' ? !!overrides[group] : !!overrides.tasks?.[group];
+    return <div className="settings-inheritance"><div><strong>{custom ? '本作品单独设置' : '继承全局设置'}</strong><p className="hint">{custom ? '保存后仅对本作品的所有故事线生效。' : '此项跟随全局更新。选择单独设置后可修改。'}</p></div><button type="button" className="button secondary small" aria-label={`${label}${custom ? '恢复继承全局' : '单独设置'}`} disabled={busy} onClick={() => {
+      const next = collectProjectOverrides(settings, overrides);
+      if (group === 'promptTemplates') { if (custom) delete next.promptTemplates; else next.promptTemplates = structuredClone(settings.promptTemplates); }
+      else if (group === 'imageSettings') { if (custom) delete next.imageSettings; else next.imageSettings = normalizeImageSettings(settings.imageSettings); }
+      else { next.tasks = { ...next.tasks }; if (custom) delete next.tasks[group]; else next.tasks[group] = projectModelSettings(settings, group); }
+      setOverrides(next); setSettings(resolveProjectSettings(globalSettings, next)); setError(''); setMessage('');
+      requestAnimationFrame(() => setInputDraftInvalid(!!invalidField()));
+    }}>{custom ? '恢复继承全局' : '单独设置'}</button></div>;
+  }
   function showIssue(target: SettingsSection, text: string, field?: HTMLElement, task?: ModelRole) {
     setSection(target); setMessage(''); setError(text);
     const issueRole = task || roles.find(role => role.role === field?.closest('[data-model-role]')?.getAttribute('data-model-role'))?.role;
@@ -200,7 +229,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
   }
   async function save(testRole?: Role) {
     if (!settings || busy) return;
-    for (const [index, provider] of settings.providers.entries()) {
+    for (const [index, provider] of (projectId ? [] : settings.providers).entries()) {
       const card = form.current?.querySelectorAll('.provider-card')[index];
       if (!provider.name.trim()) { showIssue('providers', `供应商 ${index + 1}：请填写供应商名称。`, card?.querySelector<HTMLInputElement>('input') || undefined); return; }
       let validAddress = false;
@@ -208,19 +237,20 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       if (!validAddress) { showIssue('providers', `${provider.name}：服务地址需填写完整的 http 或 https 地址，不能包含用户名或密码。`, card?.querySelector<HTMLInputElement>('input[type="url"]') || undefined); return; }
     }
     for (const role of roles) {
+      if (projectId && !overrides.tasks?.[role.role]) continue;
       if (settings[role.providerKey] && !settings[role.modelKey]?.trim()) {
         showIssue('models', `${role.label}：已选择供应商，请选择或填写模型名称。`, form.current?.querySelector<HTMLInputElement>(`[aria-label="${role.label}模型名称"]`) || undefined); return;
       }
     }
     const imageConfig = normalizeImageSettings(settings.imageSettings);
-    if (imageConfig.providerId && !imageConfig.model) { showIssue('images', '生图：已选择供应商，请填写图片模型名称。'); return; }
+    if ((!projectId || overrides.imageSettings) && imageConfig.providerId && !imageConfig.model) { showIssue('images', '生图：已选择供应商，请填写图片模型名称。'); return; }
     const field = invalidField();
     if (field) {
       const label = field.field.getAttribute('aria-label') || field.field.closest('label')?.firstChild?.textContent || '此字段';
       showIssue(field.target.id, `${field.target.label} · ${label}：${field.issue}`, field.field); return;
     }
     try { if (settings.promptTemplates) validatePromptTemplates(settings.promptTemplates); } catch (e) { showIssue('prompts', `提示词设置：${(e as Error).message}`); return; }
-    const invalid = settings.modelParameters?.map(profile => {
+    const invalid = settings.modelParameters?.filter(profile => !projectId || profile.role && overrides.tasks?.[profile.role]).map(profile => {
       const provider = settings.providers.find(value => value.id === profile.providerId);
       const roleName = roles.find(value => value.role === profile.role)?.label || '模型设置';
       return { role: profile.role, name: `${roleName} · ${provider?.name || '供应商'} · ${profile.model}`, error: profile.maxOutputTokens >= profile.contextTokens ? '单次最大输出 tokens 必须小于上下文上限 tokens。' : provider && parameterError(profile, provider.protocol) };
@@ -228,28 +258,33 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
     if (invalid) { showIssue('models', `${invalid.name}：${invalid.error}`, undefined, invalid.role); return; }
     setBusy(true); setError(''); setMessage(''); if (testRole) setLastTest(null);
     try {
-      const saved = await put<Settings>('/settings', settings); setSettings(saved); setSavedSignature(JSON.stringify(saved)); setInputDraftInvalid(false);
+      let saved: Settings;
+      if (projectId) {
+        const result = await put<ProjectSettingsView>(`/projects/${projectId}/settings`, { revision, overrides: collectProjectOverrides(settings, overrides) });
+        saved = result.effective; setGlobalSettings(result.global); setOverrides(result.overrides); setRevision(result.revision); setSavedSignature(signature(saved, result.overrides));
+      } else { saved = await put<Settings>('/settings', settings); setSavedSignature(signature(saved)); }
+      setSettings(saved); setInputDraftInvalid(false);
       if (testRole) {
         const providerId = saved[testRole.providerKey]; const model = saved[testRole.modelKey];
-        const result = await post<{ ok: boolean; message: string; inputTokens: number; outputTokens: number; capture?: CapturedModelResponse }>('/settings/test', { role: testRole.role, providerId, model });
+        const result = await post<{ ok: boolean; message: string; inputTokens: number; outputTokens: number; capture?: CapturedModelResponse }>('/settings/test', { role: testRole.role, providerId, model, ...(projectId ? { projectId } : {}) });
         setLastTest({ name: `${testRole.label} · ${saved.providers.find(provider => provider.id === providerId)?.name || '供应商'} · ${model}`, ok: result.ok, message: result.message, capture: result.capture });
         if (result.ok) setMessage(`${result.message} · 输入 ${result.inputTokens} / 输出 ${result.outputTokens} tokens`);
         else setError(result.message);
       }
-      else setMessage('设置已保存。');
+      else setMessage(projectId ? '作品设置已保存。' : '设置已保存。');
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   const tasks = normalizeTaskSettings(settings?.taskSettings);
   return <main className="settings-page" data-testid="settings-page" aria-label="设置页面">
     <header className="settings-header"><Brand /><button type="button" className="text-button" disabled={busy || accountBusy || extensionsBusy} onClick={back}><ArrowLeft size={16} />返回作品</button></header>
-    <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>设置</h1><p>配置模型服务、任务参数与提示词，管理工作台的账号安全。</p></div>
+    <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>{projectId ? `《${project?.title}》作品设置` : '设置'}</h1><p>{projectId ? '默认继承全局，可分别覆盖任务模型、提示词和生图设置。供应商连接统一在全局管理。' : '配置模型服务、任务参数与提示词，管理工作台的账号安全。'}</p>{project && <div className="settings-scope" role="group" aria-label="设置范围"><button type="button" aria-pressed={!projectId} disabled={busy || accountBusy || extensionsBusy} onClick={() => switchScope('global')}>全局设置</button><button type="button" aria-pressed={!!projectId} disabled={busy || accountBusy || extensionsBusy} onClick={() => switchScope('project')}>作品设置</button></div>}</div>
     <div className="settings-layout">
-      <nav className="settings-navigation" aria-label="设置分类">{sections.map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || accountBusy || extensionsBusy || !settings} onClick={() => { setSection(item.id); if (item.id === 'extensions') setExtensionsVisited(true); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">修改可跨分类保留。模型与创作设置统一保存；工具与技能单独保存，账号安全操作单独生效。</p></nav>
+      <nav className="settings-navigation" aria-label="设置分类">{sections.filter(item => !projectId || ['models', 'prompts', 'images'].includes(item.id)).map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || accountBusy || extensionsBusy || !settings} onClick={() => { setSection(item.id); if (item.id === 'extensions') setExtensionsVisited(true); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">{projectId ? '修改只保存到当前作品。恢复继承也需保存后生效。提供商、工具与技能、账号安全在全局管理。' : '修改可跨分类保留。模型与创作设置统一保存；工具与技能单独保存，账号安全操作单独生效。'}</p></nav>
       <div className="settings-content">
         {!settings ? <section className="settings-loading" aria-label="设置加载状态">{loading ? <Spinner /> : <><Notice error={error} /><button type="button" className="button secondary" onClick={() => setLoadAttempt(value => value + 1)}><RefreshCw size={15} />重新加载设置</button></>}</section> : <form ref={form} className="settings-form form-stack" hidden={section === 'account' || section === 'extensions'} inert={section === 'account' || section === 'extensions'} noValidate onChange={() => setInputDraftInvalid(!!invalidField())} onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
     <section data-settings-section="providers" hidden={section !== 'providers'} aria-label="供应商连接设置">
     <div className="settings-section-heading"><h2>供应商连接</h2><p>{sections[0].description}</p></div>
-    <fieldset className="settings-section-fields form-stack" disabled={busy}>
+    <fieldset className="settings-section-fields form-stack" disabled={busy || !!projectId}>
     <div className="settings-providers">{settings.providers.map((provider, index) => <section className="provider-card" key={provider.id}>
       <div className="row between"><span className="eyebrow">供应商 {String(index + 1).padStart(2, '0')}</span><button type="button" className="icon-button danger-text" title="删除此供应商" aria-label={`删除供应商 ${provider.name}`} disabled={busy} onClick={() => deleteProvider(provider.id)}><Trash2 size={16} /></button></div>
       <div className="form-grid"><label>供应商名称<input required value={provider.name} onChange={e => updateProvider(index, { name: e.target.value })} placeholder="例如：我的模型服务商" /></label><label>接口协议<select aria-label="接口协议" value={provider.protocol} onChange={e => { const protocol = e.target.value as ProviderProtocol; const wasDefault = provider.baseUrl.replace(/\/+$/, '') === protocols[provider.protocol].url.replace(/\/+$/, ''); updateProvider(index, { protocol, ...(wasDefault ? { baseUrl: protocols[protocol].url } : {}) }); }}>{Object.entries(protocols).map(([key, value]) => <option key={key} value={key}>{value.name}</option>)}</select></label></div>
@@ -272,6 +307,8 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       const modelName = model.trim();
       return <div key={role.role} id={`settings-model-panel-${role.role}`} className="settings-model-panel" role="tabpanel" aria-labelledby={`settings-model-tab-${role.role}`} data-model-role={role.role} hidden={modelRole !== role.role}>
       <section className="settings-task-card form-stack" aria-label={`${role.label}模型设置`}>
+      {inheritance(role.role, role.label)}
+      <fieldset key={`${role.role}-${!!overrides.tasks?.[role.role]}`} className="settings-section-fields form-stack" disabled={busy || !!projectId && !overrides.tasks?.[role.role]}>
         <h4>{role.label}</h4>
         {role.role === 'extraction' && <>
           <label>输出模式<select aria-label="资料提取输出模式" value={tasks.extraction.outputMode ?? 'prompt'} onChange={e => updateTaskSettings('extraction', { outputMode: e.target.value as NonNullable<TaskSettings['extraction']['outputMode']> })}>
@@ -286,7 +323,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
           <p className="hint">只重试资料提取，不重新生成正文。每次重试会再次调用模型，可能产生用量；0 次表示不重试。</p>
         </>}
         {role.role === 'planning' && <p className="hint">生成已发生剧情的压缩摘要候选，也用于未单独配置模型时的生图提示词优化。</p>}
-        <label>供应商<select aria-label={`${role.label}供应商`} value={settings[role.providerKey]} onChange={e => updateRole(role, e.target.value)}><option value="">暂不设置</option>{settings.providers.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
+        <label>供应商<select aria-label={`${role.label}供应商`} value={settings[role.providerKey]} onChange={e => updateRole(role, e.target.value)}><option value="">暂不设置</option>{settings[role.providerKey] && !provider && <option value={settings[role.providerKey]}>连接已删除，请重新选择</option>}{settings.providers.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
         {provider && <>
           <UpstreamModelSelect key={connectionSignature(provider)} label={role.label} model={model} list={list} onChange={value => updateModel(role, value)} />
           <label>模型名称（可自定义）<input aria-label={`${role.label}模型名称`} value={model} onChange={e => updateModel(role, e.target.value)} placeholder="选择上方模型，或输入服务商提供的模型 ID" /></label>
@@ -296,20 +333,22 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
           {modelName ? <ProviderParameters writing={role.role === 'writing'} key={JSON.stringify([role.role, provider.id, modelName])} protocol={provider.protocol} parameters={getModelParameters(settings, role.role, provider.id, modelName)} onChange={patch => updateParameters(role.role, provider.id, modelName, patch)} onReset={() => resetParameters(role.role, provider.id, modelName)} /> : <p className="hint">选择或填写模型名称后，可设置此任务的模型参数；新模型自动使用通用默认值。</p>}
           <button type="button" className="button secondary small" aria-label={`${role.label}保存并测试连接`} disabled={busy || !model.trim() || !provider.baseUrl} onClick={() => void save(role)}><PlugZap size={15} />保存并测试连接</button>
         </>}
-      </section></div>;
+      </fieldset></section></div>;
     })}</div><p className="hint">测试会保存全部设置，并按该任务所选模型的生成参数和输出上限发送一次真实请求，可能产生用量，不会自动重试。</p>
     {lastTest && <section className="settings-test-result"><div className="row between wrap"><h3>最近连接测试 · {lastTest.name}</h3><span className={`status-pill ${lastTest.ok ? 'completed' : 'failed'}`}>{lastTest.ok ? '成功' : '失败'}</span></div><p className="hint">以下是这一次测试留下的记录，之后修改设置不会改变它。</p><RequestDiagnostics key={`${lastTest.name}-${lastTest.capture?.request?.startedAt || lastTest.message}`} capture={lastTest.capture} filename="connection-test-diagnostics" showResponse /></section>}
     </fieldset></section>
     <section data-settings-section="prompts" hidden={section !== 'prompts'} aria-label="提示词编排设置">
       <div className="settings-section-heading"><h2>提示词编排</h2><p>{sections[2].description}</p></div>
-      <fieldset className="settings-section-fields" disabled={busy}><PromptTemplatesPanel embedded settings={settings} disabled={busy} onChange={value => { setMessage(''); setSettings(value); }} /></fieldset>
+      {inheritance('promptTemplates', '提示词编排')}
+      <fieldset key={`prompts-${!!overrides.promptTemplates}`} className="settings-section-fields" disabled={busy || !!projectId && !overrides.promptTemplates}><PromptTemplatesPanel embedded settings={settings} disabled={busy || !!projectId && !overrides.promptTemplates} onChange={value => { setMessage(''); setSettings(value); }} /></fieldset>
     </section>
     <section data-settings-section="images" hidden={section !== 'images'} aria-label="生图与自动插画设置">
       <div className="settings-section-heading"><h2>生图与自动插画</h2><p>{sections[3].description}</p></div>
-      <fieldset className="settings-section-fields form-stack" disabled={busy}><ImageSettingsEditor settings={settings} onChange={value => { setMessage(''); setSettings(value); }} /></fieldset>
+      {inheritance('imageSettings', '生图与自动插画')}
+      <fieldset key={`images-${!!overrides.imageSettings}`} className="settings-section-fields form-stack" disabled={busy || !!projectId && !overrides.imageSettings}><ImageSettingsEditor settings={settings} onChange={value => { setMessage(''); setSettings(value); }} /></fieldset>
     </section>
     <div className="settings-feedback" aria-live="polite">{error && <Notice error={error} />}{message && <div className="notice success" role="status"><CheckCircle2 size={17} />{message}</div>}</div>
-    <footer className="settings-save-footer"><p className="hint">{dirty ? '有未保存的修改。保存会同时应用模型与创作设置。' : '模型与创作设置共用一份配置，保存后统一生效。'}</p><button type="submit" className="button primary" disabled={busy}><Save size={16} />{busy ? '正在处理…' : '保存设置'}</button></footer>
+    <footer className="settings-save-footer"><p className="hint">{dirty ? `有未保存的修改。保存会应用${projectId ? '本作品' : '全局'}的模型与创作设置。` : projectId ? '仅保存本作品已单独设置的项目，其余继续继承全局。' : '模型与创作设置共用一份配置，保存后统一生效。'}</p><button type="submit" className="button primary" disabled={busy}><Save size={16} />{busy ? '正在处理…' : '保存设置'}</button></footer>
   </form>}
         {settings && section === 'account' && <AccountSecurity onBusyChange={setAccountBusy} />}
         {settings && extensionsVisited && <div hidden={section !== 'extensions'} inert={section !== 'extensions'}><ExtensionsPanel onDirtyChange={setExtensionsDirty} onBusyChange={setExtensionsBusy} /></div>}
@@ -353,12 +392,12 @@ export function ImageSettingsEditor({ settings, onChange }: { settings: Settings
   const pixelSizes = capabilities.sizes.filter(size => size !== 'auto');
   const currentAspectRatio = image.aspectRatio ?? (image.size === 'auto' ? 'auto' : image.size === '1024x1536' ? '2:3' : image.size === '1536x1024' ? '3:2' : '1:1');
   return <>
-    <label>生图供应商<select aria-label="生图供应商" value={image.providerId} onChange={event => changeImageModel({ providerId: event.target.value, model: '' })}><option value="">暂不设置</option>{settings.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
+    <label>生图供应商<select aria-label="生图供应商" value={image.providerId} onChange={event => changeImageModel({ providerId: event.target.value, model: '' })}><option value="">暂不设置</option>{image.providerId && !settings.providers.some(provider => provider.id === image.providerId) && <option value={image.providerId}>连接已删除，请重新选择</option>}{settings.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
     <label>图片接口<select aria-label="图片接口" value={image.protocol} onChange={event => changeImageModel({ protocol: event.target.value as ImageSettings['protocol'] })}><option value="openai-images">OpenAI 兼容 · Images</option><option value="gemini">Gemini · 图片生成</option><option value="together-images">Together · 图片生成</option></select></label>
     <label>图片模型名称<input aria-label="图片模型名称" maxLength={300} value={image.model} onChange={event => changeImageModel({ model: event.target.value })} placeholder="填写供应商提供的图片生成模型 ID" /></label>
     <p className="hint">图片接口复用供应商连接的服务地址和密钥。下方参数与参考图能力按所选协议和型号显示。</p>
     <section className="image-optimization-settings form-stack"><h3>AI 生图提示词</h3><p className="hint">手动绘图及其他插画使用此模型整理提示词；CG 同时参考前后文与相关资料。写作中的新自动 CG 由写作 AI 直接给出提示词，提交后与正文同时生成；所需参考图未完成时等待，不再调用此优化模型。自动尺寸由相应的文字 AI 建议，固定设置优先。</p><div className="form-grid">
-      <label>生图提示词优化供应商<select aria-label="生图提示词优化供应商" value={image.promptProviderId || ''} onChange={event => patch({ promptProviderId: event.target.value, promptModel: '' })}><option value="">自动使用摘要压缩或正文写作模型</option>{settings.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
+      <label>生图提示词优化供应商<select aria-label="生图提示词优化供应商" value={image.promptProviderId || ''} onChange={event => patch({ promptProviderId: event.target.value, promptModel: '' })}><option value="">自动使用摘要压缩或正文写作模型</option>{image.promptProviderId && !settings.providers.some(provider => provider.id === image.promptProviderId) && <option value={image.promptProviderId}>连接已删除，请重新选择</option>}{settings.providers.map(provider => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select></label>
       <label>生图提示词优化模型<input aria-label="生图提示词优化模型" maxLength={300} value={image.promptModel || ''} onChange={event => patch({ promptModel: event.target.value })} placeholder={image.promptProviderId ? '填写此供应商的文字模型 ID' : fallbackModel || '自动使用已配置的文字模型'} /></label>
     </div>{!image.promptProviderId && <p className="hint">默认先使用摘要压缩模型，再使用正文写作模型。{fallbackName && fallbackModel ? `当前默认：${fallbackName} · ${fallbackModel}。` : '请先配置至少一个文字模型。'}</p>}<label>提示词优化系统要求（可选）<textarea aria-label="提示词优化系统要求" maxLength={10000} rows={3} value={image.promptSystemPrompt || ''} onChange={event => patch({ promptSystemPrompt: event.target.value })} placeholder="例如：按画面主体、构图、服装、环境、光线组织提示词，保留已确认的角色外貌。" /></label></section>
     <div className="form-grid image-dimension-fields">

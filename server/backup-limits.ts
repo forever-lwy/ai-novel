@@ -21,7 +21,7 @@ export function checkBackupSize(db: DatabaseSync, uploadDir: string, projectId: 
     for (const chapter of state.chapters) chapterIds.add(chapter.id);
   }
   // SQL size checks avoid reading an oversized record before the budget check.
-  for (const table of ['projects', 'branches', 'jobs', 'model_outputs', 'image_assets'] as const) {
+  for (const table of ['projects', 'project_settings', 'branches', 'jobs', 'model_outputs', 'image_assets'] as const) {
     const predicate = table === 'projects' ? 'id=?' : 'project_id=?';
     const row = db.prepare(`SELECT COALESCE(SUM(length(CAST(data AS BLOB))),0) AS bytes,COUNT(*) AS records FROM ${table} WHERE ${predicate}`).get(projectId)!;
     add(Number(row.bytes) + Number(row.records) * 128);

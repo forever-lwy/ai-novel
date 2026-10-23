@@ -30,7 +30,7 @@ const titleSystem = `# 章节标题修复
 只返回 {"chapters":[{"chapterId":"输入中的标识","title":"建议标题","reason":"理由","evidence":"本章原文摘录","confidence":"high/medium/low","multipleChapters":false}]}。
 每个输入标识恰好返回一次，包括不需要修改的章节。没有本章原文依据的改名不能标 high。`;
 
-export function registerChapterTitleRoutes(app: FastifyInstance, deps: { store: Store; settings: SettingsStore; engine: StoryEngine; source: (id: string) => { confirmed: number; filename: string }; bytes: (id: string) => Uint8Array }) {
+export function registerChapterTitleRoutes(app: FastifyInstance, deps: { store: Store; settings: SettingsStore; engine: StoryEngine; source: (id: string) => { confirmed: number; filename: string; project_id: string }; bytes: (id: string) => Uint8Array }) {
   const inFlight = new Set<string>();
   const param = (request: FastifyRequest) => identifier.parse((request.params as { id: string }).id);
   const sourceContext = (sample: ChapterTitleSample, sourceText: string): ChapterTitleSample => {
@@ -39,8 +39,8 @@ export function registerChapterTitleRoutes(app: FastifyInstance, deps: { store: 
     if (index < 0 || index !== sourceText.lastIndexOf(anchor)) return sample;
     return { ...sample, sourceContext: sourceText.slice(Math.max(0, index - 800), index + Math.min(anchor.length, 600)) };
   };
-  const generate = async (samples: ChapterTitleSample[], instruction: string, reply: import('fastify').FastifyReply, check: () => void): Promise<ChapterTitlePreview> => {
-    const settings = deps.settings.get();
+  const generate = async (projectId: string, samples: ChapterTitleSample[], instruction: string, reply: import('fastify').FastifyReply, check: () => void): Promise<ChapterTitlePreview> => {
+    const settings = deps.settings.get(projectId);
     const role = (['extraction', 'writing', 'planning'] as const).find(role => settings[`${role}Model`] && settings.providers.some(provider => provider.id === settings[`${role}ProviderId`]));
     if (!role) throw new HttpError('请先配置资料提取或正文写作模型，再修复标题。');
     const provider = resolveModelConfig(settings, settings.providers.find(value => value.id === settings[`${role}ProviderId`])!, settings[`${role}Model`]!, role);
@@ -74,12 +74,12 @@ export function registerChapterTitleRoutes(app: FastifyInstance, deps: { store: 
       return JSON.parse(redactModelPayload(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : '标题修复失败，请手动重试。', capture: capture ?? (snapshot ? { request: snapshot, rawResponse: '', text: '', inputTokens: 0, outputTokens: 0 } : undefined) }), keys));
     } finally { reply.raw.removeListener('close', disconnected); }
   };
-  const preview = (path: string, input: (request: FastifyRequest) => { scope: string; samples: ChapterTitleSample[]; instruction: string; check: () => void }) => {
+  const preview = (path: string, input: (request: FastifyRequest) => { scope: string; projectId: string; samples: ChapterTitleSample[]; instruction: string; check: () => void }) => {
     app.post(path, async (request, reply) => {
       const work = input(request); work.check();
       if (inFlight.has(work.scope)) throw new HttpError('标题修复正在进行，请等待本次结果。', 409);
       inFlight.add(work.scope);
-      try { return await generate(work.samples, work.instruction, reply, work.check); }
+      try { return await generate(work.projectId, work.samples, work.instruction, reply, work.check); }
       finally { inFlight.delete(work.scope); }
     });
   };
@@ -99,7 +99,7 @@ export function registerChapterTitleRoutes(app: FastifyInstance, deps: { store: 
       if (!sources.has(chapter.sourceId)) { const source = deps.source(chapter.sourceId); sources.set(chapter.sourceId, novelText(source.filename, deps.bytes(chapter.sourceId))); }
       return sourceContext(sample, sources.get(chapter.sourceId)!);
     });
-    return { scope: `branch:${branchId}`, samples, instruction: input.instruction, check };
+    return { projectId: deps.store.getBranch(branchId).projectId, scope: `branch:${branchId}`, samples, instruction: input.instruction, check };
   });
   preview('/api/sources/:id/chapter-titles/preview', request => {
     const sourceId = param(request);
@@ -107,7 +107,7 @@ export function registerChapterTitleRoutes(app: FastifyInstance, deps: { store: 
     const input = z.object({ chapters: z.array(sampleSchema).min(1).max(MAX_TITLE_REPAIR_CHAPTERS), instruction: instructionSchema }).strict().parse(request.body);
     if (new Set(input.chapters.map(chapter => chapter.chapterId)).size !== input.chapters.length) throw new HttpError('请勿重复选择同一章节。');
     const source = deps.source(sourceId); const text = novelText(source.filename, deps.bytes(sourceId));
-    return { scope: `source:${sourceId}`, samples: input.chapters.map(sample => sourceContext(sample, text)), instruction: input.instruction, check };
+    return { projectId: source.project_id, scope: `source:${sourceId}`, samples: input.chapters.map(sample => sourceContext(sample, text)), instruction: input.instruction, check };
   });
   app.post('/api/branches/:id/chapter-titles/apply', async request => {
     const branchId = param(request); deps.engine.assertIdle(branchId);

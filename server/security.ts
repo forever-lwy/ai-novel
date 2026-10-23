@@ -8,6 +8,8 @@ import { connectionOnly, normalizeModelSettings } from '../shared/model-settings
 import { normalizePromptTemplates } from '../shared/prompt-templates.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
 import { normalizeTaskSettings } from '../shared/task-settings.js';
+import { resolveProjectSettings } from '../shared/project-settings.js';
+import { readProjectSettings } from './project-settings.js';
 
 const scrypt = promisify(scryptCallback) as (password: string, salt: string, length: number, options?: ScryptOptions) => Promise<Buffer>;
 const passwordParameters = { N: 16384, r: 8, p: 5 } as const;
@@ -95,14 +97,15 @@ export class SettingsStore {
   }
   secretMeta(name: string): string | undefined { const value = this.meta(name); return value ? this.decrypt(value) : undefined; }
   setSecretMeta(name: string, value: string) { this.setMeta(name, this.encrypt(value)); }
-  get(): Settings {
+  get(projectId?: string): Settings {
     const raw = this.meta('settings');
-    if (!raw) return defaultSettings();
+    if (!raw) return projectId ? resolveProjectSettings(defaultSettings(), readProjectSettings(this.db, projectId).overrides) : defaultSettings();
     const saved = JSON.parse(raw) as StoredSettings;
-    return normalizeSettings({ ...saved, providers: saved.providers.map(({ baseUrlEncrypted, ...provider }) => ({ ...provider, baseUrl: baseUrlEncrypted ? this.decrypt(baseUrlEncrypted) : provider.baseUrl, apiKey: provider.apiKey ? this.decrypt(provider.apiKey) : '' })) });
+    const global = normalizeSettings({ ...saved, providers: saved.providers.map(({ baseUrlEncrypted, ...provider }) => ({ ...provider, baseUrl: baseUrlEncrypted ? this.decrypt(baseUrlEncrypted) : provider.baseUrl, apiKey: provider.apiKey ? this.decrypt(provider.apiKey) : '' })) });
+    return projectId ? normalizeSettings(resolveProjectSettings(global, readProjectSettings(this.db, projectId).overrides)) : global;
   }
-  public(): Settings {
-    return this.redact(this.get());
+  public(projectId?: string): Settings {
+    return this.redact(this.get(projectId));
   }
   private redact(settings: Settings): Settings {
     return { ...settings, providers: settings.providers.map(({ apiKey, ...provider }) => ({ ...provider, baseUrl: withoutUrlCredentials(provider.baseUrl), hasKey: Boolean(apiKey), ...(hasUrlCredentials(provider.baseUrl) ? { hasUrlCredentials: true } : {}) })) };

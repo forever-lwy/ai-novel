@@ -24,7 +24,7 @@ export class ImageService {
   private closed = false;
   private writingPumpScheduled = false;
   private writingBranches = new Set<string>();
-  constructor(private store: Store, private getSettings: () => Settings, private generator: ImageGenerator = generateImage, private optimizer: ImagePromptOptimizer = optimizeImagePrompt) {
+  constructor(private store: Store, private getSettings: (projectId?: string) => Settings, private generator: ImageGenerator = generateImage, private optimizer: ImagePromptOptimizer = optimizeImagePrompt) {
     for (const image of store.images.all()) if (['queued', 'running'].includes(image.status)) {
       image.status = 'paused'; image.error = '服务已重启；请手动重试生图，可能会产生新的费用'; this.save(image);
     }
@@ -66,7 +66,7 @@ export class ImageService {
   }
   /** Persist a draft asset without changing the story revision or waiting for pixels. */
   generateDuringWriting(job: Job, request: WritingImageRequest): StoryImage | undefined {
-    const configured = this.configuration(true); if (!configured || request.kind === 'portrait' && !configured.config.autoPortrait || request.kind === 'cg' && !configured.config.autoCG) return;
+    const configured = this.configuration(job.projectId, true); if (!configured || request.kind === 'portrait' && !configured.config.autoPortrait || request.kind === 'cg' && !configured.config.autoCG) return;
     this.available(job.branchId, job.baseRevisionId, false);
     const state = this.store.state(job.branchId);
     if (request.kind === 'portrait') {
@@ -86,8 +86,8 @@ export class ImageService {
     };
     this.store.images.insert(image); this.queue.push(image.id); this.writingProgress(job.branchId); return image;
   }
-  private configuration(optional = false) {
-    const settings = this.getSettings(); const config = normalizeImageSettings(settings.imageSettings);
+  private configuration(projectId: string, optional = false) {
+    const settings = this.getSettings(projectId); const config = normalizeImageSettings(settings.imageSettings);
     const provider = settings.providers.find(item => item.id === config.providerId);
     if (!provider || !config.model.trim()) { if (optional) return undefined; throw new HttpError('请先在设置中选择生图服务并填写生图模型'); }
     validateImageParameters(config);
@@ -165,7 +165,7 @@ export class ImageService {
     }
   }
   private prepare(branchId: string, input: ImageGenerateInput, automatic: boolean, state: StoryState, extraDescription = ''): StoryImage {
-    const { config } = this.configuration()!; const branch = this.store.getBranch(branchId);
+    const { config } = this.configuration(this.store.getBranch(branchId).projectId)!; const branch = this.store.getBranch(branchId);
     if (input.chapterId && !state.chapters.some(chapter => chapter.id === input.chapterId)) throw new HttpError('用于生图的章节不属于当前故事线');
     if (input.selection && input.kind !== 'cg') throw new HttpError('正文选区只能用于生成 CG');
     if (input.entityId && (input.kind === 'cg' || input.kind === 'map')) throw new HttpError('CG 和地图不能绑定单个资料实体');
@@ -257,14 +257,14 @@ export class ImageService {
     return { view, images: prepared.map(image => this.publicImage(image, branchId, true)) };
   }
   generate(branchId: string, input: ImageGenerateInput): { view: BranchView; image: StoryImage } {
-    this.available(branchId, input.baseRevisionId); this.configuration(); const state = this.store.state(branchId);
+    this.available(branchId, input.baseRevisionId); this.configuration(this.store.getBranch(branchId).projectId); const state = this.store.state(branchId);
     const result = this.register(branchId, input.baseRevisionId, [this.prepare(branchId, input, false, state)]); return { view: result.view, image: result.images[0] };
   }
   retry(branchId: string, imageId: string, baseRevisionId: string): { view: BranchView; image: StoryImage } {
-    this.available(branchId, baseRevisionId); this.configuration(); const previous = this.find(branchId, imageId, true);
+    this.available(branchId, baseRevisionId); this.configuration(this.store.getBranch(branchId).projectId); const previous = this.find(branchId, imageId, true);
     if (previous.bindingStatus === 'pending') throw new HttpError('请先保存正文并确认资料，再重试这张图片', 409);
     if (['queued', 'running'].includes(previous.status)) throw new HttpError('图片仍在生成中，请先取消或等待完成', 409);
-    const { config } = this.configuration()!;
+    const { config } = this.configuration(this.store.getBranch(branchId).projectId)!;
     const sameModel = !previous.generationParameters || previous.generationParameters.model === config.model && previous.generationParameters.protocol === config.protocol;
     const sameReferences = previous.selectedReferenceImageIds !== undefined || !(config.useCharacterReferences === false && previous.referenceCharacters?.length);
     let sameDimensions = true;
@@ -285,7 +285,7 @@ export class ImageService {
     return this.publicImage(image, branchId, true);
   }
   generateAutomatic(branchId: string, baseRevisionId: string, chapterId: string, requests: WritingImageRequest[], newCharacterIds: string[], checkpoint?: (revisionId: string) => void): { view: BranchView; images: StoryImage[] } | undefined {
-    const configured = this.configuration(true);
+    const configured = this.configuration(this.store.getBranch(branchId).projectId, true);
     this.available(branchId, baseRevisionId, false); const state = this.store.state(branchId); const prepared: StoryImage[] = [];
     const chapter = this.store.chapter(branchId, chapterId);
     const portraitIds = new Set<string>(); const sourceTexts = new Set<string>();
@@ -361,7 +361,7 @@ export class ImageService {
   private waitingForPortrait(image: StoryImage) {
     if (image.writingJobId && image.selectedReferenceImageIds === undefined) return this.writingDependencies(image).some(reference => ['queued', 'running'].includes(reference.status));
     if (image.selectedReferenceImageIds !== undefined) return false;
-    const configured = this.configuration(true); if (!configured || image.kind !== 'cg' || configured.config.useCharacterReferences === false || imageModelCapabilities(configured.config).referenceMode === 'none') return false;
+    const configured = this.configuration(image.projectId, true); if (!configured || image.kind !== 'cg' || configured.config.useCharacterReferences === false || imageModelCapabilities(configured.config).referenceMode === 'none') return false;
     const state = this.promptState(image); const candidates = new Set(image.writingPrompt ? this.writingReferenceIds(image, state) : this.sceneCharacters(image, state).map(entity => entity.id));
     return this.store.images.activeIds(state).some(id => { const portrait = this.store.images.get(id); return portrait?.kind === 'portrait' && portrait.entityId && candidates.has(imageEntity(state, portrait.entityId)?.id ?? '') && ['queued', 'running'].includes(portrait.status); });
   }
@@ -439,7 +439,7 @@ export class ImageService {
   }
   /** Resolve only references actually used by this scene, before reserving a worker. */
   private writingDependencies(image: StoryImage): StoryImage[] {
-    const { config } = this.configuration()!; const caps = imageModelCapabilities(config);
+    const { config } = this.configuration(image.projectId)!; const caps = imageModelCapabilities(config);
     if (image.dependencyImageIds === undefined) {
       if (image.kind !== 'cg' || config.useCharacterReferences === false || caps.referenceMode === 'none') { image.dependencyImageIds = []; this.save(image); return []; }
       const state = this.promptState(image);
@@ -463,13 +463,13 @@ export class ImageService {
   private async run(image: StoryImage, signal: AbortSignal) {
     try {
       if (!this.current(image)) { image.status = 'stale'; image.error = '故事线已有新版本，请按当前资料重新生成'; this.save(image); return; }
-      const { provider, config } = this.configuration()!;
+      const { provider, config } = this.configuration(image.projectId)!;
       image.status = 'running'; this.save(image);
       if (image.promptStatus !== 'completed') {
         const input = this.promptInput(image, config); image.materialEntityIds = [...new Set([...(image.materialEntityIds ?? []), ...input.characters.map(character => character.entityId)])];
         if (image.publicMaterial) image.materialFactIds = [...new Set([...(image.materialFactIds ?? []), ...this.promptState(image).entities.filter(entity => image.materialEntityIds!.includes(entity.id)).flatMap(entity => entity.facts.map(fact => fact.id))])];
         this.save(image);
-        const result = image.writingPrompt ? this.writingImagePrompt(image, input) : await this.optimizer(this.getSettings(), input, signal);
+        const result = image.writingPrompt ? this.writingImagePrompt(image, input) : await this.optimizer(this.getSettings(image.projectId), input, signal);
         const stored = this.store.images.get(image.id);
         if (!stored || stored.status !== 'running' || signal.aborted || this.closed || this.deletingProjects.has(image.projectId)) return;
         if (!this.current(image)) { image.status = 'stale'; image.error = '故事线已有新版本，提示词未应用'; this.save(image); return; }

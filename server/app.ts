@@ -1,3 +1,5 @@
+import { readProjectSettings, saveProjectSettings } from './project-settings.js';
+import { resolveProjectSettings } from '../shared/project-settings.js';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import multipart from '@fastify/multipart';
@@ -25,39 +27,13 @@ import { checkBackupSize, MAX_BACKUP_BYTES } from './backup-limits.js';
 import type { Source, SourcePreview, Settings, Entity, Foreshadow, Job, CapturedModelResponse, ModelRequestSnapshot } from '../shared/types.js';
 import { modelRoles, resolveModelConfig } from '../shared/model-settings.js';
 import { validatePromptTemplates } from '../shared/prompt-templates.js';
+import { modelNameSchema, providerSchema, modelRoleSchema, settingsSchema, parseProjectSettingsOverrides } from './settings-schema.js';
 import { parseTaskSettings } from '../shared/task-settings.js';
 import type { PromptPreviewInput } from '../shared/prompt-runtime.js';
 
 const revision = z.string().min(1).max(100);
 const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']);
 const outlineSchema = z.object({ worldview: z.string().max(100000).optional(), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000).optional() });
-const modelNameSchema = z.string().trim().max(300).refine(value => !/[\u0000-\u001f\u007f]/.test(value), '模型名称不能包含控制字符');
-const modelParametersSchema = z.object({
-  maxOutputTokens: z.number().int().min(256).max(128000), contextTokens: z.number().int().min(2048).max(2000000),
-  temperature: z.number().min(0).max(2).optional(), topP: z.number().min(0).max(1).optional(), topK: z.number().int().min(0).max(1000000).optional(),
-  presencePenalty: z.number().min(-2).max(2).optional(), frequencyPenalty: z.number().min(-2).max(2).optional(), seed: z.number().int().min(Number.MIN_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER).optional(),
-  stopSequences: z.array(z.string().min(1).max(1000)).max(16).optional(), timeoutMs: z.number().int().min(1000).max(3600000).optional(), stream: z.boolean().optional(),
-  openaiMaxTokensField: z.enum(['max_tokens', 'max_completion_tokens']).optional(), reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
-  geminiThinking: z.discriminatedUnion('mode', [z.object({ mode: z.literal('level'), level: z.enum(['minimal', 'low', 'medium', 'high']) }).strict(), z.object({ mode: z.literal('budget'), budget: z.number().int().min(-1).max(1000000) }).strict()]).optional(),
-  geminiIncludeThoughts: z.boolean().optional(),
-  geminiStreamFunctionCallArguments: z.boolean().optional(),
-  claudeThinking: z.discriminatedUnion('type', [z.object({ type: z.literal('disabled') }).strict(), z.object({ type: z.literal('adaptive') }).strict(), z.object({ type: z.literal('enabled'), budgetTokens: z.number().int().min(1024).max(128000) }).strict()]).optional(),
-  claudeEffort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
-});
-const providerSchema = z.object({ id: z.string().min(1).max(100), name: z.string().min(1).max(100), protocol: z.enum(['openai-chat', 'openai-responses', 'gemini', 'claude']), baseUrl: z.string().url().max(2000).refine(v => { const u = new URL(v); return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password; }, '服务地址必须是 HTTP(S)，不能包含用户名或密码'), model: modelNameSchema.optional(), apiKey: z.string().max(4096).optional(), hasKey: z.boolean().optional(), clearApiKey: z.boolean().optional() }).extend(modelParametersSchema.partial().shape);
-const modelRoleSchema = z.enum(modelRoles);
-const modelProfileSchema = modelParametersSchema.extend({ role: modelRoleSchema.optional(), providerId: z.string().min(1).max(100), model: modelNameSchema.refine(value => Boolean(value), '模型参数需要指定模型名称') }).strict();
-const imageSettingsSchema = z.object({
-  providerId: z.string().max(100), model: modelNameSchema, protocol: z.enum(['openai-images', 'gemini', 'together-images']), size: z.string().max(50).refine(value => value === 'auto' || /^\d{2,4}x\d{2,4}$/.test(value), '图片尺寸需为 auto 或合法的宽x高'),
-  quality: z.enum(['auto', 'low', 'medium', 'high', 'standard', 'hd', 'xhigh', 'max']), stylePrompt: z.string().max(10000), autoPortrait: z.boolean(), autoCG: z.boolean(), timeoutMs: z.number().int().min(1000).max(3600000),
-  promptProviderId: z.string().max(100).optional(), promptModel: modelNameSchema.optional(), promptSystemPrompt: z.string().max(10000).optional(), useCharacterReferences: z.boolean().optional(),
-  aspectRatio: z.string().max(30).optional(), imageSize: z.enum(['auto', '512', '1K', '2K', '4K']).optional(), systemInstruction: z.string().max(32000).optional(),
-  temperature: z.number().min(0).max(2).optional(), topP: z.number().min(0).max(1).optional(), topK: z.number().int().min(1).max(1000000).optional(), seed: z.number().int().min(-2147483648).max(4294967295).optional(), maxOutputTokens: z.number().int().min(1).max(32768).optional(),
-  thinkingLevel: z.enum(['minimal', 'low', 'medium', 'high']).optional(), includeThoughts: z.boolean().optional(), searchGrounding: z.boolean().optional(),
-  outputFormat: z.enum(['png', 'jpeg', 'webp']).optional(), outputCompression: z.number().int().min(0).max(100).optional(), background: z.enum(['auto', 'opaque', 'transparent']).optional(), inputFidelity: z.enum(['low', 'high']).optional(), moderation: z.enum(['auto', 'low']).optional(),
-  negativePrompt: z.string().max(32000).optional(), steps: z.number().int().min(1).max(100).optional(), guidanceScale: z.number().min(0).max(20).optional(), width: z.number().int().min(16).max(8192).optional(), height: z.number().int().min(16).max(8192).optional(), promptUpsampling: z.boolean().optional(), disableSafetyChecker: z.boolean().optional(),
-}).strict();
-const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional(), promptTemplates: z.unknown().optional(), imageSettings: imageSettingsSchema.optional(), taskSettings: z.unknown().optional() });
 const promptPreviewSchema = z.object({
   task: z.enum(['writing', 'extraction', 'compression', 'image']), templates: z.unknown(), protocol: providerSchema.shape.protocol,
   variables: z.record(z.string().max(100), z.string().max(200000)).refine(value => Object.keys(value).length <= 150, '示例变量过多'),
@@ -84,9 +60,9 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     await initializePassword(settings, options.initialPassword ?? process.env.INITIAL_PASSWORD);
     const oldSetupPath = join(dataDir, '.setup-token'); if (existsSync(oldSetupPath)) unlinkSync(oldSetupPath);
   } catch (error) { store.close(); throw error; }
-  const images = new ImageService(store, () => settings.get());
+  const images = new ImageService(store, projectId => settings.get(projectId));
   const extensions = new ExtensionService(settings, dataDir);
-  const engine = new StoryEngine(store, () => settings.get(), undefined, images, extensions);
+  const engine = new StoryEngine(store, projectId => settings.get(projectId), undefined, images, extensions);
   store.db.exec(`CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, filename TEXT NOT NULL, format TEXT NOT NULL, chapter_count INTEGER NOT NULL, created_at TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, preview TEXT NOT NULL, storage_name TEXT NOT NULL)`);
   const app = Fastify({ logger: options.logger ? { serializers: { req: safeRequestLog }, redact: ['req.headers.cookie', 'req.headers.authorization'] } : false,
     bodyLimit: 2 * 1024 * 1024, requestTimeout: 120_000, keepAliveTimeout: 15_000, maxRequestsPerSocket: 100, trustProxy: config.trustedProxies });
@@ -97,7 +73,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     else if (route.url.endsWith('/import')) route.bodyLimit = 32 * 1024 * 1024 + 4096;
     else if (/\/chapters(?:\/:chapterId)?$|\/outputs(?:\/:outputId\/apply)?$/.test(route.url) || route.url === '/api/sources/:id/confirm') route.bodyLimit = 64 * 1024 * 1024;
     else if (route.url.endsWith('/entities/:entityId')) route.bodyLimit = 16 * 1024 * 1024;
-    else if (['/api/settings', '/api/settings/prompt-preview'].includes(route.url)) route.bodyLimit = 8 * 1024 * 1024;
+    else if (['/api/settings', '/api/settings/prompt-preview', '/api/projects/:id/settings'].includes(route.url)) route.bodyLimit = 8 * 1024 * 1024;
   });
   const deletionDir = join(dataDir, 'deleted-sources');
   // Originals move aside while SQLite commits. On restart, restore files if the
@@ -333,6 +309,38 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.post('/api/jobs/:id/choice', async request => { const input = z.object({ choiceId: z.string().min(1).max(100), optionId: z.string().min(1).max(100).optional(), customText: z.string().trim().min(1).max(10000).optional(), baseRevisionId: revision.optional(), branchId: z.string().min(1).optional() }).strict().parse(request.body); return jobView(engine.choose(param(request), input)); });
   app.post('/api/jobs/:id/:action', async request => jobView(engine.action(param(request), z.enum(['pause', 'resume', 'retry', 'cancel']).parse((request.params as any).action))));
   app.get('/api/settings', async () => settings.public());
+  const projectSettingsView = (projectId: string) => ({ ...readProjectSettings(store.db, projectId), global: settings.public(), effective: settings.public(projectId) });
+  app.get('/api/projects/:id/settings', async request => projectSettingsView(param(request)));
+  app.put('/api/projects/:id/settings', async request => {
+    const projectId = param(request); store.getProject(projectId);
+    const body = z.object({ revision: z.string().min(1).max(100), overrides: z.unknown() }).strict().parse(request.body);
+    let overrides;
+    try { overrides = parseProjectSettingsOverrides(body.overrides); }
+    catch (error) { fail(error instanceof Error ? error.message : '作品设置格式无效。'); }
+    const effective = normalizeSettings(resolveProjectSettings(settings.get(), overrides));
+    const providerExists = (id: string) => !id || effective.providers.some(provider => provider.id === id);
+    for (const role of modelRoles) {
+      const task = overrides.tasks?.[role];
+      if (!task) continue;
+      if (!providerExists(task.providerId)) fail('作品任务所选供应商已不存在，请重新选择或恢复继承全局。');
+      for (const profile of effective.modelParameters?.filter(profile => profile.role === role) ?? []) {
+        const provider = effective.providers.find(provider => provider.id === profile.providerId);
+        // Retain inactive profiles for removed connections; only the selected connection must exist.
+        if (!provider) continue;
+        try { validateProviderOptions(resolveModelConfig(effective, provider, profile.model, role)); }
+        catch (error) { fail(error instanceof Error ? error.message : '模型参数组合无效。'); }
+      }
+    }
+    const image = overrides.imageSettings;
+    if (image) {
+      if (!providerExists(image.providerId) || !providerExists(image.promptProviderId ?? '')) fail('作品生图或提示词优化的供应商已不存在，请重新选择或恢复继承全局。');
+      if (image.providerId && !image.model || image.promptProviderId && !image.promptModel) fail('已选择供应商时需要填写对应模型名称。');
+      try { if (image.providerId) validateImageParameters(image); }
+      catch (error) { fail(error instanceof Error ? error.message : '图片模型参数无效。'); }
+    }
+    saveProjectSettings(store.db, projectId, body.revision, overrides);
+    return projectSettingsView(projectId);
+  });
   app.post('/api/settings/prompt-preview', async request => {
     const input = promptPreviewSchema.parse(request.body);
     try { return engine.previewPrompt({ ...input, templates: validatePromptTemplates(input.templates) } as PromptPreviewInput); }
@@ -392,8 +400,8 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     }
   });
   app.post('/api/settings/test', async request => {
-    const { providerId, model: requestedModel, role: requestedRole } = z.object({ providerId: z.string().min(1).max(100), model: modelNameSchema.refine(value => Boolean(value), '请选择或填写用于测试的模型名称').optional(), role: modelRoleSchema.optional() }).parse(request.body);
-    const current = settings.get(); const connection = current.providers.find(provider => provider.id === providerId);
+    const { projectId, providerId, model: requestedModel, role: requestedRole } = z.object({ projectId: z.string().min(1).max(100).optional(), providerId: z.string().min(1).max(100), model: modelNameSchema.refine(value => Boolean(value), '请选择或填写用于测试的模型名称').optional(), role: modelRoleSchema.optional() }).parse(request.body);
+    const current = settings.get(projectId); const connection = current.providers.find(provider => provider.id === providerId);
     if (!connection) fail('供应商连接不存在。', 404);
     const candidateRoles = requestedRole ? [requestedRole] : modelRoles;
     const assignedModel = candidateRoles.map(role => current[`${role}ProviderId`] === providerId ? current[`${role}Model`] : '').find(Boolean);
