@@ -12,6 +12,20 @@ const variables = {
 const messageBlock = (id: string, role: PromptBlock['role'], content: string): PromptBlock => ({ id, name: id, role, content, enabled: true });
 
 describe('editable task prompt templates', () => {
+  it('states the actual text delivery contract when writing overrides the general result tool', () => {
+    const settings = defaultPromptTemplates();
+    settings.presets.writing[0].writingOutputMode = 'text';
+    const request = compileTaskPrompt(settings, 'writing', variables);
+    expect(request).toMatchObject({ writingOutputMode: 'text' });
+    expect(request.responseCarrier).toBeUndefined();
+    expect(request.runtimeBlocks).toContainEqual(expect.objectContaining({ name: '正文普通文本通道规则', content: expect.stringContaining('本次使用普通文本交付') }));
+    expect(request.system).toContain('上文通用预设中关于结果工具的要求在本次不适用');
+    expect(request.system).toContain('工具调用说明、参数和模拟结果不得混入正文');
+    const inherited = compileTaskPrompt(defaultPromptTemplates(), 'writing', variables);
+    expect(inherited.responseCarrier).toBeDefined();
+    expect(inherited.runtimeBlocks.some(block => block.name === '正文普通文本通道规则')).toBe(false);
+  });
+
   it('inserts task messages at the general slot with separate variable scopes, and supports opting out', () => {
     const settings = defaultPromptTemplates();
     settings.general!.presets[0].variables = { style: '通用 {{instruction}}' };

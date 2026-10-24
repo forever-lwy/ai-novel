@@ -52,9 +52,10 @@ export function createStreamEndDetector(protocol: ProviderProtocol): (chunk: str
 }
 
 /** Emit prose only; public thoughts and tool execution are recorded through separate activity events. */
-export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text: string) => void, writingTool: boolean | { name: string; field: string } = false, filterToolArtifacts = false): ((chunk: string) => void) & { finish: () => void } {
+export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text: string) => void, writingTool: boolean | { name: string; field: string } = false, filterToolArtifacts: boolean | readonly string[] = false): ((chunk: string) => void) & { finish: () => void } {
   const carrierName = typeof writingTool === 'object' ? writingTool.name : WRITING_RESPONSE_NAME;
   const carrierField = typeof writingTool === 'object' ? writingTool.field : 'prose';
+  const artifactToolNames = typeof filterToolArtifacts === 'boolean' ? [] : filterToolArtifacts;
   let pending = '';
   const toolParts = new Map<string, { name: string; raw: string; sent: string }>();
   const geminiCalls = new GeminiFunctionStream();
@@ -63,7 +64,7 @@ export function createStreamTextEmitter(protocol: ProviderProtocol, emit: (text:
     const candidates = [plain, ...[...toolParts.values()].filter(part => part.name === carrierName).map(part => part.sent)];
     // Normalize each channel before comparing lengths: an artifact-only plain
     // channel must not displace a shorter, valid result-tool payload.
-    const best = candidates.map(value => filterToolArtifacts ? cleanToolOutputArtifacts(value, final) : value)
+    const best = candidates.map(value => filterToolArtifacts ? cleanToolOutputArtifacts(value, final, artifactToolNames) : value)
       .reduce((longest, value) => value.length > longest.length ? value : longest, '');
     // Two gateway channels can mirror the same output. Append only a
     // compatible suffix; the final capture selects the complete candidate.

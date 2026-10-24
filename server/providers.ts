@@ -338,7 +338,7 @@ export function buildRequestSnapshot(config: ProviderConfig, request: ModelReque
   return requestSnapshot(config, continuationWire(config, request));
 }
 
-async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void, onContent?: () => void, writingTool: boolean | { name: string; field: string } = false, filterToolArtifacts = false): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
+async function readBody(response: Response, config: ProviderConfig, onTextDelta?: (text: string) => void, onActivity?: (event: ModelActivityEvent) => void, onContent?: () => void, writingTool: boolean | { name: string; field: string } = false, filterToolArtifacts: boolean | readonly string[] = false): Promise<{ raw: string; bytes: number; incomplete: boolean; error?: 'limit' | 'read' }> {
   if (!response.body) return { raw: '', bytes: 0, incomplete: false };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -418,8 +418,9 @@ function inspectBody(config: ProviderConfig, response: Response | undefined, bod
 
 /** A single billable request. Failures never trigger automatic retries. */
 async function sendModelRequest(config: ProviderConfig, request: ModelRequest, wire: ReturnType<typeof requestBody>): Promise<{ data: JsonObject; result: ModelResult }> {
-  const filterToolArtifacts = config.protocol === 'gemini' && Boolean(request.tools?.length || request.writingOutputMode === 'tool');
-  const normalize = (text: string) => filterToolArtifacts ? cleanToolOutputArtifacts(text) : text;
+  const filterToolArtifacts = config.protocol === 'gemini' && Boolean(request.tools?.length || request.writingOutputMode === 'tool')
+    ? [...(request.tools ?? []).map(tool => tool.name), ...(request.writingOutputMode === 'tool' ? [request.responseCarrier?.name ?? WRITING_RESPONSE_NAME] : [])] : false;
+  const normalize = (text: string) => filterToolArtifacts ? cleanToolOutputArtifacts(text, true, filterToolArtifacts) : text;
   const clean = (text: string) => request.textFilter ? cleanDramatronText(normalize(text), request.textFilter) : normalize(text);
   let outputCallbackFailed = false;
   const publishOutput = (publish: () => void) => {

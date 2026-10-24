@@ -44,9 +44,67 @@ async function upstream(stream: boolean, reply: (round: number) => unknown[], tr
   return { config, bodies, raw };
 }
 
-const compiled = () => compileTaskPrompt(defaultPromptTemplates(), 'writing', { mode: 'original', instruction: '继续故事', context: '', maxWords: 1000 });
+const compiled = (mode?: 'text') => {
+  const templates = defaultPromptTemplates();
+  if (mode) templates.presets.writing[0].writingOutputMode = mode;
+  return compileTaskPrompt(templates, 'writing', { mode: 'original', instruction: '继续故事', context: '', maxWords: 1000 });
+};
+
+// Synthetic reproduction of the deployed wire shape. Never store private prose
+// or the original request/response in a committed regression fixture.
+const preamble = "Let's call `generate_scene_cg` here for the gate scene. Let's check the exact text to quote.）】}}}}";
 
 describe.each([false, true])('Gemini illustration output artifacts, stream=%s', stream => {
+  it.each(['text', 'carrier'] as const)('separates leaked tool commentary from %s prose before saving or continuing', async channel => {
+    const request = compiled(channel === 'text' ? 'text' : undefined);
+    const prose = ['信使到了城门。\n\n', '守卫为他开了门。'];
+    const sink = request.responseCarrier;
+    const service = await upstream(stream, round => {
+      const content = prose[round] + (round ? '' : preamble);
+      return [
+        { thought: true, text: '核对画面。', thoughtSignature: `thought-${round}` },
+        ...(sink ? [{ functionCall: { id: `output-${round}`, name: sink.name, args: { [sink.field]: content } } }] : [{ text: content }]),
+        ...(!round ? [{ functionCall: { id: 'scene', name: 'generate_scene_cg', args: { sourceText: prose[0], prompt: '信使站在城门前。' } }, thoughtSignature: 'signed-scene' }] : []),
+      ];
+    });
+    const execute = vi.fn(() => ({ status: 'requested' }));
+    const captures: CapturedModelResponse[] = [];
+    const checkpoints: ModelToolContinuation[] = [];
+    const positions: number[] = [];
+    let visible = '';
+    const result = await generateText(service.config, {
+      ...request, tools: [{ name: 'generate_scene_cg', description: '登记插画', parameters: { type: 'object' }, execute }],
+      onTextDelta: text => { visible += text; expect(text).not.toMatch(/Let's|】|}/); },
+      onActivity: event => { if (event.type === 'tool_call') positions.push(visible.length); },
+      onResponse: response => captures.push(response), onContinuation: state => { checkpoints.push(state); },
+    });
+    expect(result.text).toBe(prose.join(''));
+    expect(visible).toBe(result.text);
+    expect(captures.map(response => response.text)).toEqual(prose);
+    expect(captures.map(response => response.rawResponse)).toEqual(service.raw);
+    expect(checkpoints.every(state => !state.text.includes('Let') && !state.text.includes('】'))).toBe(true);
+    expect(positions).toEqual([prose[0].length]);
+    expect(execute).toHaveBeenCalledExactlyOnceWith({ sourceText: prose[0], prompt: '信使站在城门前。' });
+    expect(service.bodies).toHaveLength(2);
+    const history = service.bodies[1].contents.find((message: any) => message.role === 'model' && message.parts.some((part: any) => part.functionCall?.name === 'generate_scene_cg')).parts;
+    const rawText = sink ? history.find((part: any) => part.functionCall?.name === sink.name).functionCall.args[sink.field]
+      : history.filter((part: any) => !part.thought && typeof part.text === 'string').map((part: any) => part.text).join('');
+    expect(rawText).toBe(prose[0] + preamble);
+    expect(history.find((part: any) => part.functionCall?.name === 'generate_scene_cg')).toMatchObject({ thoughtSignature: 'signed-scene', functionCall: { id: 'scene' } });
+  });
+
+  it('keeps clean prose after a truncated preamble turn without executing its tool', async () => {
+    const service = await upstream(stream, () => [{ text: `已经返回的正文。${preamble}` }, { functionCall: { id: 'scene', name: 'generate_scene_cg', args: {} } }], true);
+    const execute = vi.fn(); const captures: CapturedModelResponse[] = []; let visible = '';
+    await expect(generateText(service.config, {
+      ...compiled('text'), tools: [{ name: 'generate_scene_cg', description: '登记插画', parameters: { type: 'object' }, execute }],
+      onTextDelta: text => { visible += text; }, onResponse: response => captures.push(response),
+    })).rejects.toThrow(/截断|未完成/);
+    expect(visible).toBe('已经返回的正文。');
+    expect(captures[0]).toMatchObject({ text: visible, rawResponse: service.raw[0], incomplete: true });
+    expect(execute).not.toHaveBeenCalled(); expect(service.bodies).toHaveLength(1);
+  });
+
   it.each(['plain', 'carrier'] as const)('keeps %s prose clean across consecutive portrait and scene calls', async channel => {
     const request = compiled();
     const sink = request.responseCarrier!;
@@ -179,6 +237,29 @@ describe.each([false, true])('Gemini illustration output artifacts, stream=%s', 
 });
 
 describe('tool artifact recognition boundaries', () => {
+  it.each([
+    [`前文。${preamble}`, '前文。'],
+    [`前文。${preamble.replace("Let's", 'Let’s')}`, '前文。'],
+    [`“${preamble}”`, `“${preamble}”`],
+    [`「${preamble}」`, `「${preamble}」`],
+    [JSON.stringify({ text: preamble }), JSON.stringify({ text: preamble })],
+    [preamble.replace('generate_scene_cg', 'unknown_tool'), preamble.replace('generate_scene_cg', 'unknown_tool')],
+    ["Let's call `generate_scene_cg` in this example.", "Let's call `generate_scene_cg` in this example."],
+    ['字符示例：）】}}}}', '字符示例：）】}}}}'],
+    ["结尾 Let's", "结尾 Let's"],
+  ])('uses tool identity and malformed envelope together through every split: %s', (raw, expected) => {
+    expect(cleanToolOutputArtifacts(raw, true, ['generate_scene_cg'])).toBe(expected);
+    for (let split = 0; split <= raw.length; split++) {
+      let visible = '';
+      const emit = createStreamTextEmitter('gemini', text => { visible += text; }, false, ['generate_scene_cg']);
+      emit(frame([{ text: raw.slice(0, split) }]));
+      expect(expected.startsWith(visible), `first delta at ${split}`).toBe(true);
+      emit(frame([{ text: raw.slice(split) }]));
+      expect(expected.startsWith(visible), `second delta at ${split}`).toBe(true);
+      emit.finish(); expect(visible, `finished at ${split}`).toBe(expected);
+    }
+  });
+
   it.each([
     [`前文。${artifact}后文。`, '前文。后文。'],
     [`前文。${doubled}后文。`, '前文。后文。'],

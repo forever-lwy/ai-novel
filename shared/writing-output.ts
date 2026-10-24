@@ -6,7 +6,38 @@ export const WRITING_RESPONSE_NAME = 'emit_writing_response';
 // standalone CDATA closers, emoji or ordinary "Sides" text. Signed wire history
 // stays untouched; this is used only for decoded output candidates.
 const TOOL_OUTPUT_ARTIFACTS = ['Sides]]>🪒úm', ']]>🪒úm'];
-export function cleanToolOutputArtifacts(text: string, final = true): string {
+
+/** A deployed Gemini response put a tool preamble and broken envelope in text.
+ * Require both a declared tool reference and the malformed closing sequence;
+ * never classify arbitrary English prose as thinking. Hold ambiguous streaming
+ * suffixes until the complete shape can be checked, then release normal text.
+ */
+function cleanToolCallPreamble(text: string, final: boolean, toolNames: readonly string[]): string {
+  if (!toolNames.length) return text;
+  const prefixes = toolNames.flatMap(name => ["Let's call `", 'Let’s call `'].map(lead => `${lead}${name}\``));
+  const quotes: Record<string, string> = { '"': '"', '“': '”', '「': '」', '『': '』' };
+  let quote = ''; let escaped = false; let candidate = -1;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (quote === '"' && char === '\\') escaped = true;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (quotes[char]) { quote = quotes[char]; continue; }
+    if (char !== 'L' || /[A-Za-z0-9_]/.test(text[index - 1] ?? '')) continue;
+    const suffix = text.slice(index);
+    if (prefixes.some(prefix => suffix.startsWith(prefix))) {
+      if (!final) return text.slice(0, index);
+      candidate = index;
+    } else if (!final && prefixes.some(prefix => prefix.startsWith(suffix))) return text.slice(0, index);
+  }
+  return candidate >= 0 && /[）)]】(?:\s*}){2,}\s*$/.test(text) ? text.slice(0, candidate) : text;
+}
+
+export function cleanToolOutputArtifacts(text: string, final = true, toolNames: readonly string[] = []): string {
+  text = cleanToolCallPreamble(text, final, toolNames);
   let output = ''; let start = 0; let quoted = false; let escaped = false;
   for (let index = 0; index < text.length; index++) {
     const char = text[index];
