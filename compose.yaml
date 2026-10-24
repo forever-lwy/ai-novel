@@ -24,6 +24,5 @@ services:
       TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
       OUTBOUND_ALLOWED_ORIGINS: "${OUTBOUND_ALLOWED_ORIGINS:-}"
     volumes:
-      - novel-data:/app/data
-volumes:
-  novel-data:
+      - ./data:/app/data
+
