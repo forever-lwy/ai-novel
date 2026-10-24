@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { WritingTimeline } from '../client/WritingTimeline.js';
 import type { WritingActivity } from '../shared/types.js';
 import { proseFragments, writingTimeline } from '../client/writing-timeline.js';
 
@@ -7,6 +10,14 @@ const rawText = (text: string, parts: ReturnType<typeof writingTimeline>) => par
 const displayedFragments = (text: string, parts: ReturnType<typeof writingTimeline>) => parts.flatMap(part => part.kind === 'text' ? proseFragments(text, part.start, part.end) : []);
 
 describe('writing process anchored in unchanged prose', () => {
+  it('shows the complete original process separately after an edit, preserving its stored offsets', () => {
+    const records = [activity('original', 3), activity('later', 100)];
+    const html = renderToStaticMarkup(createElement(WritingTimeline, { text: '修改后的正文。', activities: records, status: 'completed', originalProcess: true }));
+    expect(html).toContain('data-location="original"'); expect(html).toContain('保留原正文的生成过程');
+    expect(html).toContain('PRIVATE_PROCESS_original'); expect(html).toContain('PRIVATE_PROCESS_later');
+    expect(html).toContain('修改后的正文。'); expect(html).not.toContain('data-prose-range="0:3"');
+    expect(records.map(record => record.proseOffset)).toEqual([3, 100]);
+  });
   it('keeps paragraph-internal text complete and selectable around separate activity groups', () => {
     const text = '  林舟走向白石城，看到古门。  \r\n\r\n青霜说：“等一等。”\r\n';
     const at = text.indexOf('，'); const parts = writingTimeline(text, [activity('middle', at), activity('next', text.indexOf('青霜'))]);

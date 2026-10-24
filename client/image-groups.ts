@@ -28,7 +28,7 @@ export function groupStoryImages(images: StoryImage[], entities: Entity[], chapt
     const chapter = cover.chapterId ? chaptersById.get(cover.chapterId) : undefined;
     const kind = versions.some(image => image.kind === 'portrait') ? 'portrait' : cover.kind;
     const title = cover.bindingStatus === 'pending' ? cover.title : kind === 'map' ? '世界地图' : kind === 'cg'
-      ? `${chapter?.title || cover.title.replace(/ · CG$/, '')} · ${cover.selection ? '选段 CG' : '整章 CG'}`
+      ? `${chapter?.title || cover.title.replace(/ · CG$/, '')} · ${cover.selection || cover.sourceSelection ? '选段 CG' : '整章 CG'}`
       : entity ? `${entity.name} · ${kind === 'portrait' ? '立绘' : '资料图'}` : cover.title;
     const excerpt = kind === 'cg' ? cover.sourceText?.replace(/\s+/g, ' ').trim().slice(0, 100) : undefined;
     const searchText = [title, ...versions.flatMap(image => [image.title, chaptersById.get(image.chapterId ?? '')?.title ?? '']), entity?.name, ...(entity?.aliases ?? [])].join(' ').toLowerCase();

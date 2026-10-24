@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { Entity, StoryImage, StoryState } from '../shared/types.js';
 import { readerEntityMaterial } from './reader-materials.js';
 import { imageGroupKey } from '../shared/image-groups.js';
+import { includesChapterVersion } from '../shared/chapter-versions.js';
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const imageParametersSchema = z.object({ size: z.string().max(50).optional(), aspectRatio: z.string().max(30).optional(), imageSize: z.enum(['512', '1K', '2K', '4K']).optional(), width: z.number().int().positive().max(8192).optional(), height: z.number().int().positive().max(8192).optional() }).strict();
@@ -58,7 +59,7 @@ function readerEntity(entity: Entity | undefined, state: StoryState, publicMater
 }
 export function imageVisible(image: StoryImage, state: StoryState, author: boolean, historicalSource = false): boolean {
   if (!historicalSource && !state.imageIds?.includes(image.id)) return false;
-  if (!historicalSource && image.chapterId && !state.chapters.some(chapter => chapter.id === image.chapterId)) return false;
+  if (!historicalSource && image.chapterId && !state.chapters.some(chapter => includesChapterVersion(chapter, image.chapterId))) return false;
   if (image.entityId) {
     const entity = imageEntity(state, image.entityId);
     if (!entity || !author && !readerEntity(entity, state, image.publicMaterial === true)) return false;
@@ -84,8 +85,22 @@ export class ImageStore {
       CREATE INDEX IF NOT EXISTS image_assets_project ON image_assets(project_id);`);
   }
   get(id: string): StoryImage | undefined { const row = this.db.prepare('SELECT data FROM image_assets WHERE id=?').get(id); return row ? JSON.parse(String(row.data)) : undefined; }
+  /** Display links follow manual edits; the stored image keeps its original prose evidence. */
+  project(image: StoryImage, state: StoryState): StoryImage {
+    const chapter = state.chapters.find(chapter => includesChapterVersion(chapter, image.chapterId));
+    if (!chapter || chapter.id === image.chapterId) return image;
+    let selection = image.selection;
+    if (selection) {
+      const row = this.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(chapter.id); const text = String(row?.text ?? '');
+      if (text.slice(selection.start, selection.end) !== image.sourceText) {
+        const start = image.sourceText ? text.indexOf(image.sourceText) : -1;
+        selection = start >= 0 && text.indexOf(image.sourceText!, start + 1) < 0 ? { start, end: start + image.sourceText!.length } : undefined;
+      }
+    }
+    return { ...image, chapterId: chapter.id, sourceChapterId: image.chapterId, sourceSelection: image.selection, selection };
+  }
   groupKey(image: StoryImage, state: StoryState): string {
-    return imageGroupKey(image, image.entityId ? imageEntity(state, image.entityId)?.id ?? image.entityId : undefined);
+    return imageGroupKey(this.project(image, state), image.entityId ? imageEntity(state, image.entityId)?.id ?? image.entityId : undefined);
   }
   activeIds(state: StoryState): string[] {
     const selected = new Map<string, string>(); const explicit = state.activeImageIds !== undefined;

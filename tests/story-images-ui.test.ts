@@ -13,6 +13,11 @@ const image = (patch: Partial<StoryImage> = {}): StoryImage => ({ id: 'portrait'
 const render = (component: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(component);
 
 describe('story illustration controls', () => {
+  it('retains a detached scene preview and evidence while preventing redraw from stale selection offsets', () => {
+    const html = render(createElement(StoryImageCards, { images: [image({ sourceChapterId: 'old', sourceSelection: { start: 10, end: 20 }, selection: undefined })], author: true, onGenerate: () => {}, onAction: () => {} }));
+    expect(html).toContain('原插画选段已修改'); expect(html).toContain('查看图片'); expect(html).toContain('删除图片');
+    expect(html).not.toContain('重新绘制'); expect(html).not.toContain('AI 修改');
+  });
   it('shows only enabled chapter covers while retaining all versions behind each cover', () => {
     const images = [image({ active: true, previewUrl: '/enabled.png' }), image({ id: 'newer', active: false, url: '/parked.png', createdAt: '2026-10-05T00:00:00Z' }), image({ id: 'disabled-group', entityId: 'other', active: false, url: '/disabled.png' }), image({ id: 'running', entityId: 'waiting', active: true, status: 'running', url: undefined })];
     const html = render(createElement(ChapterImageCards, { images, entities: [person], chapters: [], author: true }));

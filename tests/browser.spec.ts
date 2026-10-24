@@ -12,6 +12,7 @@ import { Store } from '../server/store';
 import { readingProgressStory, legacyReadingProgressStory, mixedVisibilityStory, readingPng } from './fixtures/reading-progress';
 import type { Entity, StoryImage } from '../shared/types';
 import { imageGroupKey } from '../shared/image-groups';
+import { chapterEditHistoryStory, legacyChapterEdit } from './fixtures/chapter-edit-history';
 
 // These tests exercise the real UI/server against a local HTTP model fixture.
 // Passing them is not evidence of real-provider acceptance.
@@ -2849,6 +2850,50 @@ async function expectImagePixels(images: Locator) {
     await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0)).toBe(true);
   }
 }
+
+for (const width of [1440, 390]) test(`手动编辑正文保留生成过程和本章插画，兼容旧数据与刷新 ${width}px`, async ({ page }, testInfo) => {
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-edit-history-browser-'))); let backup: Buffer;
+  try {
+    const story = chapterEditHistoryStory(store); const original = store.chapter(story.branchId, story.chapter.id).text;
+    if (width === 1440) legacyChapterEdit(store, story.branchId, `旧版已编辑的开头。${original}`);
+    const data = store.exportProject(story.project.id); data.project.title = `正文编辑历史 ${width}`;
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: data, sources: [] }));
+  } finally { store.close(); }
+  const response = await page.request.post('/api/restore', { multipart: { file: { name: 'chapter-history.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(response.ok(), await response.text()).toBe(true); const project = await response.json();
+  const branchId = project.mainBranchId;
+  const images: StoryImage[] = await (await page.request.get(`/api/branches/${branchId}/images`)).json(); const cg = images.find(image => image.kind === 'cg')!;
+  await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 }); await page.goto('/');
+  await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await showGenerationProcess(page);
+  const process = page.getByRole('region', { name: '生成过程', exact: true });
+  await expect(process.locator('.writing-activity')).toHaveCount(2); await expect(page.locator('.chapter-images [data-cover-image-id]')).toHaveAttribute('data-cover-image-id', cg.id);
+  await page.getByRole('button', { name: '编辑', exact: true }).click(); await page.getByLabel('章节标题', { exact: true }).fill('灯塔修订标题');
+  await page.getByRole('button', { name: '保存正文', exact: true }).click(); await expect(page.getByLabel('章节正文', { exact: true })).toHaveCount(0);
+  await expect(process.locator('.writing-activity')).toHaveCount(2);
+  for (const text of ['第一次手动修改后的正文。', '第二次手动修改后的正文。']) {
+    await page.getByRole('button', { name: '编辑', exact: true }).click(); await page.getByLabel('章节正文', { exact: true }).fill(text);
+    await page.getByRole('button', { name: '保存正文', exact: true }).click(); await expect(page.getByLabel('章节正文', { exact: true })).toHaveCount(0);
+    await expect(process).toHaveAttribute('data-location', 'original'); await expect(process.locator('.writing-activity')).toHaveCount(2);
+    await process.locator('details').first().locator('summary').click(); await expect(process).toContainText('原生成过程：先核对灯塔场景。');
+    await expect(page.locator('.chapter-images [data-cover-image-id]')).toHaveAttribute('data-cover-image-id', cg.id);
+    await expectImagePixels(page.locator('.chapter-images img')); await expect(page.locator('.manuscript .prose')).toHaveText(text);
+  }
+  await page.getByRole('button', { name: '阅读视图', exact: true }).click(); await expect(process).toHaveCount(0);
+  await expect(page.locator('.chapter-images [data-cover-image-id]')).toHaveAttribute('data-cover-image-id', cg.id); await showGenerationProcess(page);
+  await expect(process.locator('.writing-activity')).toHaveCount(2);
+  await process.scrollIntoViewIfNeeded(); await page.screenshot({ path: testInfo.outputPath(`edited-process-${width}.png`), animations: 'disabled' });
+  await page.reload(); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await showGenerationProcess(page);
+  await expect(process.locator('.writing-activity')).toHaveCount(2); await expect(page.locator('.manuscript .prose')).toHaveText('第二次手动修改后的正文。');
+  const currentImages: StoryImage[] = await (await page.request.get(`/api/branches/${branchId}/images`)).json(); const retained = currentImages.find(image => image.id === cg.id)!;
+  expect(retained.chapterId).not.toBe(cg.chapterId); expect(retained.active).toBe(true);
+  await openChapterImageGroup(page, retained); const card = page.locator(`.chapter-images [data-image-id="${cg.id}"]`);
+  await card.getByRole('button', { name: '生图详情', exact: true }).click(); await expect(page.getByTestId('image-viewer')).toContainText('正文已手动编辑');
+  await page.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
+  await card.getByRole('button', { name: '关联剧情', exact: true }).click(); await expect(process.locator('.writing-activity')).toHaveCount(2);
+  await card.getByRole('button', { name: '停用图片', exact: true }).click(); await expect(card).toHaveAttribute('data-image-active', 'false');
+  await page.getByRole('button', { name: '返回本章插画', exact: true }).click(); await expect(page.locator('.chapter-images')).toContainText('本章暂无启用的插画');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
 
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
   test(`图册按人物和场景归组，搜索保留全部版本，启用删除及分支隔离（${viewport.width}px）`, async ({ page }, testInfo) => {

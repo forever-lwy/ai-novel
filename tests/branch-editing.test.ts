@@ -76,7 +76,7 @@ describe('manual prose edits on the current story line', () => {
     expect(() => store.restoreProject(store.exportProject(store.getBranch(branchId).projectId))).not.toThrow();
   });
 
-  it('keeps CGs with unchanged prose, and preserves old CG pixels in history when the prose changes', () => {
+  it('keeps CGs and their enabled selection after prose changes while preserving their original evidence', () => {
     const { store, project, branchId, third } = story(); const target = third.state.chapters[2].id; const imageId = third.state.imageIds!.at(-1)!;
     const sibling = store.fork(branchId, { baseRevisionId: base(store, branchId), name: '插画保留线' });
     const renamed = store.saveChapter(branchId, { baseRevisionId: base(store, branchId), chapterId: target, title: '灯塔改名', text: store.chapter(branchId, target).text });
@@ -84,7 +84,8 @@ describe('manual prose edits on the current story line', () => {
     expect(store.search(branchId, '灯塔改名', true).chapters.map(chapter => chapter.id)).toContain(target);
     expect(store.search(sibling.branch.id, '灯塔改名', true).chapters).toEqual([]);
     const edited = store.saveChapter(branchId, { baseRevisionId: renamed.branch.revisionId, chapterId: target, title: '灯塔改名', text: '重新编辑后的场景。' });
-    expect(edited.state.imageIds).not.toContain(imageId); expect(store.images.content(imageId)).toBeDefined();
+    expect(edited.state.imageIds).toContain(imageId); expect(edited.state.activeImageIds).toContain(imageId); expect(store.images.content(imageId)).toBeDefined();
+    expect(store.images.get(imageId)?.chapterId).toBe(target); expect(edited.state.chapters[2].previousChapterIds).toContain(target);
     expect(store.state(sibling.branch.id).imageIds).toContain(imageId); expect(store.revisionState(third.branch.revisionId).imageIds).toContain(imageId);
     expect(() => store.restoreProject(store.exportProject(project.id))).not.toThrow();
   });

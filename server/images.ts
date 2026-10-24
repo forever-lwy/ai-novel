@@ -108,13 +108,14 @@ export class ImageService {
     return image;
   }
   private publicImage(image: StoryImage, branchId: string, author: boolean, state = this.store.state(branchId), chapterId?: string): StoryImage {
+    image = this.store.images.project(image, state);
     const progress = !author && chapterId ? `&chapterId=${encodeURIComponent(chapterId)}` : '';
     const url = image.status === 'completed' ? `/api/branches/${encodeURIComponent(branchId)}/images/${encodeURIComponent(image.id)}/content?view=${author ? 'author' : 'reader'}${progress}&v=${encodeURIComponent(image.updatedAt)}` : undefined;
     const entityId = image.entityId ? imageEntity(state, image.entityId)?.id : undefined;
     const referenceCharacters = image.referenceCharacters?.map(character => { const current = imageEntity(state, character.entityId); return { ...character, entityId: current?.id ?? character.entityId, name: current?.name ?? character.name }; });
     const active = this.store.images.active(image, state);
     const previewUrl = url ? `${url}&size=preview` : undefined;
-    return author ? { ...image, entityId, referenceCharacters, active, url, previewUrl } : { ...image, entityId, active, prompt: '', sourceText: undefined, selection: undefined, referenceImageId: undefined, selectedReferenceImageIds: undefined, error: undefined, material: undefined, storyContext: undefined, writingJobId: undefined, bindingStatus: undefined, pendingEntityName: undefined, dependencyImageIds: undefined, writingPrompt: undefined, writingReferenceNames: undefined, writingParameters: undefined, promptSource: undefined, instruction: undefined, materialEntityIds: undefined, materialFactIds: undefined, materialRelationIds: undefined, publicMaterial: undefined, referenceImageIds: undefined, referenceEntityIds: undefined, referenceCharacters: undefined, generationParameters: undefined, promptStatus: undefined, optimizedAt: undefined, url, previewUrl };
+    return author ? { ...image, entityId, referenceCharacters, active, url, previewUrl } : { ...image, entityId, active, prompt: '', sourceText: undefined, sourceSelection: undefined, selection: undefined, referenceImageId: undefined, selectedReferenceImageIds: undefined, error: undefined, material: undefined, storyContext: undefined, writingJobId: undefined, bindingStatus: undefined, pendingEntityName: undefined, dependencyImageIds: undefined, writingPrompt: undefined, writingReferenceNames: undefined, writingParameters: undefined, promptSource: undefined, instruction: undefined, materialEntityIds: undefined, materialFactIds: undefined, materialRelationIds: undefined, publicMaterial: undefined, referenceImageIds: undefined, referenceEntityIds: undefined, referenceCharacters: undefined, generationParameters: undefined, promptStatus: undefined, optimizedAt: undefined, url, previewUrl };
   }
   list(branchId: string, author = false, chapterId?: string): StoryImage[] {
     const branch = this.store.getBranch(branchId); const state = author ? this.store.state(branchId) : this.store.readingState(branchId, chapterId);
@@ -136,7 +137,7 @@ export class ImageService {
     this.available(branchId, baseRevisionId); const image = this.find(branchId, imageId, true);
     if (image.bindingStatus === 'pending') throw new HttpError('图片尚未关联已保存正文与资料，暂时不能启用', 409);
     if (active && image.status !== 'completed') throw new HttpError('图片完成后才能启用', 409);
-    const view = this.store.updateImageReferences(branchId, baseRevisionId, image.chapterId, state => {
+    const view = this.store.updateImageReferences(branchId, baseRevisionId, this.store.images.project(image, this.store.state(branchId)).chapterId, state => {
       if (!state.imageIds?.includes(imageId)) return;
       this.store.images.hydrate(state); const group = this.store.images.groupKey(image, state);
       state.activeImageIds = state.activeImageIds!.filter(id => { const selected = this.store.images.get(id); return id !== imageId && (!active || !selected || this.store.images.groupKey(selected, state) !== group); });
@@ -153,7 +154,7 @@ export class ImageService {
       return { view: this.store.view(branchId, true), images: this.list(branchId, true) };
     }
     this.available(branchId, baseRevisionId); const image = this.find(branchId, imageId, true);
-    const view = this.store.updateImageReferences(branchId, baseRevisionId, image.chapterId, state => {
+    const view = this.store.updateImageReferences(branchId, baseRevisionId, this.store.images.project(image, this.store.state(branchId)).chapterId, state => {
       this.store.images.hydrate(state); state.imageIds = (state.imageIds ?? []).filter(id => id !== imageId); state.activeImageIds = state.activeImageIds!.filter(id => id !== imageId);
     }, `删除当前故事线图片：${image.title}`); this.stopInvalidRuns(branchId); this.pump();
     return { view, images: this.list(branchId, true) };
@@ -205,12 +206,12 @@ export class ImageService {
     if (input.referenceImageId) {
       if (!input.instruction?.trim()) throw new HttpError('请填写对参考图片的修改要求');
       if (imageModelCapabilities(config).referenceMode === 'none') throw new HttpError('当前图片模型不支持参考图修改，请更换支持图片输入的模型');
-      const reference = this.find(branchId, input.referenceImageId, true);
+      const reference = this.store.images.project(this.find(branchId, input.referenceImageId, true), state);
       if (reference.status !== 'completed' || !this.store.images.content(reference.id)) throw new HttpError('参考图片尚未完成，请先完成原图生成');
       if (!this.store.images.active(reference, state)) throw new HttpError('请先启用这张图片，再用 AI 修改');
       const referenceEntityId = reference.entityId ? imageEntity(state, reference.entityId)?.id : undefined;
       if (reference.kind !== input.kind || referenceEntityId !== input.entityId) throw new HttpError('参考图片必须属于同一种图片及对应资料');
-      if (input.kind === 'cg' && (reference.chapterId !== input.chapterId || reference.sourceText !== sourceText)) throw new HttpError('参考 CG 必须绑定相同章节和剧情范围');
+      if (input.kind === 'cg' && (reference.chapterId !== input.chapterId || reference.sourceSelection && !reference.selection || (reference.selection || input.selection) && reference.sourceText !== sourceText)) throw new HttpError('参考 CG 必须绑定相同章节和剧情范围；原选段已修改时请重新选择正文');
       if (reference.visibility === 'secret' || publicState && !this.store.images.visible(reference, publicState, false, new Set(), true)) visibility = 'secret';
     }
     if (input.selectedReferenceImageIds !== undefined) {
@@ -262,6 +263,8 @@ export class ImageService {
   }
   retry(branchId: string, imageId: string, baseRevisionId: string): { view: BranchView; image: StoryImage } {
     this.available(branchId, baseRevisionId); this.configuration(this.store.getBranch(branchId).projectId); const previous = this.find(branchId, imageId, true);
+    const target = this.store.images.project(previous, this.store.state(branchId));
+    if (target.sourceSelection && !target.selection) throw new HttpError('原插画选段已修改，请重新选择正文生成图片');
     if (previous.bindingStatus === 'pending') throw new HttpError('请先保存正文并确认资料，再重试这张图片', 409);
     if (['queued', 'running'].includes(previous.status)) throw new HttpError('图片仍在生成中，请先取消或等待完成', 409);
     const { config } = this.configuration(this.store.getBranch(branchId).projectId)!;
@@ -269,7 +272,7 @@ export class ImageService {
     const sameReferences = previous.selectedReferenceImageIds !== undefined || !(config.useCharacterReferences === false && previous.referenceCharacters?.length);
     let sameDimensions = true;
     if (previous.generationParameters) { try { const selected = resolveImageParameters(config, previous.generationParameters); sameDimensions = Object.entries(selected).every(([key, value]) => previous.generationParameters?.[key as keyof typeof selected] === value); } catch { sameDimensions = false; } }
-    const image: StoryImage = this.current(previous, branchId) && sameModel && sameReferences && sameDimensions ? { ...previous, id: randomUUID(), branchId, baseRevisionId, status: 'queued', automatic: false, createdAt: stamp(), updatedAt: stamp(), error: undefined, mimeType: undefined, url: undefined } : this.prepare(branchId, { baseRevisionId, kind: previous.kind, entityId: previous.entityId ? imageEntity(this.store.state(branchId), previous.entityId)?.id : undefined, chapterId: previous.chapterId, selection: previous.selection, instruction: previous.instruction, referenceImageId: previous.referenceImageId, selectedReferenceImageIds: previous.selectedReferenceImageIds }, false, this.store.state(branchId));
+    const image: StoryImage = this.current(previous, branchId) && sameModel && sameReferences && sameDimensions ? { ...previous, id: randomUUID(), branchId, baseRevisionId, status: 'queued', automatic: false, createdAt: stamp(), updatedAt: stamp(), error: undefined, mimeType: undefined, url: undefined } : this.prepare(branchId, { baseRevisionId, kind: previous.kind, entityId: previous.entityId ? imageEntity(this.store.state(branchId), previous.entityId)?.id : undefined, chapterId: target.chapterId, selection: target.selection, instruction: previous.instruction, referenceImageId: previous.referenceImageId, selectedReferenceImageIds: previous.selectedReferenceImageIds }, false, this.store.state(branchId));
     if (image.promptStatus !== 'completed') {
       image.dependencyImageIds = undefined;
       if (this.sameStoryMaterial(previous, branchId) && previous.material !== undefined) { image.material = previous.material; image.instruction = previous.instruction ?? image.instruction; }
