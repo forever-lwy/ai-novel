@@ -91,6 +91,20 @@ export function StoryImageCards({ images, author = false, busy = false, onGenera
     </div>
   </article>)}</div>{current && (author || current.url && current.status === 'completed') && <ImageViewer key={current.id} image={current} initialDetailsOpen={opened?.detailsOpen} detailsLabel={author ? '生图详情' : '关联剧情'} onClose={() => setOpened(null)}>{(author || current.chapterId && onChapter) && <>{author && <><div className="story-image-actions viewer-image-actions"><ImageUseControls image={current} busy={busy} onAction={onAction ? viewerAction : undefined} />{current.status === 'completed' && <span className={`image-selection-pill ${current.active === false ? 'is-inactive' : 'is-active'}`}>{current.bindingStatus === 'pending' ? '待关联正文' : current.active === false ? '未启用 · 暂存' : '已启用'}</span>}</div><ImageGenerationDetails image={current} /></>}{author && current.sourceText && <blockquote className="image-source-text">{current.sourceText}</blockquote>}{current.chapterId && onChapter && <button className="button secondary small" onClick={() => { setOpened(null); onChapter(current); }}>查看关联剧情<ArrowUpRight size={13} /></button>}</>}</ImageViewer>}</>;
 }
+export function ChapterImageCards({ images, entities, chapters, ...cardProps }: Parameters<typeof StoryImageCards>[0] & { entities: Entity[]; chapters: ChapterRef[] }) {
+  const [openedId, setOpenedId] = useState<string | null>(null);
+  const groups = useMemo(() => groupStoryImages(images, entities, chapters), [images, entities, chapters]);
+  const current = groups.find(group => group.id === openedId);
+  const enabled = groups.filter(group => group.cover.status === 'completed' && group.cover.url && group.cover.active !== false && group.cover.bindingStatus !== 'pending');
+  useEffect(() => { if (openedId && !current) setOpenedId(null); }, [openedId, current]);
+  return current ? <div className="chapter-image-versions" data-image-group={current.id}>
+    <button className="text-button" onClick={() => setOpenedId(null)}><ArrowLeft size={15} />返回本章插画</button>
+    <p className="hint">{current.title} · {current.images.length} 个版本，按绘制时间从新到旧排列。</p>
+    <StoryImageCards {...cardProps} compact images={current.images} />
+  </div> : enabled.length ? <div className="story-image-grid compact image-group-grid">{enabled.map(group => <ImageGroupCard key={group.id} group={group} onOpen={() => setOpenedId(group.id)} onChapter={cardProps.onChapter} onEntity={cardProps.onEntity} />)}</div>
+    : <p className="hint">本章暂无启用的插画，可在故事图册中查看和启用其他版本。</p>;
+}
+
 export function ImageGallery({ images, entities, chapters, author, busy, onGenerate, onAction, onChapter, onEntity }: { images: StoryImage[]; entities: Entity[]; chapters: ChapterRef[]; author: boolean; busy: boolean; onGenerate: (target: ImageTarget) => void; onAction: (image: StoryImage, action: ImageAction) => void; onChapter: (image: StoryImage) => void; onEntity: (id: string) => void }) {
   const [filter, setFilter] = useState<StoryImageKind | 'all'>('all'); const [search, setSearch] = useState('');
   const [openedId, setOpenedId] = useState<string | null>(null);
@@ -123,7 +137,7 @@ export function ImageGallery({ images, entities, chapters, author, busy, onGener
   </section>;
 }
 
-function ImageGroupCard({ group, onOpen, onChapter, onEntity }: { group: StoryImageGroup; onOpen: () => void; onChapter: (image: StoryImage) => void; onEntity: (id: string) => void }) {
+function ImageGroupCard({ group, onOpen, onChapter, onEntity }: { group: StoryImageGroup; onOpen: () => void; onChapter?: (image: StoryImage) => void; onEntity?: (id: string) => void }) {
   const cover = group.cover;
   const pending = group.images.filter(image => ['queued', 'running'].includes(image.status)).length;
   const needsAttention = group.images.filter(image => ['failed', 'paused', 'stale'].includes(image.status)).length;
@@ -136,7 +150,7 @@ function ImageGroupCard({ group, onOpen, onChapter, onEntity }: { group: StoryIm
     <div className="story-image-info"><div className="row between"><span>{imageKindNames[group.kind]}</span><span className={`image-selection-pill ${active ? 'is-active' : 'is-inactive'}`}>{active ? '已启用' : '暂无启用图片'}</span></div><h4>{group.title}</h4>
       {group.excerpt && <p className="image-group-excerpt">{group.excerpt}</p>}
       {(pending > 0 || needsAttention > 0) && <div className="image-group-status" role="status">{pending > 0 && <span className="status-pill running">{pending} 项绘制中</span>}{needsAttention > 0 && <span className="status-pill failed">{needsAttention} 项待处理</span>}</div>}
-      <div className="story-image-actions"><button className="text-button" onClick={onOpen}>查看 {group.images.length} 个版本<ArrowUpRight size={12} /></button>{cover.entityId && <button className="text-button" onClick={() => onEntity(cover.entityId!)}>关联资料<ArrowUpRight size={12} /></button>}{cover.chapterId && <button className="text-button" onClick={() => onChapter(cover)}>关联剧情<ArrowUpRight size={12} /></button>}</div>
+      <div className="story-image-actions"><button className="text-button" onClick={onOpen}>查看 {group.images.length} 个版本<ArrowUpRight size={12} /></button>{cover.entityId && onEntity && <button className="text-button" onClick={() => onEntity(cover.entityId!)}>关联资料<ArrowUpRight size={12} /></button>}{cover.chapterId && onChapter && <button className="text-button" onClick={() => onChapter(cover)}>关联剧情<ArrowUpRight size={12} /></button>}</div>
     </div>
   </article>;
 }

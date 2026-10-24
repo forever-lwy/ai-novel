@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { ImageGallery, ImageGenerationDetails, ImageRequestDialog, StoryImageCards, latestImage } from '../client/StoryImages';
+import { ChapterImageCards, ImageGallery, ImageGenerationDetails, ImageRequestDialog, StoryImageCards, latestImage } from '../client/StoryImages';
 import { ImageSettingsEditor } from '../client/SettingsPanel';
 import { ImageViewer } from '../client/ImageViewer';
 import { LocationPanel, WorldPanel } from '../client/WorldPanel';
@@ -13,6 +13,18 @@ const image = (patch: Partial<StoryImage> = {}): StoryImage => ({ id: 'portrait'
 const render = (component: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(component);
 
 describe('story illustration controls', () => {
+  it('shows only enabled chapter covers while retaining all versions behind each cover', () => {
+    const images = [image({ active: true, previewUrl: '/enabled.png' }), image({ id: 'newer', active: false, url: '/parked.png', createdAt: '2026-10-05T00:00:00Z' }), image({ id: 'disabled-group', entityId: 'other', active: false, url: '/disabled.png' }), image({ id: 'running', entityId: 'waiting', active: true, status: 'running', url: undefined })];
+    const html = render(createElement(ChapterImageCards, { images, entities: [person], chapters: [], author: true }));
+    expect(html.match(/class="story-image-card /g)).toHaveLength(1); expect(html).toContain('2 个版本');
+    expect(html).toContain('src="/enabled.png"'); expect(html).not.toContain('src="/parked.png"'); expect(html).not.toContain('src="/disabled.png"');
+    expect(html).toContain('打开图片组 林舟 · 立绘');
+    const inactive = render(createElement(ChapterImageCards, { images: images.map(value => ({ ...value, active: false })), entities: [person], chapters: [], author: true }));
+    expect(inactive).toContain('本章暂无启用的插画'); expect(inactive).not.toContain('<img');
+    const legacy = render(createElement(ChapterImageCards, { images: [image()], entities: [person], chapters: [], author: true }));
+    expect(legacy).toContain('data-cover-image-id="portrait"');
+  });
+
   it('previews in-progress writing assets while reserving activation and redraw for saved bindings', () => {
     const html = render(createElement(StoryImageCards, { images: [image({ bindingStatus: 'pending', active: false, entityId: undefined }), image({ id: 'running', bindingStatus: 'pending', status: 'running', url: undefined })], author: true, onGenerate: () => {}, onAction: () => {} }));
     expect(html).toContain('待关联正文'); expect(html).toContain('取消绘制'); expect(html).toContain('删除图片'); expect(html).toContain('src="/api/image.png"');
