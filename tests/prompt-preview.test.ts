@@ -39,6 +39,26 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     expect(preview.messages.some(message => message.content.includes(TOOL_RESULT_REVIEW_INSTRUCTION))).toBe(true);
     expect(preview.body).toContain('# 工具结果复核');
   });
+  it.each([false, true])('keeps ordinary writing and native tools separate with general protection=%s', toolTransport => {
+    const templates = defaultPromptTemplates();
+    templates.general!.presets[0].toolTransport = toolTransport;
+    templates.presets.writing[0].writingOutputMode = 'text';
+    const before = structuredClone(templates);
+    const preview = ctx.engine.previewPrompt({ ...input('writing', protocol), templates, runtime: { illustrations: { portrait: true, cg: true } } });
+    const wire = JSON.parse(preview.body);
+    const toolNames = preview.tools.map(tool => tool.name);
+    expect(toolNames).toEqual(expect.arrayContaining(['search_story', 'generate_character_portrait', 'generate_scene_cg']));
+    for (const name of ['emit_complete_text', 'emit_writing_response']) expect(toolNames).not.toContain(name);
+    expect(preview.runtimeBlocks.find(block => block.name === '故事资料与原作参考边界')?.content).not.toContain('toolCalls');
+    expect(JSON.stringify(wire)).not.toMatch(/<\/?(?:thought|thinking|think)>|think／thinking|结束当前.*辅助块|开始新的辅助块/);
+    expect(JSON.stringify(wire)).toContain('普通文本不是工具调用，也不是原生思考通道');
+    expect(JSON.stringify(wire)).toContain('不在正文中解释工具流程、纠正输出格式或检查自己是否仍在思考');
+    expect(JSON.stringify(wire)).toContain('不先写准备生图、调用说明或参数草稿');
+    expect(JSON.stringify(wire)).toContain('历史正文和资料引文可能保留旧生成失败产生的非叙事标记');
+    expect(JSON.stringify(wire)).toContain('不在两者之间添加分隔符、装饰字符、异语字词或任何调用标记');
+    expect(JSON.stringify(wire)).not.toContain('以本次定义的结果工具交付完整内容');
+    expect(templates).toEqual(before);
+  });
   it.each<PromptTask>(['writing', 'extraction', 'compression'])('previews Reborn with cooperative %s v2 using real native roles without saving', async task => {
     const draft = input(task, protocol); draft.templates = withLegacyPresets(); draft.templates.general!.selected = REBORN_PRESET_ID; draft.templates.selected[task] = TASK_V2_PRESET_IDS[task];
     const before = (await ctx.app.inject({ url: '/api/settings', cookies })).body;

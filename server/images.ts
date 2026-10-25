@@ -10,10 +10,13 @@ import { imageModelCapabilities } from '../shared/image-capabilities.js';
 import { optimizeImagePrompt, resolveImageParameters, type ImagePromptOptimizer, type ImagePromptInput } from './image-prompts.js';
 import { readerEntityMaterial } from './reader-materials.js';
 import { buildImageStoryContext } from './image-context.js';
+import { matchWritingScene } from './image-source.js';
 
 const stamp = () => new Date().toISOString();
 const entityText = (entity: Entity) => `${entity.kind}：${entity.name}\n${entity.description}\n${entity.facts.map(fact => `${fact.temporal === 'future' ? '未来设定：' : ''}${fact.text}`).join('\n')}`;
 const publicEntity = (entity: Entity) => entity.visibility === 'public' && !entity.facts.some(fact => fact.visibility === 'secret' || fact.temporal === 'future') && (entity.locked || !entity.description.trim() || entity.description === entity.facts.map(fact => fact.text).join('；') || entity.description === rebuildCharacterProfileDescription({ ...entity, description: '' }));
+const associationError = '正文或资料中未能核对这张图片的场景、人物或参考图，请核对后手动重新生成';
+
 
 /** Requests are explicitly queued once; restarts and failures never repeat a paid call. */
 export class ImageService {
@@ -107,8 +110,15 @@ export class ImageService {
     if (!image || image.projectId !== branch.projectId || !draft && !this.store.images.visible(image, state, author)) throw new HttpError('此故事线不包含可查看的图片', 404);
     return image;
   }
+  private legacyAssociationPixels(image: StoryImage): boolean {
+    return image.bindingStatus === 'pending' && image.status === 'stale' && image.error === associationError && Boolean(image.mimeType)
+      && Boolean(this.store.db.prepare('SELECT 1 FROM image_assets WHERE id=? AND content IS NOT NULL').get(image.id));
+  }
   private publicImage(image: StoryImage, branchId: string, author: boolean, state = this.store.state(branchId), chapterId?: string): StoryImage {
     image = this.store.images.project(image, state);
+    // Old records keep their original diagnostic status in storage. Showing
+    // retained pixels does not bind or activate an unverifiable scene.
+    if (author && this.legacyAssociationPixels(image)) image = { ...image, status: 'completed', error: `图片未关联：${associationError}。已生成的原图保留，可在图册查看` };
     const progress = !author && chapterId ? `&chapterId=${encodeURIComponent(chapterId)}` : '';
     const url = image.status === 'completed' ? `/api/branches/${encodeURIComponent(branchId)}/images/${encodeURIComponent(image.id)}/content?view=${author ? 'author' : 'reader'}${progress}&v=${encodeURIComponent(image.updatedAt)}` : undefined;
     const entityId = image.entityId ? imageEntity(state, image.entityId)?.id : undefined;
@@ -123,12 +133,12 @@ export class ImageService {
     return author ? [...listed, ...this.store.images.all(branch.projectId).filter(image => image.branchId === branchId && image.bindingStatus === 'pending' && this.writingOwner(image)).map(image => this.publicImage(image, branchId, true, state))] : listed;
   }
   content(branchId: string, imageId: string, author = false, chapterId?: string): ImageContent {
-    const image = this.find(branchId, imageId, author, chapterId); if (image.status !== 'completed') throw new HttpError('图片尚未生成完成', 409);
+    const image = this.find(branchId, imageId, author, chapterId); if (image.status !== 'completed' && !(author && this.legacyAssociationPixels(image))) throw new HttpError('图片尚未生成完成', 409);
     const content = this.store.images.content(imageId); if (!content) throw new HttpError('图片内容不存在', 404); return content;
   }
   contentTag(branchId: string, imageId: string): string {
     const image = this.find(branchId, imageId, true);
-    if (image.status !== 'completed') throw new HttpError('图片尚未生成完成', 409);
+    if (image.status !== 'completed' && !this.legacyAssociationPixels(image)) throw new HttpError('图片尚未生成完成', 409);
     const tag = this.store.images.contentTag(imageId);
     if (!tag) throw new HttpError('图片内容不存在', 404);
     return tag;
@@ -306,16 +316,23 @@ export class ImageService {
         valid = found.length === 1 && (found[0].facts.some(fact => fact.citation?.chapterId === chapterId) || [found[0].name, ...found[0].aliases].some(name => name.trim() && chapter.text.includes(name)));
         if (valid) { image.entityId = found[0].id; image.title = `${found[0].name} · 立绘`; }
       } else {
-        const start = chapter.text.indexOf(image.sourceText || '\0');
-        valid = start >= 0;
-        if (valid) { image.selection = { start, end: start + image.sourceText!.length }; image.title = `${chapter.title} · CG`; }
+        const scene = matchWritingScene(chapter.text, image.sourceText);
+        valid = Boolean(scene);
+        if (scene) { image.sourceText = scene.sourceText; image.selection = scene.selection; image.title = `${chapter.title} · CG`; }
       }
       const dependencies = [...(image.dependencyImageIds ?? []), ...imageReferences(image)];
       valid &&= dependencies.every(id => prepared.some(asset => asset.id === id) || (state.imageIds ?? []).includes(id));
       if (!valid) {
-        image.status = 'stale'; image.error = '正文或资料中未能核对这张图片的场景、人物或参考图，请核对后手动重新生成';
+        // Failed association does not erase already-paid pixels or pretend that
+        // the story version changed. Drafts remain unbound and cannot activate.
+        if (image.status !== 'completed') image.status = 'failed';
+        image.error = `图片未关联：${associationError}${image.status === 'completed' ? '。已生成的原图保留，可在图册查看' : ''}`;
         this.save(image); this.controllers.get(image.id)?.abort(); continue;
       }
+      // Earlier releases marked a completed image stale when its escaped quote
+      // did not match. An explicit association retry can adopt those same pixels.
+      if (image.status === 'stale' && image.error === associationError && this.store.images.content(image.id)) image.status = 'completed';
+      if (image.error?.includes(associationError)) image.error = undefined;
       image.chapterId = chapterId; image.bindingStatus = 'bound'; prepared.push(image);
     }
     const addPortrait = (entityId: string, description = '') => {
@@ -331,14 +348,14 @@ export class ImageService {
         const found = findEntitiesByName(state, request.name, 'character');
         if (found.length === 1 && newCharacterIds.includes(found[0].id)) addPortrait(found[0].id, request.description);
       } else if (request.kind === 'cg' && configured?.config.autoCG && request.sourceText?.trim() && prepared.length < 12) {
-        const start = chapter.text.indexOf(request.sourceText);
-        if (start < 0 || sourceTexts.has(request.sourceText)) continue;
+        const scene = matchWritingScene(chapter.text, request.sourceText);
+        if (!scene || sourceTexts.has(scene.sourceText)) continue;
         try {
-          const image = this.prepare(branchId, { baseRevisionId, kind: 'cg', chapterId, selection: { start, end: start + request.sourceText.length } }, true, state, request.description);
+          const image = this.prepare(branchId, { baseRevisionId, kind: 'cg', chapterId, selection: scene.selection }, true, state, request.description);
           if (request.prompt?.trim()) {
             image.writingPrompt = request.prompt.trim(); image.writingReferenceNames = request.referenceNames; image.writingParameters = request.parameters;
           }
-          prepared.push(image); sourceTexts.add(request.sourceText);
+          prepared.push(image); sourceTexts.add(scene.sourceText);
         } catch (error) { if (!(error instanceof HttpError)) throw error; }
       }
     }

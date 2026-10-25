@@ -18,6 +18,7 @@ import type { ExtensionService } from './extensions.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
 import { imageModelCapabilities } from '../shared/image-capabilities.js';
 import { imageParametersSchema } from './image-store.js';
+import { matchWritingScene } from './image-source.js';
 import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, StoryReference } from '../shared/types.js';
 export { extractionSchema } from './extraction.js';
 
@@ -592,8 +593,11 @@ export class StoryEngine {
     const tools: ModelTool[] = [];
     const register = (request: WritingImageRequest) => {
       const live = this.live(jobId);
+      const draft = request.kind === 'cg' ? String(this.store.db.prepare('SELECT text FROM job_writing_drafts WHERE job_id=?').get(jobId)?.text ?? '') : '';
+      const scene = request.kind === 'cg' ? matchWritingScene(draft, request.sourceText) : undefined;
+      if (request.kind === 'cg' && !scene) return { status: 'rejected', error: 'sourceText 未能唯一匹配本章已经输出的正文，本次没有启动生图。请逐字引用已输出的单个连续场景片段，保留真实换行，不要填写字面量反斜杠加 n、改写、拼接或引用尚未输出的内容，再提交工具调用。' };
       const requests = (live.payload.imageRequests ?? []) as WritingImageRequest[];
-      if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? previous.name === request.name : previous.sourceText === request.sourceText))) return { status: 'requested', message: '同一人物或场景已请求生图，请继续写作。' };
+      if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? previous.name === request.name : matchWritingScene(draft, previous.sourceText)?.sourceText === scene?.sourceText))) return { status: 'requested', message: '同一人物或场景已请求生图，请继续写作。' };
       if (requests.length >= 12) throw new HttpError('本章最多接受 12 个自动生图请求，请完成正文后由作者补充。');
       // Persist the owner link before the deferred image pump runs; never await pixels here.
       let imageId: string | undefined;
@@ -602,16 +606,16 @@ export class StoryEngine {
       live.payload.imageRequests = [...requests, { ...request, ...(imageId ? { imageId } : {}) }]; this.save(live);
       return { status: 'requested', ...(imageId ? { imageId } : {}), message: '已提交后台生图，正文可立即继续。仅所需参考图未完成时等待；正文与资料保存后自动关联图片。' };
     };
-    if (config.autoPortrait) tools.push({ name: 'generate_character_portrait', description: '新人物在本章首次出场时主动调用，按明确姓名请求生成对应立绘。只使用正文已描述的外观，不推断秘密身份。立即后台绘制，资料整理后绑定到该人物。需要该立绘的 CG 应在提交此请求后再请求。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物明确姓名或已有别名' }, description: { type: 'string', description: '正文已描述的外观与衣着' } }, required: ['name', 'description'], additionalProperties: false }, execute: args => {
+    if (config.autoPortrait) tools.push({ name: 'generate_character_portrait', description: '新人物在本章首次出场时主动调用，按明确姓名请求生成对应立绘。只使用正文已描述的外观，不推断秘密身份。直接提交接口原生工具调用，不先输出准备调用、工具名称或纠错旁白。立即后台绘制，资料整理后绑定到该人物。需要该立绘的 CG 应在提交此请求后再请求。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物明确姓名或已有别名' }, description: { type: 'string', description: '正文已描述的外观与衣着' } }, required: ['name', 'description'], additionalProperties: false }, execute: args => {
       const value = z.object({ name: z.string().trim().min(1).max(300), description: z.string().trim().min(1).max(6000) }).strict().parse(args);
       return register({ kind: 'portrait', ...value });
     } });
     if (config.autoCG) {
       const caps = imageModelCapabilities(config);
       const imageGuide = { stylePrompt: config.stylePrompt, promptInstruction: config.promptSystemPrompt ?? '', fixedParameters: { size: config.size, aspectRatio: config.aspectRatio, imageSize: config.imageSize, width: config.width, height: config.height }, allowed: { dimensionMode: caps.dimensionMode, sizes: caps.sizes.filter(size => size !== 'auto'), aspectRatios: caps.aspectRatios, imageSizes: caps.imageSizes, customSize: caps.customSize, dimensionMultiple: caps.dimensionMultiple, minDimension: caps.minDimension, maxDimension: caps.maxDimension, minPixels: caps.minPixels, maxPixels: caps.maxPixels, maxAspectRatio: caps.maxAspectRatio } };
-      tools.push({ name: 'generate_scene_cg', description: `正文切换到新的场景或出现大场面时主动请求 CG，提交后继续写作，不必等待图片。需要尚未请求的新人物立绘时先请求立绘，再请求 CG。由你结合本次完整写作上下文直接编写可独立使用的最终 prompt，不再交给另一个 AI 改写。明确主体姓名、外貌衣着、动作、环境、时段、光线与构图，只画对应瞬间，不添加后续剧情。sourceText 必须逐字引用本章实际正文，每个场景只请求一次。referenceNames 只填本画面实际出场且需参考立绘的人物名称，[] 表示不用人物参考。仅为 auto 尺寸／画幅／分辨率选择 allowed 内的具体 parameters；固定值由程序保留，不自行修改。当前绘图要求：${JSON.stringify(imageGuide)}`, parameters: { type: 'object', properties: {
+      tools.push({ name: 'generate_scene_cg', description: `正文切换到新的场景或出现大场面时主动请求 CG，提交后继续写作，不必等待图片。需要尚未请求的新人物立绘时先请求立绘，再请求 CG。由你结合本次完整写作上下文直接编写可独立使用的最终 prompt，不再交给另一个 AI 改写。明确主体姓名、外貌衣着、动作、环境、时段、光线与构图，只画对应瞬间，不添加后续剧情。直接提交接口原生工具调用，不先输出准备生图、参数草稿或纠错旁白。sourceText 必须逐字引用本章已经输出的单个连续场景片段，优先选择不跨段的短引用；跨段时保留真实换行，不要把换行重复转义成字面量反斜杠加 n，不得引用尚未输出的内容。每个场景只请求一次。referenceNames 只填本画面实际出场且需参考立绘的人物名称，[] 表示不用人物参考。仅为 auto 尺寸／画幅／分辨率选择 allowed 内的具体 parameters；固定值由程序保留，不自行修改。当前绘图要求：${JSON.stringify(imageGuide)}`, parameters: { type: 'object', properties: {
         prompt: { type: 'string', description: '结合完整写作上下文生成的最终绘图提示词，主体、衣着、环境与剧情时刻完整明确；不依赖图片模型阅读原文。' },
-        sourceText: { type: 'string', description: '逐字引用本章正文中对应场景的文字，不得编造引用' },
+        sourceText: { type: 'string', description: '逐字引用本章已经输出的连续场景片段，优先短段原句；保留真实换行，勿重复转义或拼接，不得引用尚未输出的内容' },
         referenceNames: { type: 'array', items: { type: 'string' }, maxItems: 16, description: '画面中实际出场且需要立绘参考的人物姓名或别名；没有则填 []。' },
         parameters: { type: 'object', properties: { size: { type: 'string' }, aspectRatio: { type: 'string' }, imageSize: { type: 'string', enum: ['512', '1K', '2K', '4K'] }, width: { type: 'integer' }, height: { type: 'integer' } }, additionalProperties: false },
       }, required: ['prompt', 'sourceText'], additionalProperties: false }, execute: args => {

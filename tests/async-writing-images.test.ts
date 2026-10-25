@@ -31,7 +31,7 @@ async function interruptible(promise: Promise<void>, signal?: AbortSignal) {
 }
 afterEach(async () => { releases.splice(0).forEach(release => release()); for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
-function harness(requests: WritingImageRequest[] = [cg()]) {
+function harness(requests: WritingImageRequest[] = [cg()], text = prose) {
   const store = new Store(mkdtempSync(join(tmpdir(), 'novel-writing-parallel-')));
   const project = store.createProject({ title: '并行绘图测试' }); const branchId = project.mainBranchId;
   const settings: Settings = { providers: [{ id: 'mock', name: '本地模拟', protocol: 'openai-chat', baseUrl: 'http://fixture.invalid/v1', model: 'text', maxOutputTokens: 1024, contextTokens: 64000 }], writingProviderId: 'mock', extractionProviderId: 'mock', imageSettings: { ...defaultImageSettings(), providerId: 'mock', model: 'picture', autoCG: true, autoPortrait: requests.some(request => request.kind === 'portrait') } };
@@ -42,13 +42,13 @@ function harness(requests: WritingImageRequest[] = [cg()]) {
   const models: TextModels = {
     generateText: vi.fn(async (_provider, request) => {
       textRequest = request; const first = turns++ === 0;
-      request.onTextDelta?.(prose);
+      request.onTextDelta?.(text);
       if (first) for (const image of requests) {
         const tool = request.tools!.find(tool => tool.name === (image.kind === 'portrait' ? 'generate_character_portrait' : 'generate_scene_cg'))!;
         await tool.execute(image.kind === 'portrait' ? { name: image.name, description: image.description } : { prompt: image.prompt, sourceText: image.sourceText, referenceNames: image.referenceNames });
       }
       if (first) await interruptible(writing.promise, request.signal);
-      return { text: prose, inputTokens: 2, outputTokens: 3 };
+      return { text, inputTokens: 2, outputTokens: 3 };
     }),
     generateStructured: vi.fn(async (_provider, _request, validate) => ({ value: validate(extraction), inputTokens: 2, outputTokens: 3 })),
   };
@@ -60,6 +60,81 @@ function harness(requests: WritingImageRequest[] = [cg()]) {
 }
 
 describe('images run alongside the writer', () => {
+  it('rejects an unmatched scene before charging for pixels and lets the model correct its quote', async () => {
+    const ctx = harness([]); const job = ctx.start();
+    await until(() => Boolean(ctx.request()?.tools));
+    const tool = ctx.request().tools!.find(tool => tool.name === 'generate_scene_cg')!;
+    const rejected = await tool.execute({ sourceText: '没有输出过的城外场景。', prompt: '城外场景' });
+    expect(rejected).toMatchObject({ status: 'rejected', error: expect.stringContaining('本次没有启动生图') });
+    expect(ctx.store.images.all()).toEqual([]); expect(ctx.generator).not.toHaveBeenCalled();
+    const pending = JSON.parse(String(ctx.store.db.prepare('SELECT data FROM jobs WHERE id=?').get(job.id)!.data)) as Job;
+    expect(pending.payload.imageRequests).toEqual([]);
+    expect(await tool.execute({ sourceText: scene, prompt: cg().prompt })).toMatchObject({ status: 'requested' });
+    await until(() => ctx.images.list(ctx.branchId, true)[0]?.status === 'completed');
+    ctx.writing.resolve(); await until(ctx.saved);
+    expect(ctx.images.list(ctx.branchId, true)[0]).toMatchObject({ status: 'completed', bindingStatus: 'bound' });
+    expect(ctx.generator).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['completed', 'stale'] as const)('adopts the same %s pixels when a source quote double-escapes paragraph breaks', async status => {
+    const escaped = prose.replace(/\n/g, '\\n');
+    const ctx = harness([{ ...cg(), sourceText: escaped }]); const job = ctx.start();
+    await until(() => ctx.images.list(ctx.branchId, true)[0]?.status === 'completed');
+    const id = ctx.images.list(ctx.branchId, true)[0].id;
+    // Repeating the same scene with real rather than escaped line breaks must
+    // reuse the earlier intent instead of starting another billable image.
+    expect(await ctx.request().tools!.find(tool => tool.name === 'generate_scene_cg')!.execute({ sourceText: prose, prompt: cg().prompt })).toMatchObject({ status: 'requested', message: expect.stringContaining('同一人物或场景') });
+    expect(ctx.images.list(ctx.branchId, true)).toHaveLength(1);
+    if (status === 'stale') {
+      const old = ctx.store.images.get(id)!;
+      old.status = 'stale'; old.error = '正文或资料中未能核对这张图片的场景、人物或参考图，请核对后手动重新生成';
+      ctx.store.images.update(old);
+      expect(ctx.images.list(ctx.branchId, true)[0]).toMatchObject({ status: 'completed', bindingStatus: 'pending', active: false, error: expect.stringContaining('图片未关联') });
+      expect(ctx.images.list(ctx.branchId, true)[0].url).toBeDefined();
+      expect(ctx.images.content(ctx.branchId, id, true).bytes).toEqual(png);
+      expect(ctx.images.contentTag(ctx.branchId, id)).toBeDefined();
+      expect(ctx.store.images.get(id)?.status).toBe('stale');
+      expect(ctx.images.list(ctx.branchId, false)).toEqual([]);
+    }
+    ctx.writing.resolve(); await until(ctx.saved);
+    const image = ctx.images.list(ctx.branchId, true)[0];
+    expect(image).toMatchObject({ id, status: 'completed', bindingStatus: 'bound', sourceText: prose, selection: { start: 0, end: prose.length }, active: true });
+    expect(ctx.images.content(ctx.branchId, id, true).bytes).toEqual(png);
+    expect(ctx.generator).toHaveBeenCalledTimes(1);
+    const saved = JSON.parse(String(ctx.store.db.prepare('SELECT data FROM jobs WHERE id=?').get(job.id)!.data)) as Job;
+    expect((saved.payload.imageRequests as WritingImageRequest[])[0].sourceText).toBe(escaped);
+  });
+
+  it('preserves a literal backslash-n that is genuinely in the quoted prose', async () => {
+    const literal = '路牌上写着字符 \\n，旁边是城门。';
+    const text = `${prose}\n${literal}`;
+    const ctx = harness([{ ...cg(), sourceText: literal }], text); ctx.start();
+    await until(() => ctx.images.list(ctx.branchId, true)[0]?.status === 'completed');
+    ctx.writing.resolve(); await until(ctx.saved);
+    expect(ctx.images.list(ctx.branchId, true)[0]).toMatchObject({ status: 'completed', bindingStatus: 'bound', sourceText: literal, selection: { start: text.indexOf(literal), end: text.length } });
+    expect(ctx.generator).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['a changed quote', `${prose.replace(/\n/g, '\\n')}这里是捏造的场景。`, prose],
+    ['an ambiguous decoded quote', prose.replace(/\n/g, '\\n'), `${prose}\n${prose}`],
+  ])('keeps completed pixels viewable but unbound for %s', async (_name, sourceText, text) => {
+    const ctx = harness([{ ...cg(), sourceText: text }], text); ctx.start();
+    await until(() => ctx.images.list(ctx.branchId, true)[0]?.status === 'completed');
+    const id = ctx.images.list(ctx.branchId, true)[0].id;
+    // Final association independently checks persisted evidence, including
+    // legacy requests that predate the early quote guard.
+    const draft = ctx.store.images.get(id)!; draft.sourceText = sourceText; ctx.store.images.update(draft);
+    ctx.writing.resolve(); await until(ctx.saved);
+    expect(ctx.images.list(ctx.branchId, true)[0]).toMatchObject({ id, status: 'completed', bindingStatus: 'pending', active: false, error: expect.stringContaining('图片未关联') });
+    expect(ctx.images.list(ctx.branchId, true)[0].error).not.toContain('版本');
+    expect(ctx.images.list(ctx.branchId, true)[0].url).toBeDefined();
+    expect(ctx.images.content(ctx.branchId, id, true).bytes).toEqual(png);
+    expect(ctx.store.state(ctx.branchId).imageIds ?? []).toEqual([]);
+    expect(() => ctx.images.setActive(ctx.branchId, id, ctx.store.getBranch(ctx.branchId).revisionId, true)).toThrow('图片尚未关联');
+    expect(ctx.generator).toHaveBeenCalledTimes(1);
+  });
+
   it('finishes a CG before the writer returns, without a chapter or story revision, then adopts that same asset', async () => {
     const ctx = harness(); const revision = ctx.store.getBranch(ctx.branchId).revisionId; const job = ctx.start();
     await until(() => ctx.images.list(ctx.branchId, true)[0]?.status === 'completed');

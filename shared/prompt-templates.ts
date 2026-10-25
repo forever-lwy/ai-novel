@@ -7,7 +7,7 @@ import { previousDramatronPromptTemplates } from './previous-dramatron-prompt-te
 import { runtimePromptBlocks, type PromptRuntime } from './prompt-runtime.js';
 import { extractionOutputFormat } from './extraction-output.js';
 import { taskPresetsV3 } from './task-prompts-v3.js';
-import { neutralGeneralPreset } from './neutral-preset.js';
+import { NEUTRAL_DELIVERY_INSTRUCTION, NEUTRAL_PRESET_ID, neutralGeneralPreset } from './neutral-preset.js';
 import { isRetiredDefault } from './retired-preset-fingerprints.js';
 import { createTavernMacroExpander } from './tavern-macros.js';
 
@@ -357,7 +357,11 @@ export function compilePrompt(config: PromptTemplateSettings | undefined, task: 
   const expandTavern = createTavernMacroExpander(macroValues, JSON.stringify(variables));
   const expand = (value: PromptBlock, owner: PromptPreset): PromptMessage => {
     const values: Record<string, string | number | undefined> = { ...owner.variables, ...variables, storyMaterials: variables.storyMaterials ?? variables.context, chapterNumber: task === 'writing' ? '待写章节' : '当前章节', chapterIndex: '', chapterCount: '', endChapter: '' };
-    const content = value.content.replace(/第\s*\{\{\s*chapterNumber\s*\}\}\s*章/g, '{{chapterNumber}}');
+    // The untouched built-in delivery block follows the active interface. Keep
+    // saved presets and all author-edited/copied wording intact.
+    const delivery = owner.id === NEUTRAL_PRESET_ID && value.id === 'neutral-delivery' && value.content === NEUTRAL_DELIVERY_INSTRUCTION && !responseCarrier
+      ? value.content.replace('以本次定义的结果工具交付完整内容', '按本次实际交付接口交付完整内容') : value.content;
+    const content = delivery.replace(/第\s*\{\{\s*chapterNumber\s*\}\}\s*章/g, '{{chapterNumber}}');
     return { role: value.role, ...(value.carrierPart ? { carrierPart: value.carrierPart } : {}), ...(value.feature === 'tavern' && /\|(?:用户[:：]?|小猫之神)\|?/.test(value.content) ? { tavernDialogue: true } : {}), content: value.feature === 'tavern' ? expandTavern(value.content) : ['snow', 'literal'].includes(value.feature ?? '') ? value.content : content.replace(variablePattern, (_match, key: string) => Object.hasOwn(values, key.trim()) ? String(values[key.trim()] ?? '') : '') };
   };
   const nativeSubmission = writingOutputMode === 'tool' || structured;

@@ -52,12 +52,12 @@ function harness(turns: Turn[], options: { autoCG?: boolean; autoPortrait?: bool
   const models: TextModels = {
     generateText: vi.fn(async (_provider, request) => {
       const turn = turns[++currentTurn]; requests.push(request);
+      request.onTextDelta?.(turn.text);
       for (const image of turn.images) {
         const name = image.kind === 'portrait' ? 'generate_character_portrait' : 'generate_scene_cg';
         const tool = request.tools?.find(tool => tool.name === name);
         if (tool) await tool.execute(image.kind === 'portrait' ? { name: image.name, description: image.description } : image.prompt ? { sourceText: image.sourceText, prompt: image.prompt, referenceNames: image.referenceNames, parameters: image.parameters } : { sourceText: image.sourceText, description: image.description });
       }
-      request.onTextDelta?.(turn.text);
       return { text: turn.text, inputTokens: 10, outputTokens: 20 };
     }),
     generateStructured: vi.fn(async (_provider, _request, validate) => {
@@ -171,8 +171,9 @@ describe('automatic images across writing, extraction and image persistence', ()
   it('retains invalid requests for diagnosis without binding invented CG text or character names', async () => {
     const ctx = harness([{ text: prose, extraction: emptyExtraction(), images: [{ kind: 'portrait', name: '未出场的人物', description: '银甲' }, { kind: 'cg', description: '未来大场面', sourceText: '这里根本没有出现在正文。' }] }]);
     ctx.start(); await until(() => ctx.engine.listJobs().some(job => job.kind === 'extract' && job.status === 'completed'));
-    expect(ctx.store.images.all()).toHaveLength(2);
-    expect(ctx.store.images.all().every(image => image.status === 'stale' && image.bindingStatus === 'pending')).toBe(true);
+    expect(ctx.store.images.all()).toHaveLength(1);
+    expect(ctx.store.images.all()[0].kind).toBe('portrait');
+    expect(ctx.store.images.all().every(image => image.status === 'failed' && image.bindingStatus === 'pending' && image.error?.startsWith('图片未关联：'))).toBe(true);
     expect(ctx.store.state(ctx.project.mainBranchId).imageIds ?? []).toEqual([]);
     expect(ctx.store.state(ctx.project.mainBranchId).chapters[0].status).toBe('ready');
   });
@@ -184,7 +185,7 @@ describe('automatic images across writing, extraction and image persistence', ()
     ctx.start();
     await until(() => ctx.engine.listJobs().some(job => job.kind === 'extract' && job.status === 'completed'));
     expect(ctx.store.images.all()).toHaveLength(1);
-    expect(ctx.store.images.all()[0]).toMatchObject({ status: 'stale', bindingStatus: 'pending' });
+    expect(ctx.store.images.all()[0]).toMatchObject({ status: 'failed', bindingStatus: 'pending', error: expect.stringContaining('图片未关联') });
     expect(ctx.store.state(ctx.project.mainBranchId).imageIds ?? []).toEqual([]);
   });
 

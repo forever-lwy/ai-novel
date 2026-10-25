@@ -293,6 +293,8 @@ const modelServer = createServer(async (req, res) => {
     if (['e2e-images', 'e2e-images-parallel'].includes(body.model) && !body.messages?.some(message => message.role === 'tool')) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const sourceText = '林舟来到白石城，发现城门下藏着一把旧钥匙。';
+      // A CG can only cite prose already delivered before its native call.
+      res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: sourceText + '\n\n' }, finish_reason: null }] })}\n\n`);
       const calls = [
         { index: 0, id: 'image-portrait', type: 'function', function: { name: 'generate_character_portrait', arguments: JSON.stringify({ name: '林舟', description: '一位穿着旅行斗篷的年轻旅人。' }) } },
         ...(body.tools?.some(tool => tool.function?.name === 'generate_scene_cg') ? [{ index: 1, id: 'image-scene', type: 'function', function: { name: 'generate_scene_cg', arguments: JSON.stringify({ prompt: 'WRITER_DIRECT_CG：古城门下，林舟穿着旅行斗篷拾起石阶边的钥匙，侧面中景，晨光照亮石阶。', referenceNames: ['林舟'], sourceText }) } }] : []),
@@ -329,7 +331,11 @@ const modelServer = createServer(async (req, res) => {
       }
       return;
     }
-    const text = body.model === 'e2e-noncompact-summary' ? JSON.stringify({ text: prompt }) : body.model === 'e2e-compact-extraction' ? JSON.stringify({ summary: '林舟来到白石城。', entities: [{ kind: 'character', name: '林舟', visibility: 'public', facts: [{ text: '林舟走进白石城', paragraph: 1, temporal: 'current', certainty: 'fact', visibility: 'public', attribute: 'location' }] }] }) : body.model === 'e2e-quote-mismatch' ? JSON.stringify({ summary: '旅人进入古城。', entities: [{ kind: 'character', name: '林舟', aliases: [], description: '旅人', visibility: 'public', facts: [{ text: '林舟来到白石城', attribute: 'location', temporal: 'current', certainty: 'fact', visibility: 'public', paragraph: 1, quote: '回来了。林舟走进山谷。' }] }], relations: [], foreshadows: [] }) : fixtureReply(system, prompt);
+    let text = body.model === 'e2e-noncompact-summary' ? JSON.stringify({ text: prompt }) : body.model === 'e2e-compact-extraction' ? JSON.stringify({ summary: '林舟来到白石城。', entities: [{ kind: 'character', name: '林舟', visibility: 'public', facts: [{ text: '林舟走进白石城', paragraph: 1, temporal: 'current', certainty: 'fact', visibility: 'public', attribute: 'location' }] }] }) : body.model === 'e2e-quote-mismatch' ? JSON.stringify({ summary: '旅人进入古城。', entities: [{ kind: 'character', name: '林舟', aliases: [], description: '旅人', visibility: 'public', facts: [{ text: '林舟来到白石城', attribute: 'location', temporal: 'current', certainty: 'fact', visibility: 'public', paragraph: 1, quote: '回来了。林舟走进山谷。' }] }], relations: [], foreshadows: [] }) : fixtureReply(system, prompt);
+    if (['e2e-images', 'e2e-images-parallel'].includes(body.model) && body.messages?.some(message => message.role === 'tool')) {
+      const delivered = '林舟来到白石城，发现城门下藏着一把旧钥匙。\n\n';
+      if (text.startsWith(delivered)) text = text.slice(delivered.length);
+    }
     if (body.tools?.some(tool => tool.function?.name === 'submit_extraction')) {
       if (body.tool_choice?.function?.name !== 'submit_extraction' || body.parallel_tool_calls !== false) { res.writeHead(400); res.end('{"error":"missing submission choice"}'); return; }
       const call = { id: 'extraction-submission', type: 'function', function: { name: 'submit_extraction', arguments: text } };

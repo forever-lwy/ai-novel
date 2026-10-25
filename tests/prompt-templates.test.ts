@@ -12,6 +12,23 @@ const variables = {
 const messageBlock = (id: string, role: PromptBlock['role'], content: string): PromptBlock => ({ id, name: id, role, content, enabled: true });
 
 describe('editable task prompt templates', () => {
+  it('renders untouched neutral delivery for the actual interface without rewriting author presets', () => {
+    const settings = defaultPromptTemplates();
+    settings.general!.presets[0].toolTransport = false;
+    const before = structuredClone(settings);
+    const request = compileTaskPrompt(settings, 'writing', variables);
+    expect(request.system).not.toContain('以本次定义的结果工具交付完整内容');
+    expect(request.system).toContain('按本次实际交付接口交付完整内容');
+    expect(settings).toEqual(before);
+    const delivery = settings.general!.presets[0].blocks.find(block => block.id === 'neutral-delivery')!;
+    delivery.content += '\n作者保留的说明';
+    expect(compileTaskPrompt(settings, 'writing', variables).system).toContain(delivery.content);
+    delivery.content = before.general!.presets[0].blocks.find(block => block.id === 'neutral-delivery')!.content;
+    const copy = { ...structuredClone(settings.general!.presets[0]), id: 'author-neutral-copy' };
+    settings.general!.presets.push(copy); settings.general!.selected = copy.id;
+    expect(compileTaskPrompt(settings, 'writing', variables).system).toContain(delivery.content);
+  });
+
   it('states the actual text delivery contract when writing overrides the general result tool', () => {
     const settings = defaultPromptTemplates();
     settings.presets.writing[0].writingOutputMode = 'text';

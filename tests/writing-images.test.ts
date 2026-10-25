@@ -18,11 +18,12 @@ function harness(autoCG: boolean, toolCalls = true, configured = true, imageFail
   const generateAutomatic = vi.fn(() => { if (imageFailure) throw new Error('模拟生图失败'); });
   const models: TextModels = {
     generateText: vi.fn(async (_provider, request) => {
+      request.onTextDelta?.(prose);
       if (toolCalls) {
         await request.tools?.find(tool => tool.name === 'generate_character_portrait')?.execute({ name: '林舟', description: '青色长袍' });
         await request.tools?.find(tool => tool.name === 'generate_scene_cg')?.execute({ sourceText: '城外千军万马正在迎战。', description: '战场大场面' });
       }
-      request.onTextDelta?.(prose); return { text: prose, inputTokens: 10, outputTokens: 20 };
+      return { text: prose, inputTokens: 10, outputTokens: 20 };
     }),
     generateStructured: vi.fn(async (_provider, _request, validate) => ({ value: validate(extracted()), inputTokens: 4, outputTokens: 8 })),
   };

@@ -1,6 +1,8 @@
 import type { PromptPreset } from './types.js';
 
 export const NEUTRAL_PRESET_ID = 'general-neutral-v1';
+export const NEUTRAL_DELIVERY_INSTRUCTION = `以本次定义的结果工具交付完整内容，查询资料或等待玩家时先使用真实工具，收到结果再继续。输出通道改变的是文本承载位置，不改变任务内容，也不引入额外的角色扮演。
+保留任务要求的实质信息、细节和范围，不用空字符串、省略号或占位符替代结果。正文只推进本轮范围；JSON 任务返回完整合法对象；生图提示词组织成一个可画的具体画面。完成当前任务后直接结束，不附加总结、选项、状态栏或确认回合。`;
 
 /** Return fresh, fully editable copies. The reference directory is not a runtime dependency. */
 export function neutralGeneralPreset(): PromptPreset {
@@ -17,8 +19,7 @@ export function neutralGeneralPreset(): PromptPreset {
       { id: 'neutral-task', name: '插入当前任务（保留原角色）', role: 'system', enabled: true, slot: 'task', content: '' },
       { id: 'neutral-style', name: '作者文风优先', role: 'system', enabled: true, tasks: ['writing'], content: `文风、人称、节奏与感情浓度由作者要求和已有正文决定。没有指定时自然延续前文，不预置猫神、游戏主持、治疗师、终端、轻小说或武侠口吻。框架身份和归档文件名只用于交付，不出现在故事里。
 人物依照自身经历、性格、目标与已知信息行动。用具体细节承接当下场景，保持因果与人物差异；不刻意讨好某个角色，不凭参考资料让人物提前知道秘密。尊重作者确认的人物与世界事实，不擅自重写年龄、关系或意愿。` },
-      { id: 'neutral-delivery', name: '完整交付与自然结束', role: 'system', enabled: true, content: `以本次定义的结果工具交付完整内容，查询资料或等待玩家时先使用真实工具，收到结果再继续。输出通道改变的是文本承载位置，不改变任务内容，也不引入额外的角色扮演。
-保留任务要求的实质信息、细节和范围，不用空字符串、省略号或占位符替代结果。正文只推进本轮范围；JSON 任务返回完整合法对象；生图提示词组织成一个可画的具体画面。完成当前任务后直接结束，不附加总结、选项、状态栏或确认回合。` },
+      { id: 'neutral-delivery', name: '完整交付与自然结束', role: 'system', enabled: true, content: NEUTRAL_DELIVERY_INSTRUCTION },
     ],
   };
 }
