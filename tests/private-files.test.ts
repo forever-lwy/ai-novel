@@ -1,16 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
-import { securePosixDataDirectory } from '../server/private-files.js';
+import { createDataTempDirectory, ensureDataDirectory, ensureDataFile, securePosixDataDirectory, writeDataFile } from '../server/private-files.js';
 
-const fileSystem = vi.hoisted(() => ({ modes: new Map<string, number>(), children: new Map<string, { name: string; kind: 'file' | 'directory' | 'link' }[]>(), chmod: vi.fn(), access: vi.fn() }));
+const fileSystem = vi.hoisted(() => ({ modes: new Map<string, number>(), children: new Map<string, { name: string; kind: 'file' | 'directory' | 'link' }[]>(), chmod: vi.fn(), access: vi.fn(), scan: vi.fn(), write: vi.fn() }));
 vi.mock('node:fs', async importOriginal => ({
   ...await importOriginal<typeof import('node:fs')>(),
   lstatSync: (path: string) => ({ mode: fileSystem.modes.get(path), isSymbolicLink: () => false }),
-  readdirSync: (path: string) => (fileSystem.children.get(path) ?? []).map(entry => ({ name: entry.name, isDirectory: () => entry.kind === 'directory', isFile: () => entry.kind === 'file', isSymbolicLink: () => entry.kind === 'link' })),
+  readdirSync: (path: string) => { fileSystem.scan(path); return (fileSystem.children.get(path) ?? []).map(entry => ({ name: entry.name, isDirectory: () => entry.kind === 'directory', isFile: () => entry.kind === 'file', isSymbolicLink: () => entry.kind === 'link' })); },
   chmodSync: (path: string, mode: number) => { fileSystem.chmod(path, mode); fileSystem.modes.set(path, mode); },
   accessSync: fileSystem.access,
+  existsSync: (path: string) => fileSystem.modes.has(path),
+  mkdirSync: (path: string, options: { mode: number }) => { if (!fileSystem.modes.has(path)) fileSystem.modes.set(path, options.mode & ~0o022); },
+  mkdtempSync: (prefix: string) => { const path = prefix + 'fixture'; fileSystem.modes.set(path, 0o700); return path; },
+  writeFileSync: (path: string, data: unknown, options: { mode: number; flag: string }) => {
+    if (fileSystem.modes.has(path) && options.flag === 'wx') throw Object.assign(new Error('already exists'), { code: 'EEXIST' });
+    fileSystem.write(path, data); fileSystem.modes.set(path, options.mode & ~0o022);
+  },
 }));
-beforeEach(() => { fileSystem.modes.clear(); fileSystem.children.clear(); fileSystem.chmod.mockReset(); fileSystem.access.mockReset(); });
+beforeEach(() => { fileSystem.modes.clear(); fileSystem.children.clear(); for (const mock of [fileSystem.chmod, fileSystem.access, fileSystem.scan, fileSystem.write]) mock.mockReset(); });
 afterEach(() => vi.restoreAllMocks());
 
 describe('POSIX permission decisions (simulated filesystem)', () => {
@@ -21,19 +28,20 @@ describe('POSIX permission decisions (simulated filesystem)', () => {
     expect(() => securePosixDataDirectory(root)).not.toThrow();
     expect(fileSystem.chmod).not.toHaveBeenCalled(); expect(fileSystem.access).toHaveBeenCalledTimes(2);
   });
-  it('repairs only entries that expose data or lack needed owner access', () => {
+  it('preserves deliberately shared directories, files and ACL mask bits on repeated startup', () => {
     const root = '/private-data'; const safe = join(root, 'safe'), open = join(root, 'open'), nested = join(root, 'nested');
-    fileSystem.modes.set(root, 0o700); fileSystem.modes.set(safe, 0o600); fileSystem.modes.set(open, 0o644); fileSystem.modes.set(nested, 0o500);
+    fileSystem.modes.set(root, 0o777); fileSystem.modes.set(safe, 0o600); fileSystem.modes.set(open, 0o660); fileSystem.modes.set(nested, 0o2770);
     fileSystem.children.set(root, [{ name: 'safe', kind: 'file' }, { name: 'open', kind: 'file' }, { name: 'nested', kind: 'directory' }]);
     securePosixDataDirectory(root);
-    expect(fileSystem.chmod.mock.calls).toEqual([[open, 0o600], [nested, 0o700]]);
-    fileSystem.chmod.mockClear(); securePosixDataDirectory(root); expect(fileSystem.chmod).not.toHaveBeenCalled();
+    securePosixDataDirectory(root);
+    expect(fileSystem.chmod).not.toHaveBeenCalled();
+    expect([root, safe, open, nested].map(path => fileSystem.modes.get(path))).toEqual([0o777, 0o600, 0o660, 0o2770]);
   });
-  it('does not silently accept unsafe data when chmod is denied', () => {
+  it('accepts usable shared data when the service is not allowed to chmod it', () => {
     fileSystem.modes.set('/private-data', 0o777);
     fileSystem.chmod.mockImplementation(() => { throw Object.assign(new Error('not the owner'), { code: 'EPERM' }); });
-    expect(() => securePosixDataDirectory('/private-data')).toThrow('一次性修复');
-    expect(fileSystem.access).not.toHaveBeenCalled();
+    expect(() => securePosixDataDirectory('/private-data')).not.toThrow();
+    expect(fileSystem.chmod).not.toHaveBeenCalled(); expect(fileSystem.access).toHaveBeenCalled();
   });
   it('reports unreadable private data without trying to rewrite its already safe permissions', () => {
     fileSystem.modes.set('/private-data', 0o700); fileSystem.access.mockImplementation(() => { throw new Error('access denied'); });
@@ -43,8 +51,40 @@ describe('POSIX permission decisions (simulated filesystem)', () => {
     fileSystem.modes.set('/private-data', 0o777); fileSystem.children.set('/private-data', [{ name: 'outside', kind: 'link' }]);
     expect(() => securePosixDataDirectory('/private-data')).toThrow('符号链接'); expect(fileSystem.chmod).not.toHaveBeenCalled();
   });
+  it('reports directory scan failures with actionable context instead of a raw scandir stack', () => {
+    fileSystem.modes.set('/private-data', 0o700);
+    fileSystem.scan.mockImplementation(() => { throw Object.assign(new Error('scandir denied'), { code: 'EACCES' }); });
+    expect(() => securePosixDataDirectory('/private-data')).toThrow('维护账号和服务账号');
+    expect(fileSystem.chmod).not.toHaveBeenCalled();
+  });
   it('leaves harmless owner-only execute permissions intact', () => {
     fileSystem.modes.set('/private-data', 0o700); fileSystem.modes.set(join('/private-data', 'fixture'), 0o700); fileSystem.children.set('/private-data', [{ name: 'fixture', kind: 'file' }]);
     securePosixDataDirectory('/private-data'); expect(fileSystem.chmod).not.toHaveBeenCalled();
+  });
+});
+
+describe('data creation permissions (simulated POSIX filesystem)', () => {
+  function posix(action: () => void): void {
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    try { Object.defineProperty(process, 'platform', { value: 'linux' }); action(); }
+    finally { Object.defineProperty(process, 'platform', descriptor); }
+  }
+  it.each([[0o700, 0o700, 0o600], [0o770, 0o770, 0o660], [0o777, 0o777, 0o666], [0o2770, 0o2770, 0o660]])('inherits parent mode %s for new subdirectories and files, despite umask', (parentMode, directoryMode, fileMode) => {
+    fileSystem.modes.set('/data', parentMode);
+    posix(() => { ensureDataDirectory('/data/sources', '/data'); writeDataFile('/data/sources/source', 'original'); createDataTempDirectory('/data/delete-'); });
+    expect(fileSystem.modes.get('/data')).toBe(parentMode);
+    expect(fileSystem.modes.get('/data/sources')).toBe(directoryMode);
+    expect(fileSystem.modes.get('/data/delete-fixture')).toBe(directoryMode);
+    expect(fileSystem.modes.get('/data/sources/source')).toBe(fileMode);
+  });
+  it('keeps an existing directory and database untouched when opening them', () => {
+    fileSystem.modes.set('/data', 0o777); fileSystem.modes.set('/data/novel.sqlite', 0o666);
+    posix(() => { ensureDataDirectory('/data'); ensureDataFile('/data/novel.sqlite'); });
+    expect(fileSystem.chmod).not.toHaveBeenCalled(); expect(fileSystem.write).not.toHaveBeenCalled();
+  });
+  it('does not overwrite an existing original or encryption key', () => {
+    fileSystem.modes.set('/data', 0o777); fileSystem.modes.set('/data/.encryption-key', 0o660);
+    posix(() => expect(() => writeDataFile('/data/.encryption-key', 'replacement')).toThrow('already exists'));
+    expect(fileSystem.chmod).not.toHaveBeenCalled(); expect(fileSystem.write).not.toHaveBeenCalled();
   });
 });

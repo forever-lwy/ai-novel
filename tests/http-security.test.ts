@@ -154,24 +154,39 @@ try { ${limitedAcl} [IO.Directory]::SetAccessControl($target, $acl) } catch { $d
     expect((await context.app.inject({ url: '/api/health' })).statusCode).toBe(200);
     expect((await context.app.inject({ url: '/api/auth/status' })).statusCode).toBe(200);
   });
-  it.skipIf(process.platform !== 'win32')('repairs an unsafe child while leaving a compliant parent ACL untouched', () => {
+  it.skipIf(process.platform !== 'win32')('preserves explicitly granted child access and the parent ACL on startup', () => {
     const directory = mkdtempSync(join(tmpdir(), 'novel-private-files-')); directories.push(directory); secureDataDirectory(directory);
     const child = join(directory, 'sources'); mkdirSync(child); writeFileSync(join(child, 'fixture'), 'retained');
     const before = windowsPermissions(directory, `[IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')`);
     windowsPermissions(child, `$acl = [IO.Directory]::GetAccessControl($target); $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-11'), [Security.AccessControl.FileSystemRights]::Read, [Security.AccessControl.AccessControlType]::Allow)); [IO.Directory]::SetAccessControl($target, $acl)`);
+    const childBefore = windowsPermissions(child, `[IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')`);
     secureDataDirectory(directory);
     expect(readFileSync(join(child, 'fixture'), 'utf8')).toBe('retained');
     expect(windowsPermissions(directory, `[IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')`)).toBe(before);
-    expect(windowsPermissions(child, `@([IO.Directory]::GetAccessControl($target).GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq 'S-1-5-11' }).Count`)).toBe('0');
+    expect(windowsPermissions(child, `[IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')`)).toBe(childBefore);
   });
-  it.skipIf(process.platform !== 'win32')('rejects insecure data without ACL modification rights and keeps its contents intact', () => {
+  it.skipIf(process.platform !== 'win32')('accepts shared data without ACL modification rights and keeps its contents intact', () => {
     const directory = mkdtempSync(join(tmpdir(), 'novel-private-files-')); directories.push(directory); writeFileSync(join(directory, 'fixture'), 'retained');
     windowsPermissions(directory, `${limitedAcl}
 $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-11'), [Security.AccessControl.FileSystemRights]::Read, [Security.AccessControl.AccessControlType]::Allow))
 [IO.Directory]::SetAccessControl($target, $acl)`);
-    expect(() => secureDataDirectory(directory)).toThrow('WRITE_DAC'); expect(readFileSync(join(directory, 'fixture'), 'utf8')).toBe('retained');
+    const before = windowsPermissions(directory, `[IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')`);
+    expect(() => secureDataDirectory(directory)).not.toThrow(); expect(readFileSync(join(directory, 'fixture'), 'utf8')).toBe('retained');
+    expect(windowsPermissions(directory, `[IO.Directory]::GetAccessControl($target, [Security.AccessControl.AccessControlSections]'Owner,Access').GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]'Owner,Access')`)).toBe(before);
   });
-  it('keeps contents and ownership while repeatedly securing already protected data with Access rules only', () => {
+  it.skipIf(process.platform !== 'win32')('rejects a real file-write ACL denial without rewriting permissions', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'novel-private-files-')); directories.push(directory);
+    const path = join(directory, 'fixture'); writeFileSync(path, 'retained');
+    const before = windowsPermissions(path, `[IO.File]::GetAccessControl($target).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)`);
+    try {
+      windowsPermissions(path, `$acl = [IO.File]::GetAccessControl($target); $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User; $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::WriteData, [Security.AccessControl.AccessControlType]::Deny)); [IO.File]::SetAccessControl($target, $acl)`);
+      expect(() => secureDataDirectory(directory)).toThrow('无法读写');
+      expect(readFileSync(path, 'utf8')).toBe('retained');
+    } finally {
+      windowsPermissions(path, `$acl = [IO.File]::GetAccessControl($target); $acl.SetSecurityDescriptorSddlForm('${before}', [Security.AccessControl.AccessControlSections]::Access); [IO.File]::SetAccessControl($target, $acl)`);
+    }
+  });
+  it('keeps contents, ownership and all access rules across repeated checks', () => {
     const directory = mkdtempSync(join(tmpdir(), 'novel-private-files-')); directories.push(directory); mkdirSync(join(directory, 'sources')); writeFileSync(join(directory, 'sources', 'fixture'), 'private fixture');
     let readPermissions: (() => { current: string; entries: { path: string; owner: string; group: string; protected: boolean; rules: { sid: string; rights: number; inherited: boolean }[] }[] }) | undefined;
     if (process.platform === 'win32') {
@@ -191,17 +206,17 @@ $entries = foreach ($path in $paths) {
       readPermissions = () => JSON.parse(execFileSync(join(powershellDir, 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', probe], { env: { ...childEnv, PSModulePath: join(powershellDir, 'Modules'), AI_NOVEL_PRIVATE_DIR: directory }, windowsHide: true, encoding: 'utf8' }));
     }
     const before = readPermissions?.();
+    const paths = [directory, join(directory, 'sources'), join(directory, 'sources', 'fixture')];
+    const originalModes = paths.map(path => statSync(path).mode & 0o777);
     for (let attempt = 0; attempt < 2; attempt++) {
       secureDataDirectory(directory); expect(readFileSync(join(directory, 'sources', 'fixture'), 'utf8')).toBe('private fixture');
       if (readPermissions && before) {
         const after = readPermissions(); expect(after.entries).toHaveLength(before.entries.length);
         for (const entry of after.entries) {
           const original = before.entries.find(value => value.path === entry.path)!;
-          expect(entry.owner).toBe(original.owner); expect(entry.group).toBe(original.group);
-          const permitted = new Set([original.owner, after.current, 'S-1-5-18', 'S-1-5-32-544']);
-          for (const rule of entry.rules) expect(permitted.has(rule.sid)).toBe(true);
+          expect(entry).toEqual(original);
         }
-      } else { expect(statSync(directory).mode & 0o777).toBe(0o700); expect(statSync(join(directory, 'sources', 'fixture')).mode & 0o777).toBe(0o600); }
+      } else { expect(paths.map(path => statSync(path).mode & 0o777)).toEqual(originalModes); }
     }
   });
 });

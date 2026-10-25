@@ -1,6 +1,7 @@
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual, createHash, createCipheriv, createDecipheriv, type ScryptOptions } from 'node:crypto';
 import { promisify } from 'node:util';
-import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { writeDataFile } from './private-files.js';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { Settings, ProviderConnection } from '../shared/types.js';
@@ -55,8 +56,7 @@ export class SettingsStore {
   constructor(private db: DatabaseSync, dataDir: string) {
     db.exec('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)');
     const keyPath = join(dataDir, '.encryption-key');
-    if (!existsSync(keyPath)) writeFileSync(keyPath, randomBytes(32), { mode: 0o600, flag: 'wx' });
-    if (process.platform !== 'win32') chmodSync(keyPath, 0o600);
+    if (!existsSync(keyPath)) writeDataFile(keyPath, randomBytes(32));
     this.key = readFileSync(keyPath);
     if (this.key.length !== 32) throw new Error('数据目录中的密钥文件无效，请从完整服务备份恢复。');
     const saved = this.meta('settings');

@@ -261,10 +261,10 @@ describe('provider URL credential migration', () => {
     expect(migrated.get().providers[0].apiKey).toBe('');
   });
 
-  it.skipIf(process.platform === 'win32')('restricts an existing POSIX encryption key to its owner', async () => {
+  it.skipIf(process.platform === 'win32')('preserves explicit POSIX encryption-key sharing when reopening settings', async () => {
     const context = await make(), keyPath = join(context.dataDir, '.encryption-key');
     chmodSync(keyPath, 0o644);
     new SettingsStore(context.store.db, context.dataDir);
-    expect(statSync(keyPath).mode & 0o777).toBe(0o600);
+    expect(statSync(keyPath).mode & 0o777).toBe(0o644);
   });
 });

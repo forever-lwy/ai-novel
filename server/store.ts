@@ -1,7 +1,7 @@
 import { readProjectSettings, saveProjectSettings } from './project-settings.js';
 import { parseProjectSettingsOverrides } from './settings-schema.js';
 import { DatabaseSync } from 'node:sqlite';
-import { chmodSync, existsSync, mkdirSync } from 'node:fs';
+import { ensureDataDirectory, ensureDataFile } from './private-files.js';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
@@ -124,10 +124,10 @@ export class Store {
   readonly outputs: OutputStore;
   readonly images: ImageStore;
   constructor(public readonly dataDir: string) {
-    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    if (process.platform !== 'win32') chmodSync(dataDir, 0o700);
-    this.db = new DatabaseSync(join(dataDir, 'novel.sqlite'));
-    if (process.platform !== 'win32') chmodSync(join(dataDir, 'novel.sqlite'), 0o600);
+    ensureDataDirectory(dataDir);
+    const databasePath = join(dataDir, 'novel.sqlite');
+    ensureDataFile(databasePath);
+    this.db = new DatabaseSync(databasePath);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS project_settings (project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, revision TEXT NOT NULL, data TEXT NOT NULL);
@@ -141,7 +141,6 @@ export class Store {
       CREATE TABLE IF NOT EXISTS job_writing_drafts (job_id TEXT PRIMARY KEY, text TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS job_writing_activities (job_id TEXT NOT NULL, activity_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(job_id,activity_id));
       CREATE INDEX IF NOT EXISTS jobs_branch ON jobs(branch_id,status);`);
-    if (process.platform !== 'win32') for (const filename of ['novel.sqlite-wal', 'novel.sqlite-shm']) { const path = join(dataDir, filename); if (existsSync(path)) chmodSync(path, 0o600); }
     this.outputs = new OutputStore(this.db);
     this.images = new ImageStore(this.db);
   }

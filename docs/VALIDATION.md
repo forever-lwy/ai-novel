@@ -1,5 +1,14 @@
 # 第一阶段验收记录
 
+## 2026-10-25：数据目录授权保留与新文件共享继承
+
+- 基于当时最新 `7b5c6c3` 核对并修改，保留已有正文、插画、Gemini 输出修复及此前的 `./data` 绑定挂载。启动访问检查不再重写 POSIX 模式或 Windows ACL；数据库和加密密钥重开也不强制缩权，不修改文件所有者或容器运行账号。
+- 新文件按所在目录的组／其他用户读写范围创建，新子目录保留共享范围和 setgid，Windows 沿用父目录 ACL；仅对刚创建的 POSIX 条目落实模式，避免 umask 丢失共享写权限。已有条目的模式和 ACL 掩码不改写；默认 ACL 由文件系统继承。统一覆盖 SQLite 数据库初始创建、密钥、原文导入与备份恢复、扩展工作目录及原文删除暂存目录；独占创建不覆盖已有文件。新建顶层 POSIX 数据目录仍默认 `0700`。
+- Windows 使用实际读写打开和临时目录探针验证访问，不要求 WRITE_DAC，也不启动 PowerShell 去收紧授权；原有内容、所有者、组和所有 ACL 规则在重复检查后保持。真实写入拒绝仍阻止启动；POSIX 扫描异常转成包含路径和处理方向的错误，符号链接与目录链接继续拒绝。
+- 定向 `node node_modules/vitest/vitest.mjs run tests/private-files.test.ts tests/http-security.test.ts tests/store-security.test.ts tests/auth-security.test.ts tests/extensions.test.ts tests/project-deletion.test.ts --maxWorkers=2`：**6 文件、77 项通过，2 项 POSIX 实机检查在 Windows 跳过，共 79 项**。POSIX 模式决策使用模拟文件系统，包含共享目录 `0777`／文件 `0666`、组共享、setgid、ACL 掩码、无 chmod 权限、新文件继承及旧文件不覆盖；Windows ACL 用实际临时目录验证。
+- 完整 `node node_modules/vitest/vitest.mjs run --maxWorkers=4`：**90 文件、1627 项通过，2 项平台跳过，共 1629 项**。`npm run typecheck`、`npm run build` 通过，保留既有第三方注释与包体提示；没有新增依赖。
+- 同步默认绑定挂载、旧命名卷停机迁移和维护账号的一次性授权说明。5 份修改文档的 UTF-8、代码围栏与 67 个本地文件链接检查通过，`git diff --check` 通过。验证只使用临时文件、隔离 SQLite 和既有测试桩，未读写私人作品或配置，未调用真实供应商、执行完整浏览器套件或验收部署。当前 Windows 没有 Docker 命令，WSL 未列出已安装发行版，因此 Linux 文件模式、默认 ACL、SQLite 日志模式及服务器跨 UID 读写未获实机验证。
+
 ## 2026-10-25：Gemini 工具旁白与异常尾标进入正文
 
 - 只读核对已保存的供应商诊断：异常调用旁白和 `）】}}}}` 尾标已存在于上游 SSE 的普通 `text` 部件，紧接着返回真实插画工具调用；不属于前端渲染或工具结果拼接。旧清理仅覆盖两种固定异常串，不能识别该格式。原响应不足以继续区分模型与中转网关的来源。

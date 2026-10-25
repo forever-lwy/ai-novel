@@ -124,13 +124,13 @@ describe('bounded backup expansion', () => {
 });
 
 describe('POSIX database file permissions', () => {
-  it.skipIf(process.platform === 'win32')('restricts the existing directory, database and journal files to the service account', () => {
+  it.skipIf(process.platform === 'win32')('preserves existing directory and database sharing when reopening SQLite', () => {
     const { store, directory } = fixture(); store.close(); fixtures.pop();
     chmodSync(directory, 0o755); chmodSync(join(directory, 'novel.sqlite'), 0o644);
     const reopened = new Store(directory); fixtures.push({ store: reopened, directory });
-    expect(statSync(directory).mode & 0o777).toBe(0o700);
+    expect(statSync(directory).mode & 0o777).toBe(0o755);
     for (const filename of ['novel.sqlite', 'novel.sqlite-wal', 'novel.sqlite-shm']) {
-      const path = join(directory, filename); if (existsSync(path)) expect(statSync(path).mode & 0o777).toBe(0o600);
+      const path = join(directory, filename); if (existsSync(path)) expect(statSync(path).mode & 0o777).toBe(0o644);
     }
   });
 });

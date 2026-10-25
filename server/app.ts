@@ -6,7 +6,8 @@ import multipart from '@fastify/multipart';
 import staticFiles from '@fastify/static';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, existsSync, writeFileSync, readFileSync, unlinkSync, renameSync, readdirSync, rmSync } from 'node:fs';
+import { createDataTempDirectory, ensureDataDirectory, writeDataFile } from './private-files.js';
+import { existsSync, readFileSync, unlinkSync, renameSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve, basename, dirname } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { Store, rpgSetupSchema } from './store.js';
@@ -51,8 +52,8 @@ const sourcePublic = (r: SourceRow): Source => ({ id: r.id, projectId: r.project
 export async function buildApp(options: { dataDir?: string; startEngine?: boolean; logger?: boolean; staticDir?: string; initialPassword?: string; rateLimits?: { login?: number; imports?: number; models?: number } } = {}) {
   const config = httpSecurityConfig();
   const dataDir = resolve(options.dataDir || process.env.DATA_DIR || './data');
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  const uploadDir = join(dataDir, 'sources'); mkdirSync(uploadDir, { recursive: true, mode: 0o700 });
+  ensureDataDirectory(dataDir);
+  const uploadDir = join(dataDir, 'sources'); ensureDataDirectory(uploadDir, dataDir);
   const store = new Store(dataDir);
   let settings: SettingsStore;
   try {
@@ -157,7 +158,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
           return path;
         });
         if (paths.length) {
-          mkdirSync(deletionDir, { recursive: true }); stagedDirectory = mkdtempSync(join(deletionDir, 'delete-'));
+          ensureDataDirectory(deletionDir, dataDir); stagedDirectory = createDataTempDirectory(join(deletionDir, 'delete-'));
           for (const path of paths) {
             try { renameSync(path, join(stagedDirectory, basename(path))); }
             catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -248,7 +249,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     // The project may have been deleted while the multipart upload was arriving.
     store.getProject(projectId);
     const id = randomUUID(), filename = basename(file.filename.replace(/\\/g, '/')), now = new Date().toISOString();
-    writeFileSync(join(uploadDir, id), bytes, { flag: 'wx', mode: 0o600 });
+    writeDataFile(join(uploadDir, id), bytes);
     try { store.db.prepare('INSERT INTO sources VALUES (?,?,?,?,?,?,?,?,?)').run(id, projectId, filename, parsed.format, parsed.chapters.length, now, 0, JSON.stringify(parsed.chapters), id); }
     catch (e) { unlinkSync(join(uploadDir, id)); throw e; }
     return { source: sourcePublic(source(id)), chapters: parsed.chapters } satisfies SourcePreview;
@@ -458,7 +459,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
         if (map[s.metadata.id]) fail('备份包含重复原文。');
         const id = randomUUID(); map[s.metadata.id] = id;
         const bytes = Buffer.from(s.originalBase64, 'base64'); if (bytes.length > 32 * 1024 * 1024) fail('备份中的原文件超过上限。');
-        const path = join(uploadDir, id); writeFileSync(path, bytes, { flag: 'wx', mode: 0o600 }); createdFiles.push(path);
+        const path = join(uploadDir, id); writeDataFile(path, bytes); createdFiles.push(path);
       }
       const project = store.restoreProject(backup.project, map, restored => {
         for (const s of backup.sources) store.db.prepare('INSERT INTO sources VALUES (?,?,?,?,?,?,?,?,?)').run(map[s.metadata.id], restored.id, basename(s.metadata.filename), s.metadata.format, s.preview.length, s.metadata.createdAt, Number(s.metadata.confirmed), JSON.stringify(s.preview), map[s.metadata.id]);

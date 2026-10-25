@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { ensureDataDirectory } from './private-files.js';
 import { join } from 'node:path';
 import { Ajv } from 'ajv';
 import { Ajv2020 } from 'ajv/dist/2020.js';
@@ -34,7 +34,7 @@ export class ExtensionService {
   private closed = false;
   constructor(private settings: SettingsStore, dataDir: string) {
     this.runtimeDir = join(dataDir, 'extension-runtime');
-    mkdirSync(this.runtimeDir, { recursive: true, mode: 0o700 });
+    ensureDataDirectory(this.runtimeDir, dataDir);
   }
   private current(): ExtensionSettings {
     if (!this.cached) { const raw = this.settings.secretMeta('extensions-v1'); this.cached = raw ? JSON.parse(raw) as ExtensionSettings : emptyExtensions(); }
