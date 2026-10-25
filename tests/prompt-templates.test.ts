@@ -37,7 +37,7 @@ describe('editable task prompt templates', () => {
     expect(request.responseCarrier).toBeUndefined();
     expect(request.runtimeBlocks).toContainEqual(expect.objectContaining({ name: '正文普通文本通道规则', content: expect.stringContaining('本次使用普通文本交付') }));
     expect(request.system).toContain('以这里的实际通道为准');
-    expect(request.system).toContain('正文只写故事，工具参数和结果留在工具通道');
+    expect(request.system).toContain('正文只写故事，工具参数和结果不写入正文');
     const inherited = compileTaskPrompt(defaultPromptTemplates(), 'writing', variables);
     expect(inherited.responseCarrier).toBeDefined();
     expect(inherited.runtimeBlocks.some(block => block.name === '正文普通文本通道规则')).toBe(false);
@@ -250,7 +250,7 @@ describe('editable task prompt templates', () => {
   it('formats validation issues around task, preset and block names and limits displayed errors', () => {
     const settings = defaultPromptTemplates();
     settings.presets.writing[0].blocks[0].content = '{{missing1}} {{missing2}} {{missing3}} {{missing4}}';
-    expect(() => validatePromptTemplates(settings)).toThrow('正文写作 · 正文写作 v4 · 清晰分区 · 写作职责');
+    expect(() => validatePromptTemplates(settings)).toThrow('正文写作 · 正文写作 v5 · 清晰分区 · 写作职责');
     expect(() => validatePromptTemplates(settings)).toThrow('另有 1 处需要修改');
     expect(() => validatePromptTemplates({ ...defaultPromptTemplates(), unexpected: true })).toThrow('包含不支持的字段：unexpected');
   });

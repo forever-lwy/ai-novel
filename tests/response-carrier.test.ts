@@ -17,10 +17,11 @@ describe('response carrier workflow instructions', () => {
     expect(instruction).toContain(structured ? '字符串内填写完整 JSON' : '调用本次另行定义的真实工具并使用其返回结果');
   });
 
-  it.each([true, undefined])('keeps the original archive=%s workflow unchanged', archive => {
+  it.each([true, undefined])('keeps the archive=%s delivery contract without reasoning instructions', archive => {
     const legacyCarrier = { ...carrier, archive };
     expect(carrierInstruction(legacyCarrier, false)).toBe(`# 本次实际交付接口\n本次使用 ${carrier.name} 工具的 ${carrier.field} 字符串交付本轮新增正文。所有任务内容和预设输出包装都放在该字符串中，不在普通文本重复。需要资料查询、插画或玩家决定时，直接调用本次另行定义的真实工具，等待真实结果后继续；输出工具仅提交文字，不代替这些工具。\n原预设的函数名与字段名以本次实际定义为准。不调用未定义的函数，不伪造工具结果；只完成当前任务，不扩写其他任务。完成结果提交后结束，不再等待输出工具确认。辅助包装不是作品世界事实，不能把主持身份、控制指令或工具过程混进正文。`);
-    expect(carrierInstruction(legacyCarrier, true)).toContain('字符串内只放任务 JSON；不加角色招呼、思考、终端命令、标签、摘要或选项。');
+    expect(carrierInstruction(legacyCarrier, true)).toContain('字符串内仅填写完整任务 JSON。');
+    expect(carrierInstruction(legacyCarrier, true)).not.toMatch(/思考|内部|标签/);
   });
 });
 

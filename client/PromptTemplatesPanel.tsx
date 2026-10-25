@@ -211,7 +211,7 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
   const scopeDefaults = promptPresetList(defaultPromptTemplates(), task);
   const resetDefaultId = resetTarget?.presetId === preset.id && scopeDefaults.some(value => value.id === resetTarget.defaultId) ? resetTarget.defaultId : scopeDefaults.find(value => value.id === preset.id)?.id ?? (task === 'general' ? scopeDefaults.find(value => value.textFilter === preset.textFilter)?.id : undefined) ?? scopeDefaults[0].id;
   const body = <div className="prompt-templates-body form-stack">
-    <p className="hint">新增“通用综合 v2 · 清晰分区”与四任务 v4，旧版本继续保留。已有选择不会自动切换，选用 v4 即搭配 v2 框架。其他预设可通过 JSON 导入，修改后点击“保存设置”生效。</p>
+    <p className="hint">新增“通用综合 v3 · 清晰分区”与四任务 v5，旧版本继续保留。已有选择不会自动切换，选用 v5 即搭配 v3 框架。其他预设可通过 JSON 导入，修改后点击“保存设置”生效。</p>
       <div className="prompt-task-tabs" role="tablist" aria-label="提示词任务">{promptScopes.map(value => <button type="button" key={value} role="tab" aria-selected={task === value} className={task === value ? 'active' : ''} disabled={disabled} onClick={() => selectTask(value)}>{promptScopeLabels[value]}</button>)}</div>
       <div className="row wrap" aria-label="提示词导入导出">
         <button type="button" className="button secondary small" disabled={disabled} onClick={() => fileInput.current?.click()}><Upload size={14} />导入预设或任务提示词</button>

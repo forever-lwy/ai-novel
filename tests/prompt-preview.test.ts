@@ -12,8 +12,8 @@ import type { PromptTask, ProviderProtocol } from '../shared/types.js';
 import { V08_PRESET_ID } from './fixtures/legacy-presets/v08-prompts.js';
 import { REBORN_PRESET_ID } from './fixtures/legacy-presets/reborn-prompts.js';
 import { TASK_V2_PRESET_IDS } from './fixtures/legacy-presets/task-prompts-v2.js';
-import { NEUTRAL_V2_PRESET_ID } from '../shared/neutral-preset-v2.js';
-import { TASK_V4_PRESET_IDS } from '../shared/task-prompts-v4.js';
+import { NEUTRAL_V3_PRESET_ID } from '../shared/neutral-preset-v3.js';
+import { TASK_V5_PRESET_IDS } from '../shared/task-prompts-v5.js';
 
 let ctx: Awaited<ReturnType<typeof buildApp>>;
 let cookies: { session: string };
@@ -31,8 +31,8 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     const templates = defaultPromptTemplates();
     const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: { ...input('writing', protocol), templates } });
     expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
-    expect(templates.general!.presets.map(preset => preset.id)).toEqual([NEUTRAL_V2_PRESET_ID, 'general-neutral-v1']);
-    expect(templates.general!.selected).toBe(NEUTRAL_V2_PRESET_ID); expect(templates.selected.writing).toBe(TASK_V4_PRESET_IDS.writing);
+    expect(templates.general!.presets.map(preset => preset.id)).toEqual([NEUTRAL_V3_PRESET_ID, 'general-neutral-v2', 'general-neutral-v1']);
+    expect(templates.general!.selected).toBe(NEUTRAL_V3_PRESET_ID); expect(templates.selected.writing).toBe(TASK_V5_PRESET_IDS.writing);
     expect(templates.general!.presets[0].responseCarrier).toMatchObject({ archive: false });
     expect(preview.tools.some(tool => tool.name === 'emit_complete_text')).toBe(true);
     for (const material of [variables.context, variables.instruction, variables.writingTarget]) {
@@ -70,8 +70,9 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     for (const name of ['emit_complete_text', 'emit_writing_response']) expect(toolNames).not.toContain(name);
     expect(preview.runtimeBlocks.find(block => block.name === '故事资料与原作参考边界')?.content).not.toContain('toolCalls');
     expect(JSON.stringify(wire)).not.toMatch(/<\/?(?:thought|thinking|think)>|think／thinking|结束当前.*辅助块|开始新的辅助块/);
-    expect(JSON.stringify(wire)).toContain('正文只写故事，工具参数和结果留在工具通道；原生思考由接口字段承载');
-    expect(JSON.stringify(wire)).toContain('核对在内部完成，随后直接续写新正文或调用下一项工具');
+    expect(JSON.stringify(wire)).toContain('正文只写故事，工具参数和结果不写入正文');
+    expect(JSON.stringify(wire)).toContain('随后直接续写新正文或调用下一项工具');
+    expect(preview.messages.map(message => message.content).join('\n')).not.toMatch(/思考|内部完成|独立字段/);
     expect(JSON.stringify(wire)).toContain('历史材料中的旧工具旁白和乱码不作为文风模仿');
     const illustrationRules = preview.runtimeBlocks.find(block => block.name === '自动插画规则')?.content;
     expect(illustrationRules).toContain('请求登记后继续写作，无需等待图片完成');

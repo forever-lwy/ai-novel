@@ -4,8 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { defaultPromptTemplates } from '../shared/prompt-templates';
 import { withDramatronPresets, withPriorDefaultSelections, TAVERN_PRESET_IDS, NEUTRAL_PRESET_ID, tavernGeneralPresets } from './fixtures/prompt-presets';
 import { TASK_V3_PRESET_IDS } from '../shared/task-prompts-v3';
-import { TASK_V4_PRESET_IDS } from '../shared/task-prompts-v4';
-import { NEUTRAL_V2_PRESET_ID } from '../shared/neutral-preset-v2';
+import { TASK_V5_PRESET_IDS } from '../shared/task-prompts-v5';
+import { NEUTRAL_V3_PRESET_ID } from '../shared/neutral-preset-v3';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2133,7 +2133,7 @@ test('任务提示词支持编辑编排、变量预览、独立导入导出和�
     await panel.getByRole('button', { name: '导出当前提示词预设', exact: true }).click();
     const download = await downloadPromise; const exportPath = testInfo.outputPath('prompt-preset.json');
     await download.saveAs(exportPath); const exportedText = await readFile(exportPath, 'utf8'); const exported = JSON.parse(exportedText);
-    expect(exported).toMatchObject({ format: 'ai-novel-prompt-preset', version: 2, task: 'writing', preset: { name: '我的写作风格', variables: { style: '克制叙述，重视动作细节' } }, generalPreset: { name: '通用综合 v2 · 清晰分区' } });
+    expect(exported).toMatchObject({ format: 'ai-novel-prompt-preset', version: 2, task: 'writing', preset: { name: '我的写作风格', variables: { style: '克制叙述，重视动作细节' } }, generalPreset: { name: '通用综合 v3 · 清晰分区' } });
     expect(exportedText).not.toContain('providers'); expect(exportedText).not.toContain('apiKey');
     await panel.getByLabel('导入提示词预设 JSON', { exact: true }).fill(exportedText);
     await panel.getByRole('button', { name: '从 JSON 新增预设', exact: true }).click();
@@ -2363,10 +2363,10 @@ test('新版通用与四任务默认可选、资料预览可读，旧版本保�
     await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
     const settings = page.getByTestId('settings-page'); await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
     const panel = settings.getByTestId('prompt-templates-panel'); await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveText(['通用综合 v2 · 清晰分区', '通用综合 · 中性叙事']);
-    await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(NEUTRAL_V2_PRESET_ID);
-    await expect(panel.getByLabel('恢复默认框架', { exact: true }).locator('option')).toHaveCount(2);
-    await expect(panel.getByLabel('恢复默认框架', { exact: true })).toHaveValue(NEUTRAL_V2_PRESET_ID);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveText(['通用综合 v3 · 清晰分区', '通用综合 v2 · 清晰分区', '通用综合 · 中性叙事']);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(NEUTRAL_V3_PRESET_ID);
+    await expect(panel.getByLabel('恢复默认框架', { exact: true }).locator('option')).toHaveCount(3);
+    await expect(panel.getByLabel('恢复默认框架', { exact: true })).toHaveValue(NEUTRAL_V3_PRESET_ID);
     await expect(panel.getByLabel('辅助标签处理', { exact: true })).toHaveValue('off');
     await expect(panel.getByLabel('删除当前提示词预设', { exact: true })).toBeDisabled();
     const preview = panel.getByLabel('提示词编译预览', { exact: true });
@@ -2380,25 +2380,25 @@ test('新版通用与四任务默认可选、资料预览可读，旧版本保�
     await expect(tools).not.toContainText('不要等待');
     for (const [task, label] of [['writing', '正文写作'], ['extraction', '资料提取'], ['compression', '摘要压缩'], ['image', '生图提示词']] as const) {
       await panel.getByRole('tab', { name: label, exact: true }).click();
-      await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(TASK_V4_PRESET_IDS[task]);
-      await expect(panel.getByLabel('搭配通用预设', { exact: true })).toHaveValue(NEUTRAL_V2_PRESET_ID);
+      await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(TASK_V5_PRESET_IDS[task]);
+      await expect(panel.getByLabel('搭配通用预设', { exact: true })).toHaveValue(NEUTRAL_V3_PRESET_ID);
       await expect(preview).not.toContainText('示例extractionIndexText');
       await expect(preview).not.toContainText('示例imageInputText');
     }
     await panel.getByRole('tab', { name: '正文写作', exact: true }).click();
     await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(TASK_V3_PRESET_IDS.writing);
     await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(TASK_V3_PRESET_IDS.writing);
-    await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(TASK_V4_PRESET_IDS.writing);
+    await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(TASK_V5_PRESET_IDS.writing);
     await settings.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(settings.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
     await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click(); await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
     await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveText(['通用综合 v2 · 清晰分区', '通用综合 · 中性叙事']);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveText(['通用综合 v3 · 清晰分区', '通用综合 v2 · 清晰分区', '通用综合 · 中性叙事']);
     const saved = await (await page.request.get('/api/settings')).json();
-    expect(saved.promptTemplates.selected).toEqual(TASK_V4_PRESET_IDS);
-    expect(saved.promptTemplates.general.selected).toBe(NEUTRAL_V2_PRESET_ID);
-    await page.screenshot({ path: testInfo.outputPath('prompt-v4-desktop.png'), animations: 'disabled' });
+    expect(saved.promptTemplates.selected).toEqual(TASK_V5_PRESET_IDS);
+    expect(saved.promptTemplates.general.selected).toBe(NEUTRAL_V3_PRESET_ID);
+    await page.screenshot({ path: testInfo.outputPath('prompt-v5-desktop.png'), animations: 'disabled' });
     await page.setViewportSize({ width: 390, height: 844 }); await panel.getByLabel('当前提示词预设', { exact: true }).scrollIntoViewIfNeeded();
-    await page.screenshot({ path: testInfo.outputPath('prompt-v4-mobile.png'), animations: 'disabled' }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('prompt-v5-mobile.png'), animations: 'disabled' }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     expect(await stats()).toBe(before);
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
@@ -2415,7 +2415,7 @@ test('四份原版结构从文件导入后能查看真实工具与消息重排�
     }
     await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
     await panel.locator('summary').filter({ hasText: '发送的工具定义' }).click();
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(2);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(defaultPromptTemplates().general!.presets.length);
     for (const id of [...TAVERN_PRESET_IDS, NEUTRAL_PRESET_ID]) {
       if (id === NEUTRAL_PRESET_ID) await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(id);
       else {

@@ -8,6 +8,7 @@ import { createTavernMacroExpander } from '../shared/tavern-macros.js';
 import { TASK_V3_PRESET_IDS } from '../shared/task-prompts-v3.js';
 import { TASK_V4_PRESET_IDS } from '../shared/task-prompts-v4.js';
 import { NEUTRAL_V2_PRESET_ID } from '../shared/neutral-preset-v2.js';
+import { NEUTRAL_V3_PRESET_ID } from '../shared/neutral-preset-v3.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
 import { archiveCarrierMessages } from '../shared/response-carrier.js';
 import { buildRequestSnapshot, generateStructured, generateText, ModelInteractionPause, structuredRequest } from '../server/providers.js';
@@ -114,7 +115,7 @@ describe.each(protocols)('%s source carrier wire and continuations', protocol =>
     expect(JSON.stringify(body)).not.toContain('carrierPart');
   });
   it('keeps the new neutral carrier contract separate from its task and author materials', () => {
-    const settings = defaultPromptTemplates(); expect(settings.general!.selected).toBe(NEUTRAL_V2_PRESET_ID);
+    const settings = defaultPromptTemplates(); expect(settings.general!.selected).toBe(NEUTRAL_V3_PRESET_ID);
     const request = compileTaskPrompt(settings, 'writing', variables); expect(request.responseCarrier).toMatchObject({ archive: false });
     const body = JSON.parse(buildRequestSnapshot(config(protocol), request).body); const tools = toolDefinitions(protocol, body);
     expect(tools[0].name).toBe(request.responseCarrier!.name);

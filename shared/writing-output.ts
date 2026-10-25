@@ -4,7 +4,7 @@ export const WRITING_RESPONSE_NAME = 'emit_writing_response';
 
 export const WRITING_TOOL_INSTRUCTION = `# 正文工具通道
 每轮只调用一次 emit_writing_response，将本轮正文放入 prose，将需要实际执行的工具放入 toolCalls。
-- prose 包含本轮新增输出，可以为空；启用三段或单段格式时，辅助标签也放入 prose，程序清理后保存正文。不要在普通文本通道写正文，工具参数、结果和玩家回答不写入 prose。
+- prose 包含本轮新增正文，可以为空，按本次任务要求的格式填写。工具参数、结果和玩家回答不写入 prose。
 - toolCalls 按实际执行顺序填写 name 和 argumentsJson；argumentsJson 是该工具参数的完整 JSON 对象字符串，必须符合下方工具说明中的参数结构。
 - 工具说明由程序提供。不得调用未提供的工具，不得自己填写工具返回或玩家回答。
 - 查询、插画和 ask_user 均通过 toolCalls 提交。需要玩家决定时在此处停下，不提前写决定后的正文。
@@ -18,7 +18,7 @@ export function writingResponseTool(tools: { name: string; description: string; 
     parameters: {
       type: 'object', additionalProperties: false,
       properties: {
-        prose: { type: 'string', description: '本轮新增输出，允许通用预设规定的辅助标签，程序清理后保存正文。查询资料或等待玩家时可以为空。' },
+        prose: { type: 'string', description: '本轮新增正文，按本次任务要求的格式填写；查询资料或等待玩家时可以为空。' },
         toolCalls: { type: 'array', maxItems: 4, items: {
           type: 'object', additionalProperties: false,
           properties: { name: { type: 'string', ...(tools.length ? { enum: tools.map(tool => tool.name) } : {}) }, argumentsJson: { type: 'string', description: '对应工具参数的 JSON 对象字符串。' } },

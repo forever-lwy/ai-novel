@@ -4,14 +4,16 @@ import { exportPromptPreset, exportPromptTemplates, preparePromptImport } from '
 import { neutralGeneralPreset } from '../shared/neutral-preset.js';
 import { NEUTRAL_V2_PRESET_ID } from '../shared/neutral-preset-v2.js';
 import { TASK_V4_PRESET_IDS } from '../shared/task-prompts-v4.js';
+import { NEUTRAL_V3_PRESET_ID, neutralGeneralPresetV3 } from '../shared/neutral-preset-v3.js';
+import { TASK_V5_PRESET_IDS } from '../shared/task-prompts-v5.js';
 import { withLegacyPresets, withPriorDefaultSelections } from './fixtures/prompt-presets.js';
 import { legacyPromptTemplates } from '../shared/legacy-prompt-templates.js';
 
 function priorCatalog() {
   const value = withPriorDefaultSelections();
-  value.general!.presets = value.general!.presets.filter(preset => preset.id !== NEUTRAL_V2_PRESET_ID);
+  value.general!.presets = value.general!.presets.filter(preset => ![NEUTRAL_V2_PRESET_ID, NEUTRAL_V3_PRESET_ID].includes(preset.id));
   value.general!.catalogVersion = 7;
-  for (const task of promptTasks) value.presets[task] = value.presets[task].filter(preset => preset.id !== TASK_V4_PRESET_IDS[task]);
+  for (const task of promptTasks) value.presets[task] = value.presets[task].filter(preset => ![TASK_V4_PRESET_IDS[task], TASK_V5_PRESET_IDS[task]].includes(preset.id));
   value.taskCatalogVersions = { writing: 2, extraction: 2, compression: 2, image: 2 };
   return value;
 }
@@ -25,19 +27,21 @@ const readable = {
 };
 
 describe('readable prompt editions and additive catalog migration', () => {
-  it('selects v2/v4 for fresh settings while retaining all older built-ins byte-for-byte', () => {
+  it('selects v3/v5 for fresh settings while retaining all older built-ins byte-for-byte', () => {
     const fresh = defaultPromptTemplates();
-    expect(fresh.general!.selected).toBe(NEUTRAL_V2_PRESET_ID);
-    expect(fresh.selected).toEqual(TASK_V4_PRESET_IDS);
+    expect(fresh.general!.selected).toBe(NEUTRAL_V3_PRESET_ID);
+    expect(fresh.selected).toEqual(TASK_V5_PRESET_IDS);
     expect(fresh.general!.presets.find(preset => preset.id === 'general-neutral-v1')).toEqual(neutralGeneralPreset());
-    const framework = fresh.general!.presets.find(preset => preset.id === NEUTRAL_V2_PRESET_ID)!;
+    const framework = fresh.general!.presets.find(preset => preset.id === NEUTRAL_V3_PRESET_ID)!;
     expect(framework.textFilter).toBeUndefined();
     expect(framework.responseCarrier).toMatchObject({ archive: false });
-    expect(framework.blocks.map(block => block.content).join('\n')).not.toMatch(/<archive|<think|\/workspace\/archive/);
+    expect(framework.blocks.map(block => block.content).join('\n')).not.toMatch(/<archive|<think|\/workspace\/archive|思考|思维|独立字段|内部/);
+    expect(framework).toEqual(neutralGeneralPresetV3());
     for (const task of promptTasks) {
       expect(fresh.presets[task].some(preset => preset.id === `default-${task}-v3`)).toBe(true);
       if (task !== 'image') expect(fresh.presets[task].some(preset => preset.id === `default-${task}`)).toBe(true);
-      expect(fresh.presets[task][0].generalPresetId).toBe(NEUTRAL_V2_PRESET_ID);
+      expect(fresh.presets[task].some(preset => preset.id === TASK_V4_PRESET_IDS[task] && preset.generalPresetId === NEUTRAL_V2_PRESET_ID)).toBe(true);
+      expect(fresh.presets[task][0].generalPresetId).toBe(NEUTRAL_V3_PRESET_ID);
     }
     expect(validatePromptTemplates(fresh)).toEqual(fresh);
   });
@@ -54,8 +58,8 @@ describe('readable prompt editions and additive catalog migration', () => {
     expect(upgraded.selected).toEqual(before.selected); expect(upgraded.general!.selected).toBe(before.general!.selected);
     for (const preset of before.general!.presets) expect(upgraded.general!.presets.find(item => item.id === preset.id)).toEqual(preset);
     for (const task of promptTasks) for (const preset of before.presets[task]) expect(upgraded.presets[task].find(item => item.id === preset.id)).toEqual(preset);
-    expect(upgraded.general!.presets.at(-1)!.id).toBe(NEUTRAL_V2_PRESET_ID);
-    for (const task of promptTasks) expect(upgraded.presets[task].at(-1)!.id).toBe(TASK_V4_PRESET_IDS[task]);
+    expect(upgraded.general!.presets.at(-1)!.id).toBe(NEUTRAL_V3_PRESET_ID);
+    for (const task of promptTasks) expect(upgraded.presets[task].at(-1)!.id).toBe(TASK_V5_PRESET_IDS[task]);
     expect(normalizePromptTemplates(upgraded)).toEqual(upgraded);
   });
 
@@ -94,14 +98,14 @@ describe('readable prompt editions and additive catalog migration', () => {
     expect(old).toEqual(before);
     expect(migrated.selected).toEqual(before.selected);
     expect(migrated.general!.selected).toBe('general-neutral-v1');
-    expect(migrated.general!.presets.map(preset => preset.id)).toEqual(['general-neutral-v1', NEUTRAL_V2_PRESET_ID]);
+    expect(migrated.general!.presets.map(preset => preset.id)).toEqual(['general-neutral-v1', NEUTRAL_V2_PRESET_ID, NEUTRAL_V3_PRESET_ID]);
     expect(migrated.general!.presets[0]).toEqual(neutralGeneralPreset());
     for (const task of promptTasks) {
       for (const preset of before.presets[task]) expect(migrated.presets[task].find(item => item.id === preset.id)).toEqual(preset);
       expect(migrated.presets[task].some(preset => preset.id === TASK_V4_PRESET_IDS[task])).toBe(true);
     }
     expect(normalizePromptTemplates(migrated)).toEqual(migrated);
-    expect(defaultPromptTemplates().general!.selected).toBe(NEUTRAL_V2_PRESET_ID);
+    expect(defaultPromptTemplates().general!.selected).toBe(NEUTRAL_V3_PRESET_ID);
   });
 
   it('keeps an unbound fallback while retiring the only old task, then safely adds its v4 dependency', () => {
@@ -158,7 +162,7 @@ describe('readable prompt editions and additive catalog migration', () => {
     expect(imported.kind).toBe('preset'); if (imported.kind !== 'preset') return;
     const task = imported.templates.presets.writing.find(preset => preset.id === imported.presetId)!;
     const framework = imported.templates.general!.presets.find(preset => preset.id === task.generalPresetId)!;
-    expect(framework.id).not.toBe(NEUTRAL_V2_PRESET_ID); expect(framework.textFilter).toBeUndefined();
+    expect(framework.id).not.toBe(NEUTRAL_V3_PRESET_ID); expect(framework.textFilter).toBeUndefined();
     expect(framework.responseCarrier).toMatchObject({ archive: false });
     expect(compileTaskPrompt(imported.templates, 'writing', readable).textFilter).toBeUndefined();
     const collection = preparePromptImport(JSON.stringify(exportPromptTemplates(imported.templates)), defaultPromptTemplates());

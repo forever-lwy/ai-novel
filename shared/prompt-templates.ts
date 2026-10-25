@@ -7,9 +7,11 @@ import { previousDramatronPromptTemplates } from './previous-dramatron-prompt-te
 import { runtimePromptBlocks, type PromptRuntime } from './prompt-runtime.js';
 import { extractionOutputFormat } from './extraction-output.js';
 import { taskPresetsV3 } from './task-prompts-v3.js';
-import { taskPresetsV4, TASK_V4_PRESET_IDS } from './task-prompts-v4.js';
+import { taskPresetsV4 } from './task-prompts-v4.js';
+import { taskPresetsV5, TASK_V5_PRESET_IDS } from './task-prompts-v5.js';
 import { NEUTRAL_DELIVERY_INSTRUCTION, NEUTRAL_PRESET_ID, neutralGeneralPreset } from './neutral-preset.js';
 import { NEUTRAL_V2_PRESET_ID, neutralGeneralPresetV2 } from './neutral-preset-v2.js';
+import { NEUTRAL_V3_PRESET_ID, neutralGeneralPresetV3 } from './neutral-preset-v3.js';
 import { prepareReadablePromptVariables } from './prompt-readable-variables.js';
 import { isRetiredDefault } from './retired-preset-fingerprints.js';
 import { createTavernMacroExpander } from './tavern-macros.js';
@@ -134,8 +136,9 @@ const extractionAcknowledgment = '已收到索引。新资料只依据接下来�
 export function defaultPromptTemplates(): PromptTemplateSettings {
   const v3 = taskPresetsV3(EXTRACT_SYSTEM, COMPRESSION_SYSTEM);
   const v4 = taskPresetsV4(EXTRACT_SYSTEM, COMPRESSION_SYSTEM);
+  const v5 = taskPresetsV5(EXTRACT_SYSTEM, COMPRESSION_SYSTEM);
   const settings: PromptTemplateSettings = {
-    general: { selected: NEUTRAL_V2_PRESET_ID, catalogVersion: 8, presets: [neutralGeneralPresetV2(), neutralGeneralPreset()] },
+    general: { selected: NEUTRAL_V3_PRESET_ID, catalogVersion: 9, presets: [neutralGeneralPresetV3(), neutralGeneralPresetV2(), neutralGeneralPreset()] },
     presets: {
       writing: [{ id: 'default-writing', name: '默认正文写作', blocks: [
         block('writing-rules', '文笔、逻辑与文风', 'system', WRITING_SYSTEM),
@@ -154,11 +157,11 @@ export function defaultPromptTemplates(): PromptTemplateSettings {
       ] }, v3.compression],
       image: [v3.image],
     },
-    selected: { ...TASK_V4_PRESET_IDS },
-    taskCatalogVersions: { writing: 3, extraction: 3, compression: 3, image: 3 },
+    selected: { ...TASK_V5_PRESET_IDS },
+    taskCatalogVersions: { writing: 4, extraction: 4, compression: 4, image: 4 },
     catalogCleanupVersion: 2,
   };
-  for (const task of promptTasks) settings.presets[task].unshift(v4[task]);
+  for (const task of promptTasks) settings.presets[task].unshift(v5[task], v4[task]);
   return settings;
 }
 
@@ -184,11 +187,11 @@ export const promptPresetSchema = z.object({
 const presetList = z.array(promptPresetSchema).min(1, '每个任务至少保留一个预设').max(20, '每个任务最多 20 个预设');
 const templateShape = z.object({
   // Old backups may have no image task or general framework. Supply only the
-  // standalone historical image preset before additive normalization can bind v4.
+  // standalone historical image preset before additive normalization adds editions.
   presets: z.object({ writing: presetList, planning: presetList.optional(), extraction: presetList, compression: presetList, image: presetList.default(() => defaultPromptTemplates().presets.image.filter(preset => preset.id === 'default-image-v3')) }).strict(),
   selected: z.object({ writing: identifier, planning: identifier.optional(), extraction: identifier, compression: identifier, image: identifier.default('default-image-v3') }).strict(),
-  general: z.object({ presets: presetList, selected: identifier, catalogVersion: z.number().int().min(0).max(8).optional() }).strict().optional(),
-  taskCatalogVersions: z.object({ writing: z.number().int().min(0).max(3).optional(), extraction: z.number().int().min(0).max(3).optional(), compression: z.number().int().min(0).max(3).optional(), image: z.number().int().min(0).max(3).optional() }).strict().optional(),
+  general: z.object({ presets: presetList, selected: identifier, catalogVersion: z.number().int().min(0).max(9).optional() }).strict().optional(),
+  taskCatalogVersions: z.object({ writing: z.number().int().min(0).max(4).optional(), extraction: z.number().int().min(0).max(4).optional(), compression: z.number().int().min(0).max(4).optional(), image: z.number().int().min(0).max(4).optional() }).strict().optional(),
   catalogCleanupVersion: z.number().int().min(0).max(2).optional(),
 }).strict();
 // These names were reserved before readable material aliases were introduced.
@@ -306,8 +309,9 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
   }
   // Add the new built-in once, without selecting it or replacing author edits.
   // Keep a full catalog intact and retry when the author frees a slot.
-  for (const builtin of [...defaults.general!.presets].sort((a, b) => Number(a.id === NEUTRAL_V2_PRESET_ID) - Number(b.id === NEUTRAL_V2_PRESET_ID))) {
-    const version = builtin.id === NEUTRAL_V2_PRESET_ID ? 8 : 7;
+  const generalVersion = (id: string) => id === NEUTRAL_V3_PRESET_ID ? 9 : id === NEUTRAL_V2_PRESET_ID ? 8 : 7;
+  for (const builtin of [...defaults.general!.presets].sort((a, b) => generalVersion(a.id) - generalVersion(b.id))) {
+    const version = generalVersion(builtin.id);
     if ((settings.general!.catalogVersion ?? 0) >= version) continue;
     if (!settings.general!.presets.some(preset => preset.id === builtin.id)) {
       const candidate: PromptTemplateSettings = { ...settings, general: { ...settings.general!, presets: [...settings.general!.presets, builtin] } };
@@ -328,8 +332,9 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
   });
   // Track each task independently so a full catalog cannot resurrect an edition
   // deliberately deleted from a different task. Never change current selections.
-  for (const task of promptTasks) for (const builtin of [...defaults.presets[task]].sort((a, b) => Number(a.id.endsWith('-v4')) - Number(b.id.endsWith('-v4')))) {
-    const version = builtin.id.endsWith('-v4') ? 3 : builtin.id.endsWith('-v3') ? 2 : 0;
+  const taskVersion = (id: string) => id.endsWith('-v5') ? 4 : id.endsWith('-v4') ? 3 : id.endsWith('-v3') ? 2 : 0;
+  for (const task of promptTasks) for (const builtin of [...defaults.presets[task]].sort((a, b) => taskVersion(a.id) - taskVersion(b.id))) {
+    const version = taskVersion(builtin.id);
     if (!version || (settings.taskCatalogVersions?.[task] ?? 0) >= version) continue;
     if (!settings.presets[task].some(preset => preset.id === builtin.id)) {
       const candidate = { ...settings, presets: { ...settings.presets, [task]: [...settings.presets[task], builtin] } };

@@ -7,14 +7,14 @@ export const STRUCTURED_OUTPUT_INSTRUCTION = '本次返回必须是符合要求�
 export const TOOL_JSON_INSTRUCTION = `# 工具防截断提交
 将本次任务要求的完整 JSON 文本作为字符串放入 emit_writing_response 的 prose，toolCalls 填 []，只提交一次。
 这里的“仅输出 JSON”约束 prose 中的任务结果；外层遵循接口的工具参数结构，不在普通文本通道重复输出。
-不要输出辅助思考、draft、解释或代码围栏。工具参数必须完整、可解析，提交后直接结束，不执行工具、不追加确认回合。`;
+工具参数必须完整、可解析，提交后直接结束，不执行工具、不追加确认回合。`;
 export const WRITING_STAGE_INSTRUCTION = '# 正文阶段\n当前阶段只生成本章正文，查询资料、插画和 RPG 选择按本次工具约定执行。正文保存后另行整理资料。';
 export const WRITING_TEXT_INSTRUCTION = `# 本次实际交付接口
 本次使用普通文本交付本轮新增正文，以这里的实际通道为准。
-查询资料、插画和玩家选择使用接口提供的工具调用。正文只写故事，工具参数和结果留在工具通道；原生思考由接口字段承载。`;
+查询资料、插画和玩家选择使用接口提供的工具调用。正文只写故事，工具参数和结果不写入正文。`;
 export const TOOL_RESULT_REVIEW_INSTRUCTION = `# 工具结果复核
 依据真实工具结果继续任务；信息不足时补查，报错时纠正参数或保留未完成状态。
-核对在内部完成，随后直接续写新正文或调用下一项工具，不复述已经输出的文字。`;
+随后直接续写新正文或调用下一项工具，不复述已经输出的文字。`;
 
 export interface PromptRuntime {
   extensionsCatalog?: string;

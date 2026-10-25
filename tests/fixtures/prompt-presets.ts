@@ -36,11 +36,12 @@ export function withDramatronPresets() {
 export function withPriorDefaultSelections() {
   const settings = defaultPromptTemplates();
   settings.general!.selected = 'general-neutral-v1';
-  settings.general!.presets.sort((a, b) => Number(a.id !== 'general-neutral-v1') - Number(b.id !== 'general-neutral-v1'));
+  settings.general!.presets.sort((a, b) => a.id.localeCompare(b.id));
   for (const task of ['writing', 'extraction', 'compression', 'image'] as const) {
     const id = task === 'image' ? 'default-image-v3' : `default-${task}`;
     settings.selected[task] = id;
-    settings.presets[task].sort((a, b) => Number(a.id.endsWith('-v4')) - Number(b.id.endsWith('-v4')));
+    const edition = (value: string) => Number(value.match(/-v(\d+)$/)?.[1] ?? 0);
+    settings.presets[task].sort((a, b) => Number(a.id !== id) - Number(b.id !== id) || edition(a.id) - edition(b.id));
   }
   return settings;
 }
