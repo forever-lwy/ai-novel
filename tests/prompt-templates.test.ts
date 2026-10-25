@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { withDramatronPresets } from './fixtures/prompt-presets.js';
+import { withDramatronPresets, withPriorDefaultSelections } from './fixtures/prompt-presets.js';
 import type { PromptBlock, PromptTask } from '../shared/types.js';
 import { activePromptPreset, BASE_SYSTEM, COMPRESSION_SYSTEM, compilePrompt, compileTaskPrompt, defaultPromptTemplates, EXTRACT_SYSTEM, normalizePromptTemplates, WRITING_SYSTEM, promptPresetVariables, promptTasks, validatePromptTemplates } from '../shared/prompt-templates.js';
 import { legacyPromptTemplates } from '../shared/legacy-prompt-templates.js';
@@ -13,7 +13,7 @@ const messageBlock = (id: string, role: PromptBlock['role'], content: string): P
 
 describe('editable task prompt templates', () => {
   it('renders untouched neutral delivery for the actual interface without rewriting author presets', () => {
-    const settings = defaultPromptTemplates();
+    const settings = withPriorDefaultSelections();
     settings.general!.presets[0].toolTransport = false;
     const before = structuredClone(settings);
     const request = compileTaskPrompt(settings, 'writing', variables);
@@ -36,8 +36,8 @@ describe('editable task prompt templates', () => {
     expect(request).toMatchObject({ writingOutputMode: 'text' });
     expect(request.responseCarrier).toBeUndefined();
     expect(request.runtimeBlocks).toContainEqual(expect.objectContaining({ name: '正文普通文本通道规则', content: expect.stringContaining('本次使用普通文本交付') }));
-    expect(request.system).toContain('上文通用预设中关于结果工具的要求在本次不适用');
-    expect(request.system).toContain('工具调用说明、参数和模拟结果不得混入正文');
+    expect(request.system).toContain('以这里的实际通道为准');
+    expect(request.system).toContain('正文只写故事，工具参数和结果留在工具通道');
     const inherited = compileTaskPrompt(defaultPromptTemplates(), 'writing', variables);
     expect(inherited.responseCarrier).toBeDefined();
     expect(inherited.runtimeBlocks.some(block => block.name === '正文普通文本通道规则')).toBe(false);
@@ -63,7 +63,7 @@ describe('editable task prompt templates', () => {
     expect(compilePrompt(old, 'writing', variables).messages).toEqual(expected);
     const normalized = normalizePromptTemplates(old);
     expect(normalized.presets.writing[0].useGeneral).toBe(false);
-    expect(normalized.presets.compression[0]).toEqual(defaultPromptTemplates().presets.compression[0]);
+    expect(normalized.presets.compression[0]).toEqual(withPriorDefaultSelections().presets.compression[0]);
     expect(normalizePromptTemplates(normalized)).toEqual(normalized);
   });
 
@@ -84,23 +84,23 @@ describe('editable task prompt templates', () => {
   it('provides independent Markdown defaults and keeps each extraction/compression input together', () => {
     const first = normalizePromptTemplates(); const second = normalizePromptTemplates();
     first.presets.writing[0].blocks[0].content = 'changed';
-    expect(second.presets.writing[0].blocks[0].content).toBe(WRITING_SYSTEM);
+    expect(second.presets.writing[0].blocks[0].content).toContain('# 当前任务：故事正文');
     const requests = Object.fromEntries(promptTasks.map(task => [task, compilePrompt(undefined, task, variables)]));
-    expect(requests.writing.system).toContain(BASE_SYSTEM);
-    expect(requests.writing.system).toContain(WRITING_SYSTEM);
-    expect(requests.writing.system).toContain('# 小说正文写作');
+    expect(requests.writing.system).toContain('# 作者工作区');
+    expect(requests.writing.system).toContain('# 当前任务：故事正文');
     expect(requests.writing.prompt).toContain('## 作者要求\n继续灯塔剧情');
     expect(requests.extraction.system).toContain(EXTRACT_SYSTEM.replace(`${BASE_SYSTEM}\n\n`, ''));
-    expect(requests.extraction.prompt).toContain('## 编号原文\n[1] 林舟走进灯塔。');
+    expect(requests.extraction.prompt).toContain('## 编号原文');
+    expect(requests.extraction.prompt).toContain(variables.blockText);
     expect(requests.compression).toMatchObject({ system: expect.stringContaining(COMPRESSION_SYSTEM.replace(`${BASE_SYSTEM}\n\n`, '')), prompt: expect.stringContaining(variables.summaryText) });
     for (const task of promptTasks) for (const mode of ['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']) {
       const dialogue = compileTaskPrompt(undefined, task, { ...variables, mode }).messages.filter(message => message.role !== 'system');
-      expect(dialogue.map(message => message.role)).toEqual(task === 'writing' ? ['user', 'assistant', 'user'] : task === 'extraction' ? ['user', 'user'] : ['user']);
+      expect(dialogue.map(message => message.role)).toEqual(task === 'writing' ? ['user', 'user'] : ['user']);
       expect(dialogue.some(message => message.content.includes('冬马和纱'))).toBe(false);
       if (task === 'extraction') {
         expect(dialogue[0].content).toContain(variables.context);
-        expect(dialogue[1].content).toContain(`## 编号原文\n${variables.blockText}`);
-        expect(dialogue[1].content).not.toContain('已收到索引');
+        expect(dialogue[0].content).toContain(variables.blockText);
+        expect(dialogue[0].content).not.toContain('已收到索引');
       }
     }
     expect(validatePromptTemplates(second)).toEqual(second);
@@ -117,7 +117,7 @@ describe('editable task prompt templates', () => {
     const before = structuredClone(settings);
     const normalized = normalizePromptTemplates(settings);
     expect(settings).toEqual(before);
-    expect(normalized.presets.extraction[0]).toEqual(defaultPromptTemplates().presets.extraction[0]);
+    expect(normalized.presets.extraction[0]).toEqual(withPriorDefaultSelections().presets.extraction[0]);
     expect(normalized.presets.extraction.slice(1, 3)).toEqual([edited, copy].map(value => ({ ...value, useGeneral: false })));
     expect(normalized.selected.extraction).toBe('copy');
     expect(normalizePromptTemplates(normalized)).toEqual(normalized);
@@ -137,7 +137,7 @@ describe('editable task prompt templates', () => {
     expect(upgraded.presets.writing.slice(0, before.presets.writing.length)).toEqual(before.presets.writing.map(value => ({ ...value, useGeneral: false })));
     expect(upgraded.presets.compression[1]).toEqual({ ...before.presets.compression[1], useGeneral: false });
     expect(upgraded.selected.compression).toBe('copy');
-    for (const task of ['extraction', 'compression'] as const) expect(upgraded.presets[task][0]).toEqual(defaultPromptTemplates().presets[task][0]);
+    for (const task of ['extraction', 'compression'] as const) expect(upgraded.presets[task][0]).toEqual(withPriorDefaultSelections().presets[task][0]);
     expect(normalizePromptTemplates(upgraded)).toEqual(upgraded);
   });
 
@@ -148,8 +148,8 @@ describe('editable task prompt templates', () => {
     expect(request.messages.filter(message => message.role === 'user')).toHaveLength(1);
     expect([...request.messages].reverse().find(message => message.role === 'user')?.content).toContain('选择登船');
     expect(request.system).toContain('必须调用 ask_user');
-    expect(request.system).toContain('generate_character_portrait');
-    expect(request.system).not.toContain('generate_scene_cg');
+    expect(request.system).toContain('请求人物立绘');
+    expect(request.system).not.toContain('请求一次场景 CG');
     expect(request.messages).not.toContainEqual(expect.objectContaining({ content: '未启用' }));
     expect(settings.presets.writing[0].blocks[0].content).toBe('{{context}}');
     expect(compileTaskPrompt(undefined, 'extraction', variables).system).toContain('完整 JSON 结果对象');
@@ -250,7 +250,7 @@ describe('editable task prompt templates', () => {
   it('formats validation issues around task, preset and block names and limits displayed errors', () => {
     const settings = defaultPromptTemplates();
     settings.presets.writing[0].blocks[0].content = '{{missing1}} {{missing2}} {{missing3}} {{missing4}}';
-    expect(() => validatePromptTemplates(settings)).toThrow('正文写作 · 默认正文写作 · 文笔、逻辑与文风');
+    expect(() => validatePromptTemplates(settings)).toThrow('正文写作 · 正文写作 v4 · 清晰分区 · 写作职责');
     expect(() => validatePromptTemplates(settings)).toThrow('另有 1 处需要修改');
     expect(() => validatePromptTemplates({ ...defaultPromptTemplates(), unexpected: true })).toThrow('包含不支持的字段：unexpected');
   });

@@ -28,7 +28,7 @@ import { checkBackupSize, MAX_BACKUP_BYTES } from './backup-limits.js';
 import type { Source, SourcePreview, Settings, Entity, Foreshadow, Job, CapturedModelResponse, ModelRequestSnapshot } from '../shared/types.js';
 import { modelRoles, resolveModelConfig } from '../shared/model-settings.js';
 import { validatePromptTemplates } from '../shared/prompt-templates.js';
-import { modelNameSchema, providerSchema, modelRoleSchema, settingsSchema, parseProjectSettingsOverrides } from './settings-schema.js';
+import { imageSettingsSchema, modelNameSchema, providerSchema, modelRoleSchema, settingsSchema, parseProjectSettingsOverrides } from './settings-schema.js';
 import { parseTaskSettings } from '../shared/task-settings.js';
 import type { PromptPreviewInput } from '../shared/prompt-runtime.js';
 
@@ -37,6 +37,7 @@ const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']
 const outlineSchema = z.object({ worldview: z.string().max(100000).optional(), locked: z.string().max(100000), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string().max(500), goal: z.string().max(20000) })).max(1000).optional() });
 const promptPreviewSchema = z.object({
   task: z.enum(['writing', 'extraction', 'compression', 'image']), templates: z.unknown(), protocol: providerSchema.shape.protocol,
+  imageSettings: imageSettingsSchema.optional(),
   variables: z.record(z.string().max(100), z.string().max(200000)).refine(value => Object.keys(value).length <= 150, '示例变量过多'),
   runtime: z.object({ extractionOutputMode: z.enum(['prompt', 'structured', 'tool']).optional(), illustrations: z.object({ portrait: z.boolean(), cg: z.boolean() }).strict().optional(), chapterAnswer: z.string().max(20000).optional(), rpg: z.object({ character: z.object({ kind: z.enum(['original', 'existing']), name: z.string().max(300), description: z.string().max(20000) }).strict(), entryInstruction: z.string().max(20000) }).strict().optional() }).strict(),
 }).strict();

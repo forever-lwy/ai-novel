@@ -89,7 +89,10 @@ describe('automatic images across writing, extraction and image persistence', ()
     expect(asset.storyContext).toBeUndefined(); expect(ctx.optimizer).toHaveBeenCalledTimes(1);
     expect(ctx.generator.mock.calls.find(call => call[2].includes(prompt))?.[4]).toHaveLength(1);
     const tool = ctx.requests[0].tools!.find(tool => tool.name === 'generate_scene_cg')!;
-    expect(tool.parameters.required).toEqual(['prompt', 'sourceText']); expect(tool.description).toContain('不再交给另一个 AI 改写');
+    expect(tool.parameters.required).toEqual(['prompt', 'sourceText']);
+    expect(tool.description).toContain('requested'); expect(tool.description).toContain('rejected/error');
+    expect(tool.description).not.toMatch(/主动|继续写作|不必等待|另一个 AI|当前绘图要求|fixedParameters|stylePrompt/);
+    expect(ctx.requests[0].messages?.some(message => message.content.includes(ctx.settings.imageSettings!.stylePrompt))).toBe(true);
     const restored = ctx.store.restoreProject(ctx.store.exportProject(ctx.project.id));
     expect(ctx.store.images.all(restored.id).find(image => image.kind === 'cg')).toMatchObject({ writingPrompt: prompt, promptSource: 'writing', writingReferenceNames: ['林舟'] });
   });

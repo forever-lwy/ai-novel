@@ -1,4 +1,4 @@
-import { withDramatronPresets, withLegacyPresets, withTavernPresets } from './fixtures/prompt-presets.js';
+import { withDramatronPresets, withLegacyPresets, withPriorDefaultSelections, withTavernPresets } from './fixtures/prompt-presets.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,6 +12,8 @@ import type { PromptTask, ProviderProtocol } from '../shared/types.js';
 import { V08_PRESET_ID } from './fixtures/legacy-presets/v08-prompts.js';
 import { REBORN_PRESET_ID } from './fixtures/legacy-presets/reborn-prompts.js';
 import { TASK_V2_PRESET_IDS } from './fixtures/legacy-presets/task-prompts-v2.js';
+import { NEUTRAL_V2_PRESET_ID } from '../shared/neutral-preset-v2.js';
+import { TASK_V4_PRESET_IDS } from '../shared/task-prompts-v4.js';
 
 let ctx: Awaited<ReturnType<typeof buildApp>>;
 let cookies: { session: string };
@@ -25,13 +27,30 @@ const variables = { context: '示例故事资料', mode: 'original', instruction
 const input = (task: PromptTask, protocol: ProviderProtocol): PromptPreviewInput => ({ task, protocol, templates: withDramatronPresets(), variables, runtime: {} });
 
 describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s final prompt preview', protocol => {
-  it('uses only neutral as the fresh built-in framework and exposes its complete archive', async () => {
+  it('uses the new neutral framework and keeps complete materials in messages instead of tool descriptions', async () => {
     const templates = defaultPromptTemplates();
     const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: { ...input('writing', protocol), templates } });
     expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
-    expect(templates.general!.presets.map(preset => preset.id)).toEqual(['general-neutral-v1']);
-    expect(preview.tools.some(tool => tool.name === 'emit_complete_text' && tool.description.includes(variables.instruction))).toBe(true);
+    expect(templates.general!.presets.map(preset => preset.id)).toEqual([NEUTRAL_V2_PRESET_ID, 'general-neutral-v1']);
+    expect(templates.general!.selected).toBe(NEUTRAL_V2_PRESET_ID); expect(templates.selected.writing).toBe(TASK_V4_PRESET_IDS.writing);
+    expect(templates.general!.presets[0].responseCarrier).toMatchObject({ archive: false });
+    expect(preview.tools.some(tool => tool.name === 'emit_complete_text')).toBe(true);
+    for (const material of [variables.context, variables.instruction, variables.writingTarget]) {
+      expect(preview.messages.some(message => message.content.includes(material))).toBe(true);
+      expect(preview.tools.every(tool => !tool.description.includes(material))).toBe(true);
+      const wire = JSON.parse(preview.body);
+      expect(JSON.stringify(wire[protocol === 'gemini' ? 'contents' : protocol === 'openai-responses' ? 'input' : 'messages'])).toContain(material);
+    }
     expect(preview.body).not.toMatch(/Dramatron|冬马和纱|FICTIONAL_TEXT_COMPLETION|Model Card - SoliUmbra/);
+  });
+  it('preserves the explicitly selected earlier neutral archive transport', () => {
+    const templates = withPriorDefaultSelections(); const before = structuredClone(templates);
+    const preview = ctx.engine.previewPrompt({ ...input('writing', protocol), templates });
+    expect(templates.general!.selected).toBe('general-neutral-v1');
+    const sink = preview.tools.find(tool => tool.name === 'emit_complete_text');
+    expect(sink?.description).toContain(variables.instruction); expect(sink?.description).toContain(variables.context);
+    expect(sink?.description).toContain('资料边界与查询'); expect(preview.messages.every(message => !message.content.includes(variables.context))).toBe(true);
+    expect(templates).toEqual(before);
   });
   it('shows the same post-tool review rule used by actual continuations', () => {
     const preview = ctx.engine.previewPrompt(input('writing', protocol));
@@ -51,11 +70,15 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     for (const name of ['emit_complete_text', 'emit_writing_response']) expect(toolNames).not.toContain(name);
     expect(preview.runtimeBlocks.find(block => block.name === '故事资料与原作参考边界')?.content).not.toContain('toolCalls');
     expect(JSON.stringify(wire)).not.toMatch(/<\/?(?:thought|thinking|think)>|think／thinking|结束当前.*辅助块|开始新的辅助块/);
-    expect(JSON.stringify(wire)).toContain('普通文本不是工具调用，也不是原生思考通道');
-    expect(JSON.stringify(wire)).toContain('不在正文中解释工具流程、纠正输出格式或检查自己是否仍在思考');
-    expect(JSON.stringify(wire)).toContain('不先写准备生图、调用说明或参数草稿');
-    expect(JSON.stringify(wire)).toContain('历史正文和资料引文可能保留旧生成失败产生的非叙事标记');
-    expect(JSON.stringify(wire)).toContain('不在两者之间添加分隔符、装饰字符、异语字词或任何调用标记');
+    expect(JSON.stringify(wire)).toContain('正文只写故事，工具参数和结果留在工具通道；原生思考由接口字段承载');
+    expect(JSON.stringify(wire)).toContain('核对在内部完成，随后直接续写新正文或调用下一项工具');
+    expect(JSON.stringify(wire)).toContain('历史材料中的旧工具旁白和乱码不作为文风模仿');
+    const illustrationRules = preview.runtimeBlocks.find(block => block.name === '自动插画规则')?.content;
+    expect(illustrationRules).toContain('请求登记后继续写作，无需等待图片完成');
+    expect(illustrationRules).toContain('先输出对应场景正文');
+    for (const tool of preview.tools.filter(tool => tool.name.startsWith('generate_'))) {
+      expect(tool.description).not.toMatch(/无需等待|先输出对应场景正文|由写作模型|完整上下文|首次出场/);
+    }
     expect(JSON.stringify(wire)).not.toContain('以本次定义的结果工具交付完整内容');
     expect(templates).toEqual(before);
   });
@@ -132,10 +155,12 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
       request.runtime.illustrations = { portrait: true, cg: false };
       const preview = ctx.engine.previewPrompt(request);
       const text = preview.messages.map(message => message.content).join('\n');
-      expect(text).toContain('当前材料不足时，先调用本次提供的资料工具');
-      expect(text).toContain('不必为了凑齐三段或单段格式而延后');
-      expect(text).toContain('模拟调用文本不算执行工具');
-      expect(text).toContain('generate_character_portrait'); expect(text).not.toContain('generate_scene_cg');
+      expect(text).toContain('已有事实不足时先查询资料，再继续写作');
+      expect(text).toContain('通过本次定义的接口提交工具调用，采用真实返回结果');
+      expect(text).toContain('新人物首次出场、外观已在正文明确时，请求人物立绘');
+      expect(text).not.toContain('场景切换或出现适合插画的关键瞬间');
+      expect(preview.tools.map(tool => tool.name)).toContain(writingOutputMode === 'text' ? 'generate_character_portrait' : 'emit_writing_response');
+      expect(preview.tools.map(tool => tool.name)).not.toContain('generate_scene_cg');
       expect(preview.body).toContain('search_story'); expect(preview.body).toContain('generate_character_portrait');
       expect(text.match(/SKIP silently thinking/g)).toHaveLength(2);
       expect(request.templates.general).toEqual(originalGeneral);
@@ -187,7 +212,7 @@ it('requires authentication, validates drafts, and never saves settings or creat
 it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s previews the original Reborn transform and image archive using the actual request builders', async protocol => {
   const before = ctx.settings.meta('settings'); const draft = input('writing', protocol); draft.templates = withTavernPresets(); draft.templates.general!.selected = 'tavern-reborn-v23'; draft.templates.selected.writing = 'default-writing-v3';
   const transformed = ctx.engine.previewPrompt(draft); expect(transformed.messages[0].content).toContain('<clear>'); expect(JSON.stringify(transformed.messages)).toContain('soliumbra'); expect(transformed.tools.some(tool => tool.name === 'game_content')).toBe(true);
-  expect(transformed.messages.some(message => message.role === 'system' && message.content.includes('# 故事资料使用规则'))).toBe(true);
+  expect(transformed.messages.some(message => message.role === 'system' && message.content.includes('# 资料边界与查询') && message.content.includes('不代表本线已发生或角色已经知道'))).toBe(true);
   const image = { ...draft, task: 'image' as const, variables: { imageInput: '{"material":"雾港灯塔"}', imageSystemPrompt: '水彩', maxCharacterReferences: '0' } }; image.templates.general!.selected = 'tavern-linux-v13';
   const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/prompt-preview', cookies, payload: image }); expect(response.statusCode).toBe(200); const preview = response.json<PromptPreviewResult>();
   expect(preview.tools).toHaveLength(1); expect(preview.tools[0].name).toBe('dispatch_stream_payload'); expect(preview.tools[0].description).toContain('IMAGE_PROMPT_OPTIMIZATION'); expect(preview.tools[0].description).toContain('雾港灯塔');

@@ -5,6 +5,8 @@ import type { Mode, PromptBlock, PromptFeature, PromptPreset, PromptScope, Promp
 import type { PromptPreviewInput, PromptPreviewResult } from '../shared/prompt-runtime';
 import { normalizeTaskSettings } from '../shared/task-settings';
 import { normalizeImageSettings } from '../shared/image-settings';
+import { formatContinuationAnchor, formatExtractionIndex, formatRecentChapters } from '../shared/prompt-materials';
+import { formatSerializedPromptMaterial } from '../shared/prompt-readable-variables';
 import { api } from './api';
 import { activePromptPreset, compilePrompt, defaultPromptTemplates, promptPresetList, promptPresetVariables, promptScopeLabels, promptScopes, promptTaskLabels, promptTasks, promptVariables, validatePromptTemplates } from '../shared/prompt-templates';
 import { clonePromptPreset as clonePreset, exportPromptPreset, exportPromptTemplates, preparePromptImport, PROMPT_TRANSFER_BYTE_LIMIT } from '../shared/prompt-transfer';
@@ -38,7 +40,17 @@ function sampleValue(key: string) {
     writingTarget: '从最近保存的正文结尾接着写下一章，只写当前这一章。', sourceText: '雨水浸透了林舟的斗篷。他沿着码头寻找失踪船长。', originalReference: '',
     imageInput: '{"kind":"cg","material":"林舟身披深灰斗篷，站在雨夜的码头查看怀表。","storyContext":"此前他冒雨来到码头寻找船主。本章前文交代了深灰斗篷和怀表的来历，后文是他收起怀表离开；只绘制发现怀表的瞬间。","instruction":"画出发现怀表的一刻","stylePrompt":"自然光，写实插画","characters":[],"references":[],"config":{"size":"1024x1024"},"allowed":{"dimensionMode":"size","sizes":["1024x1024"],"maxCharacterReferences":0}}', imageSystemPrompt: '', maxCharacterReferences: '0',
   };
-  return samples[key] ?? `示例${key}`;
+  const anchor = { chapterId: 'sample-chapter', title: '雾港来信', ending: samples.recentChapters };
+  const readable = {
+    storyMaterialsText: samples.storyMaterials,
+    recentChaptersText: formatRecentChapters([{ chapterId: anchor.chapterId, title: anchor.title, text: samples.recentChapters }]),
+    continuationAnchorText: formatContinuationAnchor(anchor),
+    extractionIndexText: formatExtractionIndex([{ kind: 'character', name: '林舟', aliases: [] }], []),
+    imageInputText: formatSerializedPromptMaterial(samples.imageInput),
+  };
+  if (key === 'continuationAnchor') return JSON.stringify(anchor);
+  if (key === 'contextText') return `# 故事资料\n${readable.storyMaterialsText}\n\n# 最近章节原文\n${readable.recentChaptersText}\n\n# 续写起点\n${readable.continuationAnchorText}`;
+  return readable[key as keyof typeof readable] ?? samples[key] ?? `示例${key}`;
 }
 
 export function PromptTemplatesPanel({ settings, onChange, disabled = false, embedded = false }: { settings: Settings; onChange: (settings: Settings) => void; disabled?: boolean; embedded?: boolean }) {
@@ -78,7 +90,7 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
   const protocol = protocolOverride || settings.providers.find(provider => provider.id === providerId)?.protocol || 'openai-chat';
   const images = normalizeImageSettings(settings.imageSettings);
   const previewTemplates = task === 'general' ? { ...templates, presets: { ...templates.presets, [previewTask]: templates.presets[previewTask].map(value => value.id === templates.selected[previewTask] ? { ...value, useGeneral: true, generalPresetId: preset.id } : value) } } : templates;
-  const previewInput: PromptPreviewInput = { task: previewTask, templates: previewTemplates, variables: samples[previewTask], protocol, runtime: {
+  const previewInput: PromptPreviewInput = { task: previewTask, templates: previewTemplates, variables: samples[previewTask], protocol, imageSettings: images, runtime: {
     extractionOutputMode: normalizeTaskSettings(settings.taskSettings).extraction.outputMode,
     illustrations: { portrait: Boolean(images.providerId && images.model && images.autoPortrait), cg: Boolean(images.providerId && images.model && images.autoCG) },
     ...(previewTask === 'writing' && samples.writing.mode === 'rpg' ? { rpg: rpgSample, chapterAnswer } : {}),
@@ -199,7 +211,7 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
   const scopeDefaults = promptPresetList(defaultPromptTemplates(), task);
   const resetDefaultId = resetTarget?.presetId === preset.id && scopeDefaults.some(value => value.id === resetTarget.defaultId) ? resetTarget.defaultId : scopeDefaults.find(value => value.id === preset.id)?.id ?? (task === 'general' ? scopeDefaults.find(value => value.textFilter === preset.textFilter)?.id : undefined) ?? scopeDefaults[0].id;
   const body = <div className="prompt-templates-body form-stack">
-      <p className="hint">通用内置仅保留“通用综合 · 中性叙事”；任务保留原始默认与 v3 提示词。其他通用预设或任务提示词可通过 JSON 导入，导入后可修改名称与内容。修改后点击“保存设置”生效。</p>
+    <p className="hint">新增“通用综合 v2 · 清晰分区”与四任务 v4，旧版本继续保留。已有选择不会自动切换，选用 v4 即搭配 v2 框架。其他预设可通过 JSON 导入，修改后点击“保存设置”生效。</p>
       <div className="prompt-task-tabs" role="tablist" aria-label="提示词任务">{promptScopes.map(value => <button type="button" key={value} role="tab" aria-selected={task === value} className={task === value ? 'active' : ''} disabled={disabled} onClick={() => selectTask(value)}>{promptScopeLabels[value]}</button>)}</div>
       <div className="row wrap" aria-label="提示词导入导出">
         <button type="button" className="button secondary small" disabled={disabled} onClick={() => fileInput.current?.click()}><Upload size={14} />导入预设或任务提示词</button>
@@ -210,7 +222,7 @@ export function PromptTemplatesPanel({ settings, onChange, disabled = false, emb
       <section className="prompt-preset-editor form-stack" aria-label={`${promptScopeLabels[task]}提示词预设`}>
         <div className="prompt-preset-heading"><label>当前预设<select aria-label="当前提示词预设" disabled={disabled} value={preset.id} onChange={event => { replaceScope(presets, event.target.value); setInsertBlock(''); setExpandedBlock(''); }}>{presets.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label><div className="row wrap"><button type="button" className="button secondary small" disabled={disabled} onClick={() => addPreset()}><Plus size={14} />新建预设</button><button type="button" className="button secondary small" disabled={disabled} onClick={() => addPreset(true)}><Copy size={14} />复制预设</button><button type="button" className="button secondary small" disabled={disabled} onClick={() => setNaming({ kind: 'preset', operation: 'rename', name: preset.name })}><Pencil size={14} />重命名预设</button><button type="button" className="icon-button danger-text" aria-label="删除当前提示词预设" title="删除当前预设（保留至少一个；被任务引用的通用预设须先解除引用）" disabled={disabled || presets.length <= 1 || task === 'general' && promptTasks.some(value => templates.presets[value].some(entry => entry.generalPresetId === preset.id))} onClick={() => { const remaining = presets.filter(value => value.id !== preset.id); replaceScope(remaining, remaining[0].id); }}><Trash2 size={15} /></button></div></div>
         <label>预设名称<input aria-label="提示词预设名称" maxLength={100} value={preset.name} disabled={disabled} onChange={event => updatePreset({ name: event.target.value })} /></label>
-        {task === 'general' && <label>辅助标签处理<select aria-label="辅助标签处理" disabled={disabled} value={preset.textFilter ?? 'off'} onChange={event => updatePreset({ textFilter: event.target.value === 'off' ? undefined : event.target.value as PromptTextFilter })}><option value="dramatron">清理 Dramatron 思考、包装与尾段标签</option><option value="v08">清理 v0.8 思考与 draft 启动占位</option><option value="reborn">清理 Reborn 旧包装与起始状态行</option><option value="tavern">原版适配：分离思考、终端、摘要与选项</option><option value="off">保留全部输出文本</option></select><span className="hint">辅助思考转入作者侧“预设思考”，完整返回保留在响应诊断中；JSON 字符串内的原文保留。</span></label>}
+        {task === 'general' && <label>辅助标签处理<select aria-label="辅助标签处理" disabled={disabled} value={preset.textFilter ?? 'off'} onChange={event => updatePreset({ textFilter: event.target.value === 'off' ? undefined : event.target.value as PromptTextFilter })}><option value="dramatron">清理 Dramatron 思考、包装与尾段标签</option><option value="v08">清理 v0.8 思考与 draft 启动占位</option><option value="reborn">清理 Reborn 旧包装与起始状态行</option><option value="tavern">原版适配：分离思考、终端、摘要与选项</option><option value="off">保留全部输出文本</option></select><span className="hint">{preset.textFilter ? '辅助思考转入作者侧“预设思考”，完整返回保留在响应诊断中；JSON 字符串内的原文保留。' : '不处理正文中的辅助标签。原生思考与工具调用仍按接口字段单独保存。'}</span></label>}
         {task === 'general' && <div><label className="checkbox"><input type="checkbox" aria-label="工具防截断" disabled={disabled} checked={preset.toolTransport ?? false} onChange={event => updatePreset({ toolTransport: event.target.checked })} />工具防截断</label><p className="hint">通过工具参数提交完整结果；正文保留检索、插画及 RPG，资料的原生工具／Schema 模式沿用自身约定。不能突破模型长度上限，不自动重试。</p></div>}
         {task === 'general' && preset.toolTransport && <label>结果工具方式<select aria-label="结果工具方式" disabled={disabled} value={preset.responseCarrier ? preset.responseCarrier.archive ? 'archive' : 'native' : 'layered'} onChange={event => updatePreset({ responseCarrier: event.target.value === 'layered' ? undefined : { name: preset.responseCarrier?.name ?? 'emit_complete_text', field: preset.responseCarrier?.field ?? 'content', ...(event.target.value === 'archive' ? { archive: true } : {}) } })}><option value="layered">分层工具（兼容旧预设）</option><option value="native">原生结果工具（与查询工具并列）</option><option value="archive">归档结果工具（完整任务放入工具说明）</option></select>{preset.responseCarrier && <span className="hint">{preset.responseCarrier.name}（{preset.responseCarrier.field}）</span>}</label>}
         {task === 'general' && <label>消息编排方式<select aria-label="消息编排方式" disabled={disabled} value={preset.messageTransform ?? 'native'} onChange={event => updatePreset({ messageTransform: event.target.value === 'reborn' ? 'reborn' : undefined })}><option value="native">保持消息角色与顺序</option><option value="reborn">Reborn 原版伪对话重排</option></select><span className="hint">重排后的真实消息会显示在最终发送预览中；资料原生工具／Schema 优先使用任务原消息。</span></label>}

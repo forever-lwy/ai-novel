@@ -5,6 +5,7 @@ import { mkdtempSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
+import { extractionFixtureParagraphs, imageFixtureInput } from './prompt-fixture-input.mjs';
 
 process.env.NODE_ENV = 'production';
 const port = Number(process.env.E2E_PORT || 14328);
@@ -27,8 +28,7 @@ function fixtureReply(system, prompt) {
   if (system.includes('# 分章规则生成')) return JSON.stringify({ name: 'AI 场景编号', pattern: '场景[0-9]+｜.+', flags: '', description: '按场景编号和竖线标题分章。' });
   if (system.includes('只压缩') && system.includes('剧情摘要')) return JSON.stringify({ text: '林舟调查白石城。' });
   if (system.includes('# 当前片段资料提取')) {
-    const fragment = prompt.split('## 编号原文\n').at(-1)?.split('\n## 提交要求')[0] || '';
-    const paragraphs = [...fragment.matchAll(/^\[(\d+)\]\s*(.+)$/gm)].map(match => ({ paragraph: Number(match[1]), quote: match[2] }));
+    const paragraphs = extractionFixtureParagraphs(prompt);
     const person = paragraphs.find(p => p.quote.includes('林舟'));
     const place = paragraphs.find(p => p.quote.includes('白石城'));
     const fact = (p, text, attribute) => ({ text, attribute, temporal: 'current', certainty: 'fact', visibility: 'public', ...p });
@@ -118,7 +118,8 @@ const modelServer = createServer(async (req, res) => {
     if (/^e2e-image-prompts?/.test(body.model || '') || /生图提示词优化|IMAGE_PROMPT_OPTIMIZATION/.test(system)) {
       promptOptimizationRequests++; lastPromptOptimizationRequest = { model: body.model, system, prompt };
       if (body.model === 'e2e-image-prompt-failure') { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'Deliberate prompt optimization failure' })); return; }
-      let input = {}; try { input = JSON.parse(prompt.slice(prompt.indexOf('{'), prompt.lastIndexOf('}') + 1)); } catch { /* Inputs remain visible in fixture statistics. */ }
+      const input = imageFixtureInput(prompt);
+      lastPromptOptimizationRequest.input = input;
       const referenceEntityIds = [...new Set((input.characters || []).filter(character => character.imageId).map(character => character.entityId))];
       const config = input.config || {}; const parameters = config.protocol === 'gemini' ? { ...(config.aspectRatio === 'auto' || !config.aspectRatio ? { aspectRatio: '16:9' } : {}), ...(config.imageSize === 'auto' ? { imageSize: '1K' } : {}) } : config.protocol === 'together-images' && config.size === 'auto' && !config.width && !config.height ? { width: 1536, height: 1024 } : config.protocol === 'openai-images' && config.size === 'auto' ? { size: '1536x1024' } : {};
       lastOptimizedImagePrompt = 'E2E_OPTIMIZED_IMAGE_PROMPT, cinematic illustration, coherent character design, expressive poses, natural lighting, detailed environment';

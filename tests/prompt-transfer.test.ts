@@ -4,13 +4,19 @@ import { defaultPromptTemplates, normalizePromptTemplates, promptPresetList, pro
 import { exportPromptPreset, exportPromptTemplates, preparePromptImport, PROMPT_TRANSFER_BYTE_LIMIT } from '../shared/prompt-transfer.js';
 import { NEUTRAL_PRESET_ID } from '../shared/neutral-preset.js';
 import { isRetiredDefault } from '../shared/retired-preset-fingerprints.js';
-import { tavernGeneralPresets, TAVERN_PRESET_IDS, withLegacyPresets } from './fixtures/prompt-presets.js';
+import { tavernGeneralPresets, TAVERN_PRESET_IDS, withLegacyPresets, withPriorDefaultSelections } from './fixtures/prompt-presets.js';
 import { legacyDramatronPreset } from './fixtures/prompt-presets.js';
 import { previousGeneralPromptTemplates } from '../shared/previous-general-prompt-templates.js';
 import { previousDramatronPromptTemplates } from '../shared/previous-dramatron-prompt-templates.js';
+import { NEUTRAL_V2_PRESET_ID } from '../shared/neutral-preset-v2.js';
 
 function previousCatalog() {
-  const settings = withLegacyPresets(); settings.general!.presets.splice(3, 0, ...tavernGeneralPresets().slice(0, 4)); delete settings.catalogCleanupVersion; return settings;
+  const settings = withLegacyPresets(); settings.general!.presets.splice(3, 0, ...tavernGeneralPresets().slice(0, 4));
+  settings.general!.presets = settings.general!.presets.filter(preset => preset.id !== NEUTRAL_V2_PRESET_ID);
+  settings.general!.catalogVersion = 7;
+  for (const task of promptTasks) settings.presets[task] = settings.presets[task].filter(preset => !preset.id.endsWith('-v4'));
+  settings.taskCatalogVersions = { writing: 2, extraction: 2, compression: 2, image: 2 };
+  delete settings.catalogCleanupVersion; return settings;
 }
 
 describe('small built-in catalog and safe retirement', () => {
@@ -18,7 +24,8 @@ describe('small built-in catalog and safe retirement', () => {
     const settings = defaultPromptTemplates(); settings.catalogCleanupVersion = 1; settings.general!.presets.unshift(structuredClone(preset)); settings.general!.selected = preset.id;
     settings.presets.writing[0].blocks[0].content += '\n作者自己的规则'; const before = structuredClone(settings);
     const cleaned = normalizePromptTemplates(settings); expect(settings).toEqual(before);
-    expect(cleaned.general!.presets.map(value => value.id)).toEqual([NEUTRAL_PRESET_ID]); expect(cleaned.general!.selected).toBe(NEUTRAL_PRESET_ID);
+    expect(cleaned.general!.presets.map(value => value.id)).toEqual([NEUTRAL_V2_PRESET_ID, NEUTRAL_PRESET_ID]); expect(cleaned.general!.selected).toBe(NEUTRAL_PRESET_ID);
+    for (const task of promptTasks) expect(cleaned.presets[task].some(value => value.id === `default-${task}-v4`)).toBe(true);
     expect(cleaned.presets).toEqual(before.presets); expect(cleaned.catalogCleanupVersion).toBe(2); expect(normalizePromptTemplates(cleaned)).toEqual(cleaned);
   });
   it('retains modified, copied or bound initial Dramatron for explicit author recovery', () => {
@@ -27,13 +34,13 @@ describe('small built-in catalog and safe retirement', () => {
     const copy = { ...legacyDramatronPreset(), id: 'author-copy' };
     settings.general!.presets.push(changed, copy); settings.general!.selected = changed.id;
     expect(normalizePromptTemplates(settings).general).toEqual(settings.general);
-    settings.general!.presets[1] = legacyDramatronPreset(); settings.presets.writing[0].generalPresetId = 'default-general';
+    settings.general!.presets[settings.general!.presets.findIndex(preset => preset.id === changed.id)] = legacyDramatronPreset(); settings.presets.writing[0].generalPresetId = 'default-general';
     expect(normalizePromptTemplates(settings).general).toEqual(settings.general);
   });
-  it('ships only the original defaults, neutral framework and four v3 tasks', () => {
+  it('ships the new defaults alongside all previously supported built-in editions', () => {
     const settings = defaultPromptTemplates();
-    expect(settings.general!.presets.map(preset => preset.id)).toEqual([NEUTRAL_PRESET_ID]);
-    for (const task of promptTasks) expect(settings.presets[task].map(preset => preset.id)).toEqual(task === 'image' ? ['default-image-v3'] : [`default-${task}`, `default-${task}-v3`]);
+    expect(settings.general!.presets.map(preset => preset.id)).toEqual([NEUTRAL_V2_PRESET_ID, NEUTRAL_PRESET_ID]);
+    for (const task of promptTasks) expect(settings.presets[task].map(preset => preset.id)).toEqual(task === 'image' ? ['default-image-v4', 'default-image-v3'] : [`default-${task}-v4`, `default-${task}`, `default-${task}-v3`]);
     expect(validatePromptTemplates(settings)).toEqual(settings);
   });
   it('recognizes every complete previous default and cleans it once without mutating input', () => {
@@ -42,7 +49,8 @@ describe('small built-in catalog and safe retirement', () => {
     expect(removed).toHaveLength(10);
     for (const preset of removed) expect(isRetiredDefault(validatePromptTemplates(settings).general!.presets.find(value => value.id === preset.id) ?? preset)).toBe(true);
     const cleaned = normalizePromptTemplates(settings);
-    expect(settings).toEqual(before); expect(cleaned).toEqual(defaultPromptTemplates()); expect(normalizePromptTemplates(cleaned)).toEqual(cleaned);
+    const expected = withPriorDefaultSelections();
+    expect(settings).toEqual(before); expect(cleaned).toEqual(expected); expect(normalizePromptTemplates(cleaned)).toEqual(cleaned);
   });
   it('preserves edits, copies, explicit bindings and their current choices', () => {
     const settings = previousCatalog(); const general = settings.general!.presets.find(preset => preset.id === TAVERN_PRESET_IDS[0])!;
@@ -60,14 +68,19 @@ describe('small built-in catalog and safe retirement', () => {
     settings.presets.writing = [settings.presets.writing[1]]; settings.selected.writing = settings.presets.writing[0].id;
     const cleaned = normalizePromptTemplates(settings);
     expect(cleaned.general!.selected).toBe(NEUTRAL_PRESET_ID); expect(cleaned.selected.writing).toBe('default-writing'); expect(() => validatePromptTemplates(cleaned)).not.toThrow();
+    expect(cleaned.general!.presets.map(value => value.id)).toEqual([NEUTRAL_PRESET_ID, NEUTRAL_V2_PRESET_ID]);
+    for (const task of promptTasks) expect(cleaned.presets[task].some(value => value.id === `default-${task}-v4`)).toBe(true);
   });
   it('does not repeat cleanup or resurrect deliberately deleted new editions', () => {
     const settings = previousCatalog(); settings.catalogCleanupVersion = 2;
+    settings.general!.catalogVersion = 8; settings.taskCatalogVersions = { writing: 3, extraction: 3, compression: 3, image: 3 };
     settings.general!.presets.pop(); settings.presets.writing.pop();
     expect(normalizePromptTemplates(settings)).toEqual(settings);
   });
   it('defers additions for full author catalogs then retries without displacing entries', () => {
-    const settings = defaultPromptTemplates(); settings.general!.catalogVersion = 0; settings.general!.presets = Array.from({ length: 20 }, (_, i) => ({ ...settings.general!.presets[0], id: `author-${i}`, blocks: [{ id: 'slot', name: '任务', role: 'system', enabled: true, slot: 'task', content: '' }] })); settings.general!.selected = 'author-0';
+    const settings = withPriorDefaultSelections();
+    for (const task of promptTasks) settings.presets[task] = settings.presets[task].filter(preset => !preset.id.endsWith('-v4'));
+    settings.general!.catalogVersion = 0; settings.general!.presets = Array.from({ length: 20 }, (_, i) => ({ ...settings.general!.presets[0], id: `author-${i}`, blocks: [{ id: 'slot', name: '任务', role: 'system', enabled: true, slot: 'task', content: '' }] })); settings.general!.selected = 'author-0';
     settings.taskCatalogVersions!.writing = 0; settings.presets.writing = Array.from({ length: 20 }, (_, i) => ({ ...settings.presets.writing[0], id: `author-${i}` })); settings.selected.writing = 'author-0';
     const full = normalizePromptTemplates(settings); expect(full).toEqual(settings);
     full.general!.presets.pop(); full.presets.writing.pop(); const retry = normalizePromptTemplates(full);
@@ -111,11 +124,14 @@ describe('portable presets, tasks and full prompt backup', () => {
     const settings = previousCatalog(); settings.catalogCleanupVersion = 2; settings.general!.selected = 'tavern-reborn-v23'; settings.presets.image[0].generalPresetId = 'tavern-linux-v13';
     settings.presets.writing[0].name = '作者手动名称'; settings.presets.writing[0].blocks[0].enabled = false;
     const data = exportPromptTemplates(settings); expect(Object.keys(data)).toEqual(['format', 'version', 'templates']);
-    const restored = preparePromptImport(JSON.stringify(data), defaultPromptTemplates()); expect(restored).toEqual({ kind: 'collection', templates: settings });
+    const restored = preparePromptImport(JSON.stringify(data), defaultPromptTemplates()); expect(restored.kind).toBe('collection');
+    expect(restored.templates.selected).toEqual(settings.selected); expect(restored.templates.general!.selected).toBe(settings.general!.selected);
+    for (const preset of settings.general!.presets) expect(restored.templates.general!.presets.find(value => value.id === preset.id)).toEqual(preset);
+    for (const task of promptTasks) for (const preset of settings.presets[task]) expect(restored.templates.presets[task].find(value => value.id === preset.id)).toEqual(preset);
   });
   it('keeps historical editions in an old author backup instead of cleaning them on import', () => {
     const old = previousCatalog(); const restored = preparePromptImport(JSON.stringify({ format: 'ai-novel-prompt-templates', version: 1, templates: old }), defaultPromptTemplates());
-    expect(restored.templates.general!.presets).toEqual(old.general!.presets); expect(restored.templates.catalogCleanupVersion).toBe(2);
+    expect(restored.templates.general!.presets.slice(0, old.general!.presets.length)).toEqual(old.general!.presets); expect(restored.templates.catalogCleanupVersion).toBe(2);
   });
   it.each([
     '[]', 'null', '{', '{"format":"wrong"}',

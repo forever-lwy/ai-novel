@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { CapturedModelResponse, ExtractionResult, GenerateInput, Job, JobKind, ModelActivityEvent, ModelOutputDetail, ModelOutputRecord, ModelOutputSummary, ModelRequest, OutputIssue, OutputStage, ProviderConfig, Settings, StoryState, WritingActivity, WritingEvent, PromptTask } from '../shared/types.js';
+import type { CapturedModelResponse, ExtractionResult, GenerateInput, ImageSettings, Job, JobKind, ModelActivityEvent, ModelOutputDetail, ModelOutputRecord, ModelOutputSummary, ModelRequest, OutputIssue, OutputStage, ProviderConfig, Settings, StoryState, WritingActivity, WritingEvent, PromptTask } from '../shared/types.js';
 import { normalizeModelSettings, resolveModelConfig } from '../shared/model-settings.js';
 import { normalizeTaskSettings } from '../shared/task-settings.js';
 import { compileTaskPrompt, normalizePromptTemplates } from '../shared/prompt-templates.js';
@@ -483,11 +483,12 @@ export class StoryEngine {
   previewPrompt(input: PromptPreviewInput): PromptPreviewResult {
     const { task, templates, variables, runtime, protocol } = input;
     const extensions = task === 'writing' ? this.extensions?.session() : undefined;
-    const compiled = compileTaskPrompt(templates, task, variables, { ...runtime, extensionsCatalog: extensions?.catalog });
+    const illustrations: { tools: ModelTool[]; settingsText?: string } = task === 'writing' ? this.imageTools('', runtime.illustrations ?? { portrait: false, cg: false }, input.imageSettings) : { tools: [] };
+    const compiled = compileTaskPrompt(templates, task, variables, { ...runtime, extensionsCatalog: extensions?.catalog, illustrationSettings: illustrations.settingsText });
     const tools: ModelTool[] = [];
     if (task === 'writing') tools.push(...buildWritingContext({ state: emptyState(), chapterText: () => '' }).tools);
     if (task === 'writing') {
-      tools.push(...this.imageTools('', runtime.illustrations ?? { portrait: false, cg: false }).tools);
+      tools.push(...illustrations.tools);
       if (variables.mode === 'rpg' && runtime.rpg) tools.push(...this.rpgTools('').tools);
     }
     if (extensions) tools.push(...extensions.tools);
@@ -517,7 +518,7 @@ export class StoryEngine {
   }
   private rpgTools(jobId: string): { tools: ModelTool[] } {
     return { tools: [{
-      name: 'ask_user', description: '在玩家需要决定行动、台词、立场或关键剧情走向时暂停剧情并询问玩家。给出 2 至 6 个不同且基于角色当前已知信息的可行选项，玩家也可以自定义行动。调用后等待真实用户选择，不能替用户回答、代做行动或继续决定后果；不展示未来剧情和隐藏设定。',
+      name: 'ask_user', description: '提交问题和 2 至 6 个选项，暂停当前写作并接收用户回答。options 中每项包含唯一 id、label 和可选 description；返回用户选中的选项或自定义回答。',
       parameters: { type: 'object', properties: { question: { type: 'string', maxLength: 3000 }, options: { type: 'array', minItems: 2, maxItems: 6, items: { type: 'object', properties: { id: { type: 'string', maxLength: 100 }, label: { type: 'string', maxLength: 500 }, description: { type: 'string', maxLength: 2000 } }, required: ['id', 'label'], additionalProperties: false } } }, required: ['question', 'options'], additionalProperties: false },
       execute: args => {
         const parsed = rpgChoiceSchema.safeParse(args);
@@ -587,8 +588,9 @@ export class StoryEngine {
     const { result, output } = await this.requestCaptured(jobId, 'chapter-title', request, req => this.models.generateStructured(provider, req, parseGeneratedChapterTitle), result => JSON.stringify(result.value), chapterId);
     this.applyGeneratedTitle(this.live(jobId), output, result.value.title, false);
   }
-  private imageTools(jobId: string, preview?: PromptRuntime['illustrations']): { tools: ModelTool[] } {
-    const config = { ...normalizeImageSettings(this.getSettings(preview ? undefined : this.get(jobId).projectId).imageSettings), ...(preview ? { autoPortrait: preview.portrait, autoCG: preview.cg } : {}) };
+  private imageTools(jobId: string, preview?: PromptRuntime['illustrations'], previewSettings?: ImageSettings): { tools: ModelTool[]; settingsText?: string } {
+    const settings = preview ? previewSettings ?? this.getSettings().imageSettings : this.getSettings(this.get(jobId).projectId).imageSettings;
+    const config = { ...normalizeImageSettings(settings), ...(preview ? { autoPortrait: preview.portrait, autoCG: preview.cg } : {}) };
     if (!preview && (!this.images || !('providerId' in config) || !config.providerId || !config.model)) return { tools: [] };
     const tools: ModelTool[] = [];
     const register = (request: WritingImageRequest) => {
@@ -597,34 +599,55 @@ export class StoryEngine {
       const scene = request.kind === 'cg' ? matchWritingScene(draft, request.sourceText) : undefined;
       if (request.kind === 'cg' && !scene) return { status: 'rejected', error: 'sourceText 未能唯一匹配本章已经输出的正文，本次没有启动生图。请逐字引用已输出的单个连续场景片段，保留真实换行，不要填写字面量反斜杠加 n、改写、拼接或引用尚未输出的内容，再提交工具调用。' };
       const requests = (live.payload.imageRequests ?? []) as WritingImageRequest[];
-      if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? previous.name === request.name : matchWritingScene(draft, previous.sourceText)?.sourceText === scene?.sourceText))) return { status: 'requested', message: '同一人物或场景已请求生图，请继续写作。' };
+      if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? previous.name === request.name : matchWritingScene(draft, previous.sourceText)?.sourceText === scene?.sourceText))) return { status: 'requested', message: '同一人物或场景已登记，未重复创建生图任务。' };
       if (requests.length >= 12) throw new HttpError('本章最多接受 12 个自动生图请求，请完成正文后由作者补充。');
       // Persist the owner link before the deferred image pump runs; never await pixels here.
       let imageId: string | undefined;
       try { imageId = this.images?.generateDuringWriting?.(live, request)?.id; }
       catch (error) { live.payload.imageError = this.redact(error instanceof Error ? error.message : '自动插画启动失败'); }
       live.payload.imageRequests = [...requests, { ...request, ...(imageId ? { imageId } : {}) }]; this.save(live);
-      return { status: 'requested', ...(imageId ? { imageId } : {}), message: '已提交后台生图，正文可立即继续。仅所需参考图未完成时等待；正文与资料保存后自动关联图片。' };
+      return { status: 'requested', ...(imageId ? { imageId } : {}), message: '生图请求已登记，图片尚未关联正文；requested 不表示图片已完成。' };
     };
-    if (config.autoPortrait) tools.push({ name: 'generate_character_portrait', description: '新人物在本章首次出场时主动调用，按明确姓名请求生成对应立绘。只使用正文已描述的外观，不推断秘密身份。直接提交接口原生工具调用，不先输出准备调用、工具名称或纠错旁白。立即后台绘制，资料整理后绑定到该人物。需要该立绘的 CG 应在提交此请求后再请求。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物明确姓名或已有别名' }, description: { type: 'string', description: '正文已描述的外观与衣着' } }, required: ['name', 'description'], additionalProperties: false }, execute: args => {
+    if (config.autoPortrait) tools.push({ name: 'generate_character_portrait', description: '登记一张人物立绘生成请求。name 为人物姓名或别名，description 为外观与衣着描述。返回 requested 和可用的 imageId；requested 表示请求已登记，不表示图片已完成。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物姓名或已有别名' }, description: { type: 'string', description: '人物外观与衣着描述' } }, required: ['name', 'description'], additionalProperties: false }, execute: args => {
       const value = z.object({ name: z.string().trim().min(1).max(300), description: z.string().trim().min(1).max(6000) }).strict().parse(args);
       return register({ kind: 'portrait', ...value });
     } });
     if (config.autoCG) {
-      const caps = imageModelCapabilities(config);
-      const imageGuide = { stylePrompt: config.stylePrompt, promptInstruction: config.promptSystemPrompt ?? '', fixedParameters: { size: config.size, aspectRatio: config.aspectRatio, imageSize: config.imageSize, width: config.width, height: config.height }, allowed: { dimensionMode: caps.dimensionMode, sizes: caps.sizes.filter(size => size !== 'auto'), aspectRatios: caps.aspectRatios, imageSizes: caps.imageSizes, customSize: caps.customSize, dimensionMultiple: caps.dimensionMultiple, minDimension: caps.minDimension, maxDimension: caps.maxDimension, minPixels: caps.minPixels, maxPixels: caps.maxPixels, maxAspectRatio: caps.maxAspectRatio } };
-      tools.push({ name: 'generate_scene_cg', description: `正文切换到新的场景或出现大场面时主动请求 CG，提交后继续写作，不必等待图片。需要尚未请求的新人物立绘时先请求立绘，再请求 CG。由你结合本次完整写作上下文直接编写可独立使用的最终 prompt，不再交给另一个 AI 改写。明确主体姓名、外貌衣着、动作、环境、时段、光线与构图，只画对应瞬间，不添加后续剧情。直接提交接口原生工具调用，不先输出准备生图、参数草稿或纠错旁白。sourceText 必须逐字引用本章已经输出的单个连续场景片段，优先选择不跨段的短引用；跨段时保留真实换行，不要把换行重复转义成字面量反斜杠加 n，不得引用尚未输出的内容。每个场景只请求一次。referenceNames 只填本画面实际出场且需参考立绘的人物名称，[] 表示不用人物参考。仅为 auto 尺寸／画幅／分辨率选择 allowed 内的具体 parameters；固定值由程序保留，不自行修改。当前绘图要求：${JSON.stringify(imageGuide)}`, parameters: { type: 'object', properties: {
-        prompt: { type: 'string', description: '结合完整写作上下文生成的最终绘图提示词，主体、衣着、环境与剧情时刻完整明确；不依赖图片模型阅读原文。' },
-        sourceText: { type: 'string', description: '逐字引用本章已经输出的连续场景片段，优先短段原句；保留真实换行，勿重复转义或拼接，不得引用尚未输出的内容' },
-        referenceNames: { type: 'array', items: { type: 'string' }, maxItems: 16, description: '画面中实际出场且需要立绘参考的人物姓名或别名；没有则填 []。' },
-        parameters: { type: 'object', properties: { size: { type: 'string' }, aspectRatio: { type: 'string' }, imageSize: { type: 'string', enum: ['512', '1K', '2K', '4K'] }, width: { type: 'integer' }, height: { type: 'integer' } }, additionalProperties: false },
+      tools.push({ name: 'generate_scene_cg', description: '登记一张与本章正文片段关联的场景插画请求。prompt 为画面提示词，sourceText 为已输出正文中的连续唯一引用。返回 requested 和可用的 imageId；rejected/error 表示请求未被接受，requested 不表示图片已完成。', parameters: { type: 'object', properties: {
+        prompt: { type: 'string', description: '单一画面的绘图提示词，包含主体、外貌衣着、动作、环境、光线和构图。' },
+        sourceText: { type: 'string', description: '已输出正文中的连续原文，须能唯一定位；换行保留原字符。' },
+        referenceNames: { type: 'array', items: { type: 'string' }, maxItems: 16, description: '画面使用的已有立绘人物姓名或别名；空数组表示不用人物参考。' },
+        parameters: { type: 'object', description: '画布参数建议。可用值见本次绘图设置。', properties: { size: { type: 'string' }, aspectRatio: { type: 'string' }, imageSize: { type: 'string', enum: ['512', '1K', '2K', '4K'] }, width: { type: 'integer' }, height: { type: 'integer' } }, additionalProperties: false },
       }, required: ['prompt', 'sourceText'], additionalProperties: false }, execute: args => {
         // Older saved conversations may still submit the former description field.
         const value = z.object({ prompt: z.string().trim().min(1).max(20000).optional(), description: z.string().trim().min(1).max(6000).optional(), sourceText: z.string().trim().min(1).max(10000), referenceNames: z.array(z.string().trim().min(1).max(300)).max(16).optional(), parameters: imageParametersSchema.optional() }).strict().refine(value => value.prompt || value.description, '请提供完整绘图提示词').parse(args);
         return register({ kind: 'cg', description: value.prompt ?? value.description!, sourceText: value.sourceText, ...(value.prompt ? { prompt: value.prompt, ...(value.referenceNames ? { referenceNames: value.referenceNames } : {}), ...(value.parameters ? { parameters: value.parameters } : {}) } : {}) });
       } });
     }
-    return { tools };
+    if (!tools.length) return { tools };
+    const caps = imageModelCapabilities(config);
+    const configured = (value: string | number | undefined) => value === 'auto' ? '自动选择' : value === undefined || value === '' ? '未指定' : `固定为 ${value}`;
+    const legacySize = config.size !== 'auto' ? config.size.split('x').map(Number) : undefined;
+    const inheritedRatio = !config.aspectRatio && config.size !== 'auto' ? ({ '1024x1024': '1:1', '1024x1536': '2:3', '1536x1024': '3:2' } as Record<string, string>)[config.size] : undefined;
+    const ratio = config.aspectRatio || inheritedRatio || 'auto';
+    const resolution = config.imageSize || (caps.imageSizes.includes('1K') ? '1K' : caps.imageSizes[0]);
+    const settingsText = [
+      `画风：${config.stylePrompt.trim() || '未额外指定'}`,
+      ...(config.promptSystemPrompt?.trim() ? [`作者绘图要求：\n${config.promptSystemPrompt.trim()}`] : []),
+      `人物参考图：${config.useCharacterReferences === false ? '关闭' : caps.referenceMode === 'none' ? '当前模型不支持' : '启用'}`,
+      `画布参数形式：${{ size: '尺寸', 'aspect-ratio': '画幅比例', 'width-height': '宽度和高度' }[caps.dimensionMode]}`,
+      ...(caps.dimensionMode === 'size' ? [`尺寸 size：${configured(config.size)}`, ...(caps.sizes.length ? [`可选尺寸：${caps.sizes.filter(size => size !== 'auto').join('、')}`] : [])] : []),
+      ...(caps.dimensionMode === 'aspect-ratio' ? [`画幅比例 aspectRatio：${configured(ratio)}${inheritedRatio ? `（由已保存尺寸 ${config.size} 换算）` : ''}`] : []),
+      ...(caps.aspectRatios.length ? [`可选画幅比例：${caps.aspectRatios.join('、')}`] : []),
+      ...(caps.imageSizes.length ? [`分辨率 imageSize：${configured(resolution)}${!config.imageSize ? '（模型默认值）' : ''}`, `可选分辨率：${caps.imageSizes.join('、')}`] : []),
+      ...(caps.customSize ? [
+        ...(caps.dimensionMode === 'width-height' ? [`宽度 width：${configured(config.width ?? legacySize?.[0] ?? 'auto')}；高度 height：${configured(config.height ?? legacySize?.[1] ?? 'auto')}`] : []),
+        `宽高范围：${caps.minDimension} 至 ${caps.maxDimension} 像素；须为 ${caps.dimensionMultiple} 的整数倍`,
+        ...(caps.minPixels ? [`最少总像素：${caps.minPixels}`] : []), ...(caps.maxPixels ? [`最多总像素：${caps.maxPixels}`] : []),
+        ...(caps.maxAspectRatio ? [`最大长宽比：${caps.maxAspectRatio}`] : []),
+      ] : []),
+    ].join('\n');
+    return { tools, settingsText };
   }
 
   private illustrateChapter(job: Job, chapterId: string) {
@@ -651,7 +674,7 @@ export class StoryEngine {
   }
   private applyCompression(job: Job, output: ModelOutputRecord, text: string) {
     const work = job.payload.compressionWork as CompressionWork | undefined;
-    const source = work?.chunks[work.index] ?? String(job.payload.summarySource ?? '');
+    const source = (work?.chunks[work.index] ?? String(job.payload.summarySource ?? '')).trim();
     const candidate = text.trim();
     if (!candidate || estimateTokens(candidate) >= estimateTokens(source)) throw new OutputValidationError([{ path: 'text', message: '本段压缩摘要必须非空且比对应原始片段更短；请缩短候选后重新验证' }]);
     if (work && (work.index >= work.chunks.length || output.blockIndex !== work.completed)) throw new OutputValidationError([{ path: '$', message: '摘要压缩片段进度已经变化，此输出只能查看' }]);
@@ -741,7 +764,9 @@ export class StoryEngine {
       let lastFailure: unknown;
       for (;;) {
         job = this.live(jobId); const provider = this.provider('extraction', job.projectId); const state = this.store.state(job.branchId);
-        const context = extractionContext(this.store.readingState(job.branchId, chapterId, false), blocks[blockIndex]);
+        const capturedState = this.store.readingState(job.branchId, chapterId, false);
+        const context = extractionContext(capturedState, blocks[blockIndex]);
+        const extractionIndexText = extractionContext(capturedState, blocks[blockIndex], 'text');
         const retry = job.payload.extractionRetry as { chapterId?: string; blockIndex?: number; failedAttempts?: number } | undefined;
         const failedAttempts = retry?.chapterId === chapterId && retry.blockIndex === blockIndex ? Number(retry.failedAttempts ?? 0) : 0;
         const retryConfig = normalizeTaskSettings(this.getSettings(job.projectId).taskSettings).extraction;
@@ -749,7 +774,7 @@ export class StoryEngine {
         const message = `整理「${chapter.title}」片段 ${blockIndex + 1}/${blocks.length}`;
         job.message = failedAttempts ? `${message}；正在第 ${failedAttempts} 次自动重试` : message; this.save(job);
         // Configuration and context-budget failures require an author change, not another request.
-        const request = this.budget(job, provider, { ...this.taskPrompt(job.projectId, 'extraction', { ...this.promptVariables(job, state), context, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }, { extractionOutputMode: retryConfig.outputMode }), signal });
+        const request = this.budget(job, provider, { ...this.taskPrompt(job.projectId, 'extraction', { ...this.promptVariables(job, state), context, extractionIndexText, chapterTitle: chapter.title, blockText: blocks[blockIndex].text }, { extractionOutputMode: retryConfig.outputMode }), signal });
         validateProviderOptions(provider, request.maxOutputTokens);
         let url: URL;
         try { url = new URL(provider.baseUrl); } catch { throw new HttpError('模型服务地址无效，请填写完整的 HTTP 或 HTTPS 地址。'); }
@@ -842,7 +867,7 @@ export class StoryEngine {
           ...this.promptVariables(job, state), ...context.variables, context: context.text, mode: input.mode,
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
           writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : state.chapters.length ? '从 continuationAnchor 指定的最新正文结尾接着写下一章，直接推进结尾之后的事件，不按标题编号寻找或重写旧章节。' : '从作者设定开始写新的正文。',
-        }, { extensionsCatalog: extensions?.catalog, rpg: state.rpg, illustrations: { portrait: illustrations.tools.some(tool => tool.name === 'generate_character_portrait'), cg: illustrations.tools.some(tool => tool.name === 'generate_scene_cg') }, chapterAnswer: job.payload.rpgChapterAnswer ? JSON.stringify(job.payload.rpgChapterAnswer) : undefined });
+        }, { extensionsCatalog: extensions?.catalog, rpg: state.rpg, illustrations: { portrait: illustrations.tools.some(tool => tool.name === 'generate_character_portrait'), cg: illustrations.tools.some(tool => tool.name === 'generate_scene_cg') }, illustrationSettings: illustrations.settingsText, chapterAnswer: job.payload.rpgChapterAnswer ? JSON.stringify(job.payload.rpgChapterAnswer) : undefined });
         const retrievalTools = aliases ? context.tools.map(tool => ({ ...tool, execute: (args: Record<string, unknown>) => tool.execute({ ...args, ...(typeof args.id === 'string' ? { id: aliases[args.id] ?? args.id } : {}), ...(typeof args.chapterId === 'string' ? { chapterId: aliases[args.chapterId] ?? args.chapterId } : {}) }) })) : context.tools;
         const tools = [...retrievalTools, ...illustrations.tools, ...rpg.tools, ...(extensions?.tools ?? [])];
         if (continuation) {

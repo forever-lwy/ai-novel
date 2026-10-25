@@ -1,4 +1,4 @@
-import { withDramatronPresets } from './fixtures/prompt-presets.js';
+import { withDramatronPresets, withPriorDefaultSelections } from './fixtures/prompt-presets.js';
 import { describe, expect, it } from 'vitest';
 import { dramatronSource } from './fixtures/legacy-presets/dramatron-source.js';
 import { previousGeneralPromptTemplates } from '../shared/previous-general-prompt-templates.js';
@@ -30,7 +30,11 @@ describe('Dramatron anti-truncation and empty-response structure', () => {
   });
   it('keeps filler literal and preserves changed first-generation presets during exact default migration', () => {
     const original = structuredClone(previousGeneralPromptTemplates); const before = structuredClone(original);
-    expect(normalizePromptTemplates(original).general).toEqual(defaultPromptTemplates().general); expect(normalizePromptTemplates(original).presets.writing).toEqual(defaultPromptTemplates().presets.writing); expect(original).toEqual(before);
+    const normalized = normalizePromptTemplates(original);
+    expect(normalized.general).toEqual(withPriorDefaultSelections().general);
+    expect(normalized.presets.writing).toHaveLength(defaultPromptTemplates().presets.writing.length);
+    expect(normalized.presets.writing).toEqual(expect.arrayContaining(defaultPromptTemplates().presets.writing));
+    expect(normalized.selected.writing).toBe(before.selected.writing); expect(original).toEqual(before);
     original.general!.presets[0].blocks[0].content += '\n自定义通用规则';
     original.presets.writing[0].blocks[0].content += '\n自定义写作规则';
     expect(normalizePromptTemplates(original).general!.presets[0]).toEqual(original.general!.presets[0]); expect(normalizePromptTemplates(original).presets.writing.slice(0, original.presets.writing.length)).toEqual(original.presets.writing);

@@ -7,7 +7,10 @@ import { previousDramatronPromptTemplates } from './previous-dramatron-prompt-te
 import { runtimePromptBlocks, type PromptRuntime } from './prompt-runtime.js';
 import { extractionOutputFormat } from './extraction-output.js';
 import { taskPresetsV3 } from './task-prompts-v3.js';
+import { taskPresetsV4, TASK_V4_PRESET_IDS } from './task-prompts-v4.js';
 import { NEUTRAL_DELIVERY_INSTRUCTION, NEUTRAL_PRESET_ID, neutralGeneralPreset } from './neutral-preset.js';
+import { NEUTRAL_V2_PRESET_ID, neutralGeneralPresetV2 } from './neutral-preset-v2.js';
+import { prepareReadablePromptVariables } from './prompt-readable-variables.js';
 import { isRetiredDefault } from './retired-preset-fingerprints.js';
 import { createTavernMacroExpander } from './tavern-macros.js';
 
@@ -104,6 +107,10 @@ const commonVariables: PromptVariable[] = [
   { key: 'chapterNumber', label: '章节位置说明（兼容旧变量，不提供序号）' }, { key: 'instruction', label: '本次要求' },
 ];
 const contextVariables: PromptVariable[] = [
+  { key: 'storyMaterialsText', label: '故事资料（分区文本）' },
+  { key: 'recentChaptersText', label: '最近章节原文（分章文本）' },
+  { key: 'continuationAnchorText', label: '续写起点（可读文本）' },
+  { key: 'contextText', label: '完整上下文（分区文本）' },
   { key: 'continuationAnchor', label: '最新正文结尾与续写起点' },
   { key: 'storyMaterials', label: '故事设定与摘要（不含最近全文）' },
   { key: 'context', label: '完整故事上下文' }, { key: 'worldview', label: '世界观' },
@@ -116,9 +123,9 @@ const contextVariables: PromptVariable[] = [
 export const promptVariables: Record<PromptScope, PromptVariable[]> = {
   general: commonVariables,
   writing: [...commonVariables, ...contextVariables, { key: 'mode', label: '创作模式' }, { key: 'maxWords', label: '目标字数' }, { key: 'sourceText', label: '待改写原文' }, { key: 'writingTarget', label: '写作目标与范围' }],
-  extraction: [...commonVariables, { key: 'context', label: '名称对照与未揭晓伏笔索引' }, { key: 'chapterTitle', label: '待整理章节标题' }, { key: 'blockText', label: '带段落编号的本次原文片段' }],
+  extraction: [...commonVariables, { key: 'context', label: '名称对照与未揭晓伏笔索引' }, { key: 'extractionIndexText', label: '名称与伏笔索引（可读文本）' }, { key: 'chapterTitle', label: '待整理章节标题' }, { key: 'blockText', label: '带段落编号的本次原文片段' }],
   compression: [...commonVariables, { key: 'summaryText', label: '待压缩剧情摘要片段' }],
-  image: [...commonVariables, { key: 'imageInput', label: '完整画面素材、人物参考与允许参数 JSON' }, { key: 'imageSystemPrompt', label: '作者对提示词优化的补充要求' }, { key: 'maxCharacterReferences', label: '最多可用人物参考数' }],
+  image: [...commonVariables, { key: 'imageInput', label: '完整画面素材、人物参考与允许参数 JSON' }, { key: 'imageInputText', label: '画面素材、参考与参数（可读文本）' }, { key: 'imageSystemPrompt', label: '作者对提示词优化的补充要求' }, { key: 'maxCharacterReferences', label: '最多可用人物参考数' }],
 };
 
 const block = (id: string, name: string, role: PromptBlock['role'], content: string): PromptBlock => ({ id, name, role, enabled: true, content });
@@ -126,8 +133,9 @@ const extractionAcknowledgment = '已收到索引。新资料只依据接下来�
 /** Each call returns independent objects so editing or reset cannot mutate shared defaults. */
 export function defaultPromptTemplates(): PromptTemplateSettings {
   const v3 = taskPresetsV3(EXTRACT_SYSTEM, COMPRESSION_SYSTEM);
-  return {
-    general: { selected: 'general-neutral-v1', catalogVersion: 7, presets: [neutralGeneralPreset()] },
+  const v4 = taskPresetsV4(EXTRACT_SYSTEM, COMPRESSION_SYSTEM);
+  const settings: PromptTemplateSettings = {
+    general: { selected: NEUTRAL_V2_PRESET_ID, catalogVersion: 8, presets: [neutralGeneralPresetV2(), neutralGeneralPreset()] },
     presets: {
       writing: [{ id: 'default-writing', name: '默认正文写作', blocks: [
         block('writing-rules', '文笔、逻辑与文风', 'system', WRITING_SYSTEM),
@@ -146,10 +154,12 @@ export function defaultPromptTemplates(): PromptTemplateSettings {
       ] }, v3.compression],
       image: [v3.image],
     },
-    selected: { writing: 'default-writing', extraction: 'default-extraction', compression: 'default-compression', image: v3.image.id },
-    taskCatalogVersions: { writing: 2, extraction: 2, compression: 2, image: 2 },
+    selected: { ...TASK_V4_PRESET_IDS },
+    taskCatalogVersions: { writing: 3, extraction: 3, compression: 3, image: 3 },
     catalogCleanupVersion: 2,
   };
+  for (const task of promptTasks) settings.presets[task].unshift(v4[task]);
+  return settings;
 }
 
 const nonEmptyName = z.string().trim().min(1, '名称不能为空').max(100);
@@ -173,14 +183,20 @@ export const promptPresetSchema = z.object({
 }).strict();
 const presetList = z.array(promptPresetSchema).min(1, '每个任务至少保留一个预设').max(20, '每个任务最多 20 个预设');
 const templateShape = z.object({
-  presets: z.object({ writing: presetList, planning: presetList.optional(), extraction: presetList, compression: presetList, image: presetList.default(() => defaultPromptTemplates().presets.image) }).strict(),
+  // Old backups may have no image task or general framework. Supply only the
+  // standalone historical image preset before additive normalization can bind v4.
+  presets: z.object({ writing: presetList, planning: presetList.optional(), extraction: presetList, compression: presetList, image: presetList.default(() => defaultPromptTemplates().presets.image.filter(preset => preset.id === 'default-image-v3')) }).strict(),
   selected: z.object({ writing: identifier, planning: identifier.optional(), extraction: identifier, compression: identifier, image: identifier.default('default-image-v3') }).strict(),
-  general: z.object({ presets: presetList, selected: identifier, catalogVersion: z.number().int().min(0).max(7).optional() }).strict().optional(),
-  taskCatalogVersions: z.object({ writing: z.number().int().min(0).max(2).optional(), extraction: z.number().int().min(0).max(2).optional(), compression: z.number().int().min(0).max(2).optional(), image: z.number().int().min(0).max(2).optional() }).strict().optional(),
+  general: z.object({ presets: presetList, selected: identifier, catalogVersion: z.number().int().min(0).max(8).optional() }).strict().optional(),
+  taskCatalogVersions: z.object({ writing: z.number().int().min(0).max(3).optional(), extraction: z.number().int().min(0).max(3).optional(), compression: z.number().int().min(0).max(3).optional(), image: z.number().int().min(0).max(3).optional() }).strict().optional(),
   catalogCleanupVersion: z.number().int().min(0).max(2).optional(),
 }).strict();
-const legacyBuiltInKeys = new Set([...legacyTasks.flatMap(task => promptVariables[task].map(variable => variable.key)), 'currentChapterPlan']);
-const builtInKeys = new Set([...legacyBuiltInKeys, ...promptVariables.image.map(variable => variable.key)]);
+// These names were reserved before readable material aliases were introduced.
+// New aliases must not invalidate an author's previously legal custom variable.
+const legacyBuiltInKeys = new Set(['projectTitle', 'premise', 'chapterNumber', 'instruction', 'continuationAnchor', 'storyMaterials', 'context', 'worldview', 'worldRules', 'locked', 'mainCharacters', 'mainCharacterRelations', 'unrevealedForeshadows', 'plotSummaries', 'recentChapters', 'originalReference', 'mode', 'maxWords', 'sourceText', 'writingTarget', 'chapterTitle', 'blockText', 'summaryText', 'currentChapterPlan']);
+const builtInKeys = new Set([...legacyBuiltInKeys, 'imageInput', 'imageSystemPrompt', 'maxCharacterReferences']);
+const readableAliasKeys = new Set(['storyMaterialsText', 'recentChaptersText', 'continuationAnchorText', 'contextText', 'extractionIndexText', 'imageInputText']);
+const readableAliasOverrides = (preset: PromptPreset) => Object.fromEntries(Object.entries(preset.variables ?? {}).filter(([key]) => readableAliasKeys.has(key)));
 const variablePattern = /\{\{([^{}]*)\}\}/g;
 const appliesToMode = (value: PromptBlock, mode: string | undefined) => !value.modes?.length || value.modes.includes(mode as Mode);
 
@@ -273,28 +289,28 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
   const settings = validatePromptTemplates(value);
   const defaults = defaultPromptTemplates();
   const hadGeneral = Boolean(settings.general);
-  settings.general ??= defaults.general;
+  settings.general ??= { selected: NEUTRAL_PRESET_ID, catalogVersion: 7, presets: [neutralGeneralPreset()] };
   // One-time cleanup recognizes only complete, untouched historical defaults.
   // Explicit task bindings, edits and copies remain author-owned.
   if ((settings.catalogCleanupVersion ?? 0) < 2) {
     const referenced = new Set(Object.values(settings.presets).flat().map(preset => preset.generalPresetId));
     const remaining = settings.general!.presets.filter(preset => referenced.has(preset.id) || !isRetiredDefault(preset));
-    settings.general!.presets = remaining.length ? remaining : [structuredClone(defaults.general!.presets[0])];
-    if (!settings.general!.presets.some(preset => preset.id === settings.general!.selected)) settings.general!.selected = settings.general!.presets.find(preset => preset.id === defaults.general!.selected)?.id ?? settings.general!.presets[0].id;
+    settings.general!.presets = remaining.length ? remaining : [neutralGeneralPreset()];
+    if (!settings.general!.presets.some(preset => preset.id === settings.general!.selected)) settings.general!.selected = settings.general!.presets.find(preset => preset.id === NEUTRAL_PRESET_ID)?.id ?? settings.general!.presets[0].id;
     for (const task of legacyTasks) {
       const list = settings.presets[task].filter(preset => !isRetiredDefault(preset));
-      settings.presets[task] = list.length ? list : [structuredClone(defaults.presets[task][0])];
+      settings.presets[task] = list.length ? list : [structuredClone(defaults.presets[task].find(preset => preset.id === `default-${task}`)!)];
       if (!settings.presets[task].some(preset => preset.id === settings.selected[task])) settings.selected[task] = settings.presets[task].find(preset => preset.id === `default-${task}`)?.id ?? settings.presets[task][0].id;
     }
     settings.catalogCleanupVersion = 2;
   }
   // Add the new built-in once, without selecting it or replacing author edits.
   // Keep a full catalog intact and retry when the author frees a slot.
-  for (const builtin of defaults.general!.presets) {
-    const version = 7; // Neutral keeps its original catalog milestone.
+  for (const builtin of [...defaults.general!.presets].sort((a, b) => Number(a.id === NEUTRAL_V2_PRESET_ID) - Number(b.id === NEUTRAL_V2_PRESET_ID))) {
+    const version = builtin.id === NEUTRAL_V2_PRESET_ID ? 8 : 7;
     if ((settings.general!.catalogVersion ?? 0) >= version) continue;
     if (!settings.general!.presets.some(preset => preset.id === builtin.id)) {
-      const candidate = { ...settings, general: { ...settings.general!, presets: [...settings.general!.presets, builtin] } };
+      const candidate: PromptTemplateSettings = { ...settings, general: { ...settings.general!, presets: [...settings.general!.presets, builtin] } };
       if (!promptTemplateSchema.safeParse(candidate).success) break;
       settings.general = candidate.general;
     }
@@ -306,14 +322,14 @@ export function normalizePromptTemplates(value?: PromptTemplateSettings): Prompt
     const exact = (other: PromptPreset) => preset.id === other.id && preset.name === other.name && JSON.stringify(preset.blocks) === JSON.stringify(other.blocks) && JSON.stringify(preset.variables ?? {}) === JSON.stringify(other.variables ?? {});
     const comparable = { ...preset, blocks: preset.blocks.map((value, index) => ({ ...value, id: acknowledged.blocks[index]?.id ?? value.id })) };
     const oldAcknowledged = task === 'extraction' && JSON.stringify(comparable) === JSON.stringify(acknowledged);
-    if (exact(legacyPromptTemplates.presets[task][0]) || exact(previousPromptTemplates.presets[task][0]) || exact(previousGeneralPromptTemplates.presets[task][0]) || exact(previousDramatronPromptTemplates.presets[task][0]) || oldAcknowledged) return { ...defaults.presets[task][0], ...(preset.useGeneral !== undefined ? { useGeneral: preset.useGeneral } : {}), ...(preset.generalPresetId ? { generalPresetId: preset.generalPresetId } : {}), ...(preset.writingOutputMode ? { writingOutputMode: preset.writingOutputMode } : {}), ...(preset.textFilter ? { textFilter: preset.textFilter } : {}) };
+    if (exact(legacyPromptTemplates.presets[task][0]) || exact(previousPromptTemplates.presets[task][0]) || exact(previousGeneralPromptTemplates.presets[task][0]) || exact(previousDramatronPromptTemplates.presets[task][0]) || oldAcknowledged) return { ...defaults.presets[task].find(value => value.id === `default-${task}`)!, ...(preset.useGeneral !== undefined ? { useGeneral: preset.useGeneral } : {}), ...(preset.generalPresetId ? { generalPresetId: preset.generalPresetId } : {}), ...(preset.writingOutputMode ? { writingOutputMode: preset.writingOutputMode } : {}), ...(preset.textFilter ? { textFilter: preset.textFilter } : {}) };
     // Legacy author edits retain their exact compiled text until explicitly opted in.
     return !hadGeneral && preset.useGeneral === undefined ? { ...preset, useGeneral: false } : preset;
   });
   // Track each task independently so a full catalog cannot resurrect an edition
   // deliberately deleted from a different task. Never change current selections.
-  for (const task of promptTasks) for (const builtin of defaults.presets[task]) {
-    const version = builtin.id.endsWith('-v3') ? 2 : 0;
+  for (const task of promptTasks) for (const builtin of [...defaults.presets[task]].sort((a, b) => Number(a.id.endsWith('-v4')) - Number(b.id.endsWith('-v4')))) {
+    const version = builtin.id.endsWith('-v4') ? 3 : builtin.id.endsWith('-v3') ? 2 : 0;
     if (!version || (settings.taskCatalogVersions?.[task] ?? 0) >= version) continue;
     if (!settings.presets[task].some(preset => preset.id === builtin.id)) {
       const candidate = { ...settings, presets: { ...settings.presets, [task]: [...settings.presets[task], builtin] } };
@@ -338,11 +354,12 @@ export function activePromptPreset(config: PromptTemplateSettings | undefined, t
   return preset;
 }
 export function promptPresetVariables(task: PromptScope, preset?: PromptPreset): PromptVariable[] {
-  return [...promptVariables[task], ...Object.keys(preset?.variables ?? {}).map(key => ({ key, label: `自定义变量 · ${key}` }))];
+  return [...promptVariables[task].filter(variable => !readableAliasKeys.has(variable.key) || !Object.hasOwn(preset?.variables ?? {}, variable.key)), ...Object.keys(preset?.variables ?? {}).map(key => ({ key, label: `自定义变量 · ${key}` }))];
 }
 
 /** Replacement is one pass: braces inside story data or custom values remain literal. */
 export function compilePrompt(config: PromptTemplateSettings | undefined, task: PromptTask, variables: Record<string, string | number | undefined>, runtime: PromptRuntime = {}): { system: string; prompt: string; messages: PromptMessage[]; textFilter?: PromptTextFilter; writingOutputMode?: WritingOutputMode; responseCarrier?: ResponseCarrier; messageTransform?: 'reborn' } {
+  variables = prepareReadablePromptVariables(task, variables);
   if (!promptTasks.includes(task)) throw new Error('剧情规划提示词已移除。');
   const settings = normalizePromptTemplates(config);
   const preset = activePromptPreset(settings, task);
@@ -353,10 +370,16 @@ export function compilePrompt(config: PromptTemplateSettings | undefined, task: 
   const textFilter = preset.textFilter ?? (preset.useGeneral === false ? undefined : general.textFilter);
   const responseCarrier = inheritedTransport && !structured && writingOutputMode !== 'text' ? general.responseCarrier : undefined;
   const messageTransform = preset.useGeneral !== false && !structured ? general.messageTransform : undefined;
-  const macroValues = { ...general.variables, ...variables, user: runtime.rpg?.character.name ?? '作者', char: '故事角色', lastUserMessage: variables.instruction ?? '', maxWords: variables.maxWords ?? '1500' };
+  const macroValues: Record<string, string | number | undefined> = { ...general.variables, ...variables, ...readableAliasOverrides(general), user: runtime.rpg?.character.name ?? '作者', char: '故事角色', lastUserMessage: variables.instruction ?? '', maxWords: variables.maxWords ?? '1500' };
   const expandTavern = createTavernMacroExpander(macroValues, JSON.stringify(variables));
   const expand = (value: PromptBlock, owner: PromptPreset): PromptMessage => {
-    const values: Record<string, string | number | undefined> = { ...owner.variables, ...variables, storyMaterials: variables.storyMaterials ?? variables.context, chapterNumber: task === 'writing' ? '待写章节' : '当前章节', chapterIndex: '', chapterCount: '', endChapter: '' };
+    const values: Record<string, string | number | undefined> = { ...owner.variables, ...variables, ...readableAliasOverrides(owner), storyMaterials: variables.storyMaterials ?? variables.context, chapterNumber: task === 'writing' ? '待写章节' : '当前章节', chapterIndex: '', chapterCount: '', endChapter: '' };
+    // Scope only the new aliases; keep one interpreter so existing local macros
+    // and deterministic random state continue across task and general blocks.
+    if (value.feature === 'tavern') for (const key of readableAliasKeys) {
+      if (Object.hasOwn(values, key)) macroValues[key] = values[key];
+      else delete macroValues[key];
+    }
     // The untouched built-in delivery block follows the active interface. Keep
     // saved presets and all author-edited/copied wording intact.
     const delivery = owner.id === NEUTRAL_PRESET_ID && value.id === 'neutral-delivery' && value.content === NEUTRAL_DELIVERY_INSTRUCTION && !responseCarrier
@@ -382,9 +405,10 @@ export function compilePrompt(config: PromptTemplateSettings | undefined, task: 
 
 /** Shared template/runtime assembly; the wire preview also includes provider-side chapter reminders. */
 export function compileTaskPrompt(config: PromptTemplateSettings | undefined, task: PromptTask, variables: Record<string, string | number | undefined>, runtime: PromptRuntime = {}) {
+  variables = prepareReadablePromptVariables(task, variables);
   const compiled = compilePrompt(config, task, variables, runtime);
   const writingOutputMode = compiled.writingOutputMode;
-  const runtimeBlocks = runtimePromptBlocks(task, variables, { ...runtime, writingOutputMode, responseCarrier: compiled.responseCarrier });
+  const runtimeBlocks = runtimePromptBlocks(task, variables, { ...runtime, writingOutputMode, responseCarrier: compiled.responseCarrier, continuationAnchorIncluded: Boolean(variables.continuationAnchorText && compiled.messages.some(message => message.content.includes(String(variables.continuationAnchorText)))) });
   const messages: PromptMessage[] = [];
   for (const message of [...compiled.messages, ...runtimeBlocks.filter(block => block.role === 'system'), ...runtimeBlocks.filter(block => block.role !== 'system')]) {
     const previous = message.role === 'system' ? undefined : [...messages].reverse().find(value => value.role !== 'system');

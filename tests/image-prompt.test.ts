@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createServer, type Server } from 'node:http';
+import { listenLocalServer } from './local-server.mjs';
 import { Store } from '../server/store.js';
 import { ImageService } from '../server/images.js';
 import { optimizeImagePrompt, resolveImageParameters, type ImagePromptInput, type ImagePromptOptimizer } from '../server/image-prompts.js';
@@ -10,6 +12,7 @@ import { defaultImageSettings } from '../shared/image-settings.js';
 import type { ImageSettings, Settings } from '../shared/types.js';
 import { defaultPromptTemplates } from '../shared/prompt-templates.js';
 import { withTavernPresets } from './fixtures/prompt-presets.js';
+import { TASK_V3_PRESET_IDS } from '../shared/task-prompts-v3.js';
 
 const textModel = vi.hoisted(() => ({ generateStructured: vi.fn() }));
 vi.mock('../server/providers.js', async importOriginal => ({ ...await importOriginal<typeof import('../server/providers.js')>(), generateStructured: textModel.generateStructured }));
@@ -19,32 +22,45 @@ const settings = (): Settings => ({ providers: [{ id: 'text', name: '文字模�
 const input = (overrides: Partial<ImagePromptInput> = {}): ImagePromptInput => ({ kind: 'cg', material: '林月和程川站在庭院里，共同望向天空。', instruction: '保留两人的外貌', stylePrompt: '古典插画', config: config(), characters: [{ entityId: 'moon', name: '林月', description: '银发蓝裙', imageId: 'moon-portrait' }, { entityId: 'river', name: '程川', description: '黑发白袍', imageId: 'river-portrait' }], references: [], ...overrides });
 function structuredResult(value: unknown) { textModel.generateStructured.mockImplementation(async (_provider, _request, validate) => ({ value: validate(value), inputTokens: 20, outputTokens: 30 })); }
 beforeEach(() => { textModel.generateStructured.mockReset(); structuredResult({ prompt: 'Two characters beneath a radiant sky, cinematic framing, coherent clothing and lighting', referenceEntityIds: ['moon', 'river'], parameters: {} }); });
+const userMaterial = (request: { messages: { role: string; content: string }[] }) => request.messages.filter(message => message.role === 'user').map(message => message.content).join('\n');
+const servers: Server[] = [];
+afterEach(async () => { for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); } });
 
 describe('image prompt model and parameter selection', () => {
   it('uses the selected image edition and original carrier while preserving independent optimizer requirements', async () => {
     const saved = settings(); saved.promptTemplates = withTavernPresets(); saved.promptTemplates.general!.selected = 'tavern-reborn-v23';
-    saved.promptTemplates.presets.image[0].blocks[0].content += '\nIMAGE_AUTHOR_RULE：保持水彩质感。'; const data = input(); data.config.promptSystemPrompt = '保留参考图中的衣服';
+    saved.promptTemplates.selected.image = TASK_V3_PRESET_IDS.image;
+    saved.promptTemplates.presets.image.find(preset => preset.id === TASK_V3_PRESET_IDS.image)!.blocks[0].content += '\nIMAGE_AUTHOR_RULE：保持水彩质感。'; const data = input(); data.config.promptSystemPrompt = '保留参考图中的衣服';
     await optimizeImagePrompt(saved, data); const request = textModel.generateStructured.mock.calls[0][1];
     expect(request.responseCarrier).toMatchObject({ name: 'game_content', field: 'content' }); expect(request.messageTransform).toBe('reborn');
     expect(request.system).toContain('IMAGE_AUTHOR_RULE'); expect(request.system).toContain(data.config.promptSystemPrompt); expect(request.system).not.toContain('要写够1500字');
     expect(request.messages.some((message: { content: string }) => message.content.includes(data.material))).toBe(true);
   });
   it('allows a standalone image task without inheriting its current general output carrier', async () => {
-    const saved = settings(); saved.promptTemplates = withTavernPresets(); saved.promptTemplates.general!.selected = 'tavern-linux-v13'; saved.promptTemplates.presets.image[0].useGeneral = false;
+    const saved = settings(); saved.promptTemplates = withTavernPresets(); saved.promptTemplates.general!.selected = 'tavern-linux-v13'; saved.promptTemplates.selected.image = TASK_V3_PRESET_IDS.image; saved.promptTemplates.presets.image.find(preset => preset.id === TASK_V3_PRESET_IDS.image)!.useGeneral = false;
     await optimizeImagePrompt(saved, input()); const request = textModel.generateStructured.mock.calls[0][1]; expect(request.responseCarrier).toBeUndefined(); expect(request.messageTransform).toBeUndefined(); expect(request.system).not.toContain('Linux_terminal_emulator');
   });
-  it('uses the independent text model and supplies structured art material and confirmed reference candidates', async () => {
+  it('preserves the JSON image input when the author explicitly selects image v3', async () => {
+    const saved = settings(); saved.promptTemplates = defaultPromptTemplates(); saved.promptTemplates.selected.image = TASK_V3_PRESET_IDS.image;
+    const data = input(); await optimizeImagePrompt(saved, data);
+    const request = textModel.generateStructured.mock.calls[0][1];
+    expect(JSON.parse(userMaterial(request))).toMatchObject({ material: data.material, instruction: data.instruction, characters: data.characters, config: { protocol: 'openai-images' } });
+  });
+  it('uses the independent text model and supplies readable art material and confirmed reference candidates', async () => {
     const data = input(); data.config.promptSystemPrompt = '优先使用中文画面描述'; const result = await optimizeImagePrompt(settings(), data);
     expect(result.prompt).not.toBe(data.material); expect(result.referenceEntityIds).toEqual(['moon', 'river']); expect(result.parameters).toEqual({ size: '1024x1024' });
     const [provider, request] = textModel.generateStructured.mock.calls[0]; expect(provider.model).toBe('image-prompt-model'); expect(provider.id).toBe('text'); expect(provider.stream).toBe(false);
-    expect(request.system).toContain('IMAGE_PROMPT_OPTIMIZATION'); expect(request.system).toContain('优先使用中文画面描述'); expect(JSON.parse(request.messages.findLast((message: { role: string; content: string }) => message.role === 'user').content)).toMatchObject({ material: data.material, instruction: data.instruction, characters: data.characters, config: { protocol: 'openai-images' } });
+    expect(request.system).toContain('IMAGE_PROMPT_OPTIMIZATION');
+    const material = userMaterial(request);
+    for (const value of ['# 本次画面资料', '目标素材：', data.material, data.instruction, '人物资料：', '资料标识：moon', '资料标识：river', '图片标识：moon-portrait', '图片标识：river-portrait', 'openai-images', '优先使用中文画面描述']) expect(material).toContain(value);
+    expect(material).not.toMatch(/^\s*\{/); expect(material).not.toContain('"material":');
   });
   it('sends the complete captured story context through the shared image prompt compilation', async () => {
     const data = input({ storyContext: '前章：林月穿着银色斗篷来到庭院。\n本章前文：程川递出信封。\n目标：她接住了它。\n本章后文：她读完后把信收好。' });
     await optimizeImagePrompt(settings(), data);
     const request = textModel.generateStructured.mock.calls[0][1];
-    const payload = JSON.parse(request.messages.findLast((message: { role: string }) => message.role === 'user').content);
-    expect(payload.storyContext).toBe(data.storyContext); expect(payload.material).toBe(data.material);
+    const material = userMaterial(request);
+    expect(material).toContain('故事上下文：'); expect(material).toContain(data.storyContext); expect(material).toContain(data.material);
     expect(request.system).toContain('不得将后文事件'); expect(request.system).toContain('只选择目标瞬间真正需要的人物');
   });
   it('counts the full story context in the request budget and refuses before sending instead of silently truncating it', async () => {
@@ -60,9 +76,30 @@ describe('image prompt model and parameter selection', () => {
     const data = input(); data.referenceSelection = 'manual'; data.references = [{ imageId: 'chosen-portrait', entityId: 'moon', label: '作者指定林月立绘' }];
     structuredResult({ prompt: 'Use the author selected portrait.', referenceEntityIds: ['invented'], parameters: {} });
     const result = await optimizeImagePrompt(settings(), data); expect(result.referenceEntityIds).toEqual([]);
-    const request = textModel.generateStructured.mock.calls[0][1]; const content = JSON.parse(request.messages.findLast((message: { role: string }) => message.role === 'user').content);
-    expect(content).toMatchObject({ referenceSelection: 'manual', references: data.references, allowed: { maxCharacterReferences: 0 } }); expect(content.referenceInstruction).toContain('不增删或替换');
+    const request = textModel.generateStructured.mock.calls[0][1]; const content = userMaterial(request);
+    for (const value of ['参考图选择方式：manual', '图片标识：chosen-portrait', '资料标识：moon', '作者指定林月立绘', '人物参考图上限：0', '不增删或替换']) expect(content).toContain(value);
     expect(textModel.generateStructured).toHaveBeenCalledTimes(1);
+  });
+  it('sends the new default readable image input through real local HTTP without changing author choices', async () => {
+    const bodies: any[] = [];
+    const server = createServer(async (request, response) => {
+      const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ prompt: '庭院中的两位旅人仰望天空，古典插画。', referenceEntityIds: ['invented'], parameters: { size: '1536x1024' } }) }, finish_reason: 'stop' }], usage: { prompt_tokens: 80, completion_tokens: 40 } }));
+    });
+    servers.push(server); await listenLocalServer(server);
+    const saved = settings(); saved.providers[0].baseUrl = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/v1`;
+    const actual = await vi.importActual<typeof import('../server/providers.js')>('../server/providers.js');
+    textModel.generateStructured.mockImplementation(actual.generateStructured);
+    const data = input({ storyContext: '前章全文：林月来到庭院。\n本章后文：程川收起信件。', referenceSelection: 'manual', references: [{ imageId: 'chosen-portrait', entityId: 'moon', label: '作者指定立绘' }] });
+    data.config.promptSystemPrompt = '衣服保持银蓝配色。';
+    const result = await optimizeImagePrompt(saved, data);
+    expect(result).toMatchObject({ referenceEntityIds: [], parameters: { size: '1024x1024' } });
+    expect(bodies).toHaveLength(1);
+    const content = bodies[0].messages.filter((message: { role: string }) => message.role === 'user').map((message: { content: string }) => message.content).join('\n');
+    for (const value of ['# 本次画面资料', data.material, data.storyContext, '参考图选择方式：manual', '图片标识：chosen-portrait', '人物参考图上限：0', '不增删或替换', '1024x1024', '衣服保持银蓝配色。']) expect(content).toContain(value);
+    expect(content).not.toContain('"material":'); expect(content).not.toContain('\\n本章后文');
   });
   it('rejects invented reference IDs and invalid image parameters without a second model call', async () => {
     structuredResult({ prompt: 'Portrait illustration', referenceEntityIds: ['invented'], parameters: {} }); await expect(optimizeImagePrompt(settings(), input())).rejects.toThrow('不存在'); expect(textModel.generateStructured).toHaveBeenCalledTimes(1);

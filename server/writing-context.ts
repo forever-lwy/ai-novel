@@ -1,5 +1,6 @@
 import type { Entity, ModelTool, StoryState, OriginalReferenceData } from '../shared/types.js';
 import { createHash } from 'node:crypto';
+import { formatContinuationAnchor, formatRecentChapters, formatWritingMaterials } from '../shared/prompt-materials.js';
 
 export interface WritingContextInput {
   state: StoryState;
@@ -163,7 +164,7 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
   };
   const tools: ModelTool[] = [
     {
-      name: 'search_story', description: '在本次写作起始版本的资料文本和历史章节中搜索名称、别名或关键词，返回匹配的资料及章节索引。多关键词优先传 keywords 数组，如 {"keywords":["林舟","老吴"]}，命中任一词即可返回（OR），不会要求几个词连在一起。完整短语也作为数组的一项传入。兼容 query 字符串：空格、逗号、顿号、分号、换行或竖线分隔多个词；若整串是已有名称、别名或章节标题则按完整名称搜索。不要把搜索要求写成长句。每类最多返回20条，需要完整档案或原文时继续调用 read_entity 或 read_chapter。collection 可选择当前 story、固定原作 original 或 all；有原作时默认搜索两类。原始确认源文本也可命中，返回的 chapterId 为虚拟 path，可直接交给 read_chapter；source/reference 标记说明它不是当前体验正文。',
+      name: 'search_story', description: '在捕获版本的当前故事或原作资料中检索名称、别名和关键词。keywords 按任一项命中（OR），query 兼容分隔多词及完整名称。返回每类最多20项资料和章节索引；完整档案与正文分别用 read_entity、read_chapter 读取。源文本命中的 chapterId 为可直接读取的虚拟 path。原作与源文本仅供作者参考，不是本线已发生的事实。',
       parameters: { type: 'object', properties: { ...keywordParameters, scope: { type: 'string', enum: ['all', 'entities', 'chapters'] }, collection: collectionParameter }, additionalProperties: false },
       execute: args => {
         if (!recordArgs(args, ['query', 'keywords', 'scope', 'collection']) || !validCollection(args.collection) || (args.scope !== undefined && (typeof args.scope !== 'string' || !['all', 'entities', 'chapters'].includes(args.scope)))) return { error: '参数不正确：collection 仅支持 story、original、all，scope 仅支持 all、entities、chapters。' };
@@ -259,6 +260,10 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
     },
   ];
   const { recentCompleteChapters, ...storyMaterials } = context;
+  const { continuationAnchor: anchor, ...readableMaterials } = storyMaterials;
+  const storyMaterialsText = formatWritingMaterials(readableMaterials);
+  const recentChaptersText = formatRecentChapters(recentCompleteChapters);
+  const continuationAnchorText = formatContinuationAnchor(anchor);
   return { text: `本次写作的必要资料（完整保留）：\n${JSON.stringify(context)}`, tools, variables: {
     continuationAnchor: JSON.stringify(context.continuationAnchor),
     storyMaterials: JSON.stringify(storyMaterials),
@@ -268,5 +273,7 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
     plotSummaries: JSON.stringify({ ...(context.authorConfirmedSummary ? { authorConfirmedSummary: context.authorConfirmedSummary } : {}), completePlotSummaries: summaries }),
     recentChapters: JSON.stringify(recentCompleteChapters),
     originalReference: originalReference ? JSON.stringify(originalReference) : '',
+    storyMaterialsText, recentChaptersText, continuationAnchorText,
+    contextText: `# 当前故事资料\n\n${storyMaterialsText}\n\n# 最近已保存正文\n\n${recentChaptersText}\n\n# 续写起点\n\n${continuationAnchorText}`,
   } };
 }

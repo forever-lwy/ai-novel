@@ -36,7 +36,9 @@ describe('writing illustration requests', () => {
   it('offers tools and binds their requests only after saved prose and confirmed entity extraction', async () => {
     const ctx = harness(true); await waitFor(() => ctx.engine.listJobs().filter(job => job.kind === 'extract').some(job => job.status === 'completed'));
     const request = vi.mocked(ctx.models.generateText).mock.calls[0][1];
-    expect(request.system).toContain('每次切换场景'); expect(request.messages).toContainEqual({ role: 'system', content: expect.stringContaining('generate_character_portrait') });
+    expect(request.system).toContain('场景切换');
+    expect(request.messages).toContainEqual({ role: 'system', content: expect.stringContaining('新人物首次出场') });
+    expect(request.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining(['generate_character_portrait', 'generate_scene_cg']));
     const state = ctx.store.state(ctx.project.mainBranchId); const chapter = state.chapters[0];
     expect(ctx.store.chapter(ctx.project.mainBranchId, chapter.id).text).toBe(prose);
     expect(ctx.generateAutomatic).toHaveBeenCalledTimes(1);

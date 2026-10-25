@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Entity, ExtractionResult, OutputIssue, StoryState } from '../shared/types.js';
 import { paragraphs } from './store.js';
+import { EXTRACTION_INDEX_PREFIXES, formatExtractionIndex } from '../shared/prompt-materials.js';
 
 const visibility = z.enum(['public', 'secret']);
 export const extractionSchema = z.object({
@@ -140,7 +141,7 @@ export function normalizeExtraction(input: unknown, block: ExtractionBlock): { v
 }
 
 /** Reference names assist entity matching; author plans and unrevealed answers are never extraction evidence. */
-export function extractionContext(state: StoryState, block: ExtractionBlock): string {
+export function extractionContext(state: StoryState, block: ExtractionBlock, format: 'json' | 'text' = 'json'): string {
   const chapterOrder = new Map(state.chapters.map((chapter, index) => [chapter.id, index]));
   const entityNames = new Map(state.entities.map(entity => [entity.id, [entity.name, ...entity.aliases]]));
   for (const merged of state.entities) if (merged.mergedInto) entityNames.get(merged.mergedInto)?.push(merged.name, ...merged.aliases);
@@ -150,5 +151,6 @@ export function extractionContext(state: StoryState, block: ExtractionBlock): st
     .sort((left, right) => Number(right.mentioned) - Number(left.mentioned) || right.recent - left.recent)
     .slice(0, 80).map(({ entity, names }) => ({ kind: entity.kind, name: entity.name, nameStatus: entity.nameStatus, isMain: entity.isMain, aliases: [...new Set(names.filter(name => name !== entity.name))] }));
   const foreshadows = state.foreshadows.filter(item => item.status === 'planted').slice(-30).map(item => ({ title: item.title, status: item.status }));
-  return `名称对照（仅用于统一称呼，不是新增事实的证据）：${JSON.stringify(entities)}\n尚未揭晓的伏笔索引（不可据此推断答案）：${JSON.stringify(foreshadows)}`;
+  if (format === 'text') return formatExtractionIndex(entities, foreshadows);
+  return `${EXTRACTION_INDEX_PREFIXES.entities}${JSON.stringify(entities)}\n${EXTRACTION_INDEX_PREFIXES.foreshadows}${JSON.stringify(foreshadows)}`;
 }

@@ -12,7 +12,7 @@ export function tavernGeneralPresets(): PromptPreset[] {
   return [...TAVERN_PRESET_IDS.map(id => JSON.parse(readFileSync(new URL(`../../presets/${id}.json`, import.meta.url), 'utf8')).preset as PromptPreset), neutralGeneralPreset()];
 }
 export function withTavernPresets() {
-  const settings = defaultPromptTemplates(); settings.general!.presets.splice(1, 0, ...tavernGeneralPresets().slice(0, 4)); return settings;
+  const settings = withPriorDefaultSelections(); settings.general!.presets.splice(1, 0, ...tavernGeneralPresets().slice(0, 4)); return settings;
 }
 export function withLegacyPresets() {
   const settings = withDramatronPresets(); settings.general!.presets.splice(1, 0, v08GeneralPreset(), rebornGeneralPreset());
@@ -29,5 +29,18 @@ export function legacyDramatronPreset(): PromptPreset {
   ] };
 }
 export function withDramatronPresets() {
-  const settings = defaultPromptTemplates(); settings.general!.presets.unshift(legacyDramatronPreset()); settings.general!.selected = 'default-general'; return settings;
+  const settings = withPriorDefaultSelections(); settings.general!.presets.unshift(legacyDramatronPreset()); settings.general!.selected = 'default-general'; return settings;
+}
+
+/** Exercise saved earlier editions without accidentally selecting fresh v4. */
+export function withPriorDefaultSelections() {
+  const settings = defaultPromptTemplates();
+  settings.general!.selected = 'general-neutral-v1';
+  settings.general!.presets.sort((a, b) => Number(a.id !== 'general-neutral-v1') - Number(b.id !== 'general-neutral-v1'));
+  for (const task of ['writing', 'extraction', 'compression', 'image'] as const) {
+    const id = task === 'image' ? 'default-image-v3' : `default-${task}`;
+    settings.selected[task] = id;
+    settings.presets[task].sort((a, b) => Number(a.id.endsWith('-v4')) - Number(b.id.endsWith('-v4')));
+  }
+  return settings;
 }

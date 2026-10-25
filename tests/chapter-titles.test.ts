@@ -170,7 +170,8 @@ describe('continuation ignores split positions', () => {
     expect((await context.tools.find(tool => tool.name === 'read_text_file')!.execute({ path: 'story/000002.txt' }) as any).path).toBe(listed.files[1].path);
     state.chapters.shift(); const shorter = buildWritingContext({ state, chapterText: id => store.chapter(branchId, id).text });
     expect((await shorter.tools.find(tool => tool.name === 'list_text_files')!.execute({}) as any).files[0].path).toBe(listed.files[1].path);
-    const compiled = compileTaskPrompt(undefined, 'writing', { ...context.variables, chapterNumber: 13 }); expect(compiled.system).toContain('虚拟文件路径和章节 id');
+    const compiled = compileTaskPrompt(undefined, 'writing', { ...context.variables, chapterNumber: 13 });
+    expect(compiled.system).toContain('章节编号和资料标识仅用于定位'); expect(compiled.system).toContain('不要按编号推算进度');
   });
   it('maps opaque handles through backup id replacement without advertising old handles', async () => {
     const store = new Store(mkdtempSync(join(tmpdir(), 'novel-restored-paths-'))); stores.push(store); const project = store.createProject({ title: '恢复查询' }); const branchId = project.mainBranchId;

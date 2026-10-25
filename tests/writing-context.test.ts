@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildWritingContext } from '../server/writing-context.js';
-import { emptyState, type Entity, type StoryState } from '../shared/types.js';
+import { emptyState, type Entity, type OriginalReferenceData, type StoryState } from '../shared/types.js';
 
 function entity(id: string, name: string, description: string, extra: Partial<Entity> = {}): Entity {
   return { id, name, description, kind: 'character', aliases: [], visibility: 'public', locked: false, facts: [], ...extra };
@@ -16,6 +16,47 @@ function fixture(): { state: StoryState; texts: Map<string, string> } {
 }
 
 describe('writing context and version-bound lookup', () => {
+  it('adds readable prompt variables while preserving legacy JSON values and source text exactly', () => {
+    const { state, texts } = fixture();
+    const originalText = '第一段保留 {作者原有括号}。\n\n第二段保留 "引号" 与 {{素材变量}}。';
+    texts.set('c6', originalText);
+    state.entities[0].facts[0].citation = { chapterId: 'c6', paragraph: 2, quote: originalText };
+    const before = structuredClone(state); const context = buildWritingContext({ state, chapterText: id => texts.get(id)! });
+    const readable = context.variables;
+    expect(readable.storyMaterialsText).toContain('## 世界设定'); expect(readable.storyMaterialsText).toContain(state.outline.worldview);
+    expect(readable.storyMaterialsText).toContain('## 主要人物'); expect(readable.storyMaterialsText).toContain('标识：known'); expect(readable.storyMaterialsText).toContain('章节标识：c6'); expect(readable.storyMaterialsText).toContain('原文段号：2');
+    expect(readable.storyMaterialsText).toContain(originalText); expect(readable.recentChaptersText).toContain(`## 第6章\n\n章节标识：c6\n\n${originalText}`);
+    expect(readable.continuationAnchorText).toContain(`已保存正文结尾：\n${originalText}`);
+    expect(readable.recentChaptersText).not.toContain('\\n'); expect(readable.storyMaterialsText).not.toContain('"mainCharacters":');
+    for (const value of [readable.storyMaterialsText, readable.recentChaptersText, readable.continuationAnchorText]) expect(readable.contextText).toContain(value);
+    expect(JSON.parse(readable.recentChapters).at(-1)).toMatchObject({ chapterId: 'c6', text: originalText });
+    expect(JSON.parse(readable.storyMaterials).continuationAnchor.ending).toBe(originalText);
+    expect(JSON.parse(context.text.split('\n')[1]).recentCompleteChapters.at(-1).text).toBe(originalText);
+    expect(state).toEqual(before);
+    for (const id of ['c4', 'c5', 'c6']) expect(readable.recentChaptersText).toContain(texts.get(id));
+    for (const id of ['c1', 'c2', 'c3']) expect(readable.recentChaptersText).not.toContain(texts.get(id));
+    expect(readable.storyMaterialsText).not.toContain('尚未发生的主角晋升'); expect(readable.storyMaterialsText).not.toContain('独有配角资料');
+  });
+
+  it('keeps current and fixed-original materials separate with valid compression, references and query boundaries', () => {
+    const { state, texts } = fixture();
+    state.outline.summaryCompression = { text: '作者确认的当前线前两章摘要', chapterIds: ['c1', 'c2'] };
+    const originalState = emptyState(); originalState.outline.worldview = '原作设定第一段。\n\n原作设定第二段。';
+    originalState.chapters = ['o1', 'o2'].map(id => ({ id, title: `原作${id}`, summary: `${id}的原作摘要`, status: 'ready', createdAt: '' }));
+    originalState.outline.summaryCompression = { text: '作者确认的原作第一章摘要', chapterIds: ['o1'] };
+    originalState.entities = [entity('original-main', '原作角色', '完整档案按需查询，不应自动插入。')];
+    originalState.foreshadows = [{ id: 'original-foreshadow', title: '原作线索', detail: '原作后续参考，不是当前已发生事实。', status: 'planned', revealCondition: '角色到场', relatedEntityIds: ['original-main'] }];
+    const original: OriginalReferenceData = { reference: { branchId: 'original-branch', revisionId: 'fixed-revision', sourceIds: ['source-1'] }, state: originalState, chapters: originalState.chapters.map(chapter => ({ ...chapter, text: `不应默认注入的原作全文${chapter.id}` })), sources: [] };
+    const context = buildWritingContext({ state, chapterText: id => texts.get(id)!, original });
+    const readable = context.variables.storyMaterialsText;
+    for (const value of ['作者确认的当前线前两章摘要', '作者确认的原作第一章摘要', 'o2的原作摘要', originalState.outline.worldview!, '原作角色', '原作后续参考，不是当前已发生事实。', 'original-branch', 'fixed-revision', 'source-1']) expect(readable).toContain(value);
+    expect(readable).not.toContain('o1的原作摘要'); expect(readable).not.toContain(state.chapters[0].summary); expect(readable).not.toContain(state.chapters[1].summary);
+    expect(readable).not.toContain('完整档案按需查询，不应自动插入。'); expect(readable).not.toContain('不应默认注入的原作全文');
+    expect(readable).toContain('## 固定原作参考'); expect(readable).toContain('资料总数：1');
+    expect(context.variables.recentChaptersText).not.toContain('原作设定'); expect(context.variables.continuationAnchorText).toContain('章节标识：c6');
+    expect(JSON.parse(context.variables.originalReference).reference).toEqual(original.reference);
+  });
+
   it('preserves all summaries and three complete recent chapters without injecting other dossiers or older prose', () => {
     const { state, texts } = fixture(); const context = buildWritingContext({ state, chapterText: id => texts.get(id)! });
     for (const chapter of state.chapters) expect(context.text).toContain(chapter.summary);

@@ -29,7 +29,7 @@ it('imports over one million Chinese characters through 200 durable chapter jobs
     generateStructured: async (_provider, request, validate) => {
       requestCount++;
       // Use only the currently supplied source block, never model context or summaries.
-      const sourceBlock = request.prompt.split('待整理章节：').at(-1)!;
+      const sourceBlock = request.prompt.split(/(?:待整理章节|章节标题)：/).at(-1)!;
       const chapterNumber = Number(sourceBlock.match(/^第(\d+)章/)?.[1]);
       expect(chapterNumber).toBeGreaterThanOrEqual(1);
       expect(chapterNumber).toBeLessThanOrEqual(200);

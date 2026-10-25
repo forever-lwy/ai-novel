@@ -1,4 +1,4 @@
-import { withTavernPresets } from './fixtures/prompt-presets.js';
+import { withPriorDefaultSelections, withTavernPresets } from './fixtures/prompt-presets.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { listenLocalServer } from './local-server.mjs';
@@ -6,6 +6,8 @@ import { compileTaskPrompt, defaultPromptTemplates, normalizePromptTemplates, pr
 import { TAVERN_PRESET_IDS, NEUTRAL_PRESET_ID, tavernGeneralPresets } from './fixtures/prompt-presets.js';
 import { createTavernMacroExpander } from '../shared/tavern-macros.js';
 import { TASK_V3_PRESET_IDS } from '../shared/task-prompts-v3.js';
+import { TASK_V4_PRESET_IDS } from '../shared/task-prompts-v4.js';
+import { NEUTRAL_V2_PRESET_ID } from '../shared/neutral-preset-v2.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
 import { archiveCarrierMessages } from '../shared/response-carrier.js';
 import { buildRequestSnapshot, generateStructured, generateText, ModelInteractionPause, structuredRequest } from '../server/providers.js';
@@ -39,9 +41,11 @@ function reply(protocol: ProviderProtocol, calls: { name: string; arguments: unk
 
 describe('source-preserving presets and task editions', () => {
   it('upgrades pre-image settings without mutating their legacy tasks or losing the separate optimizer supplement', () => {
-    const old: any = defaultPromptTemplates(); delete old.presets.image; delete old.selected.image; delete old.taskCatalogVersions.image;
+    const old: any = withPriorDefaultSelections(); delete old.presets.image; delete old.selected.image; delete old.taskCatalogVersions.image;
     const before = structuredClone(old); const upgraded = normalizePromptTemplates(old); expect(old).toEqual(before);
-    expect(upgraded.presets.image[0].id).toBe(TASK_V3_PRESET_IDS.image); expect(upgraded.selected.image).toBe(TASK_V3_PRESET_IDS.image);
+    expect(upgraded.presets.image.map(preset => preset.id)).toEqual(expect.arrayContaining([TASK_V3_PRESET_IDS.image, TASK_V4_PRESET_IDS.image]));
+    expect(upgraded.selected.image).toBe(TASK_V3_PRESET_IDS.image);
+    for (const task of ['writing', 'extraction', 'compression'] as const) expect(upgraded.selected[task]).toBe(before.selected[task]);
   });
   it('keeps source identities, ordered source roles and optional styles while neutral supplies no fixed persona', () => {
     const sources = tavernGeneralPresets(); expect(sources).toHaveLength(5);
@@ -106,8 +110,20 @@ describe.each(protocols)('%s source carrier wire and continuations', protocol =>
     const tools = toolDefinitions(protocol, body); expect(tools).toHaveLength(1); expect(tools[0].name).toBe(request.responseCarrier!.name);
     expect(tools[0].parameters ?? tools[0].input_schema).toMatchObject({ required: [request.responseCarrier!.field] }); expect(body.tool_choice).toBeUndefined(); expect(body.toolConfig).toBeUndefined();
     expect(JSON.stringify(body)).toContain(variables.instruction);
-    if (request.responseCarrier!.archive) { expect(tools[0].description).toContain(variables.recentChapters); expect(tools[0].description).toContain('故事资料使用规则'); }
+    if (request.responseCarrier!.archive) { expect(tools[0].description).toContain(variables.recentChapters); expect(tools[0].description).toContain('资料边界与查询'); }
     expect(JSON.stringify(body)).not.toContain('carrierPart');
+  });
+  it('keeps the new neutral carrier contract separate from its task and author materials', () => {
+    const settings = defaultPromptTemplates(); expect(settings.general!.selected).toBe(NEUTRAL_V2_PRESET_ID);
+    const request = compileTaskPrompt(settings, 'writing', variables); expect(request.responseCarrier).toMatchObject({ archive: false });
+    const body = JSON.parse(buildRequestSnapshot(config(protocol), request).body); const tools = toolDefinitions(protocol, body);
+    expect(tools[0].name).toBe(request.responseCarrier!.name);
+    for (const material of [variables.instruction, variables.storyMaterials, variables.recentChapters]) {
+      expect(request.messages.some(message => message.content.includes(material))).toBe(true);
+      expect(tools.every((tool: any) => !tool.description.includes(material))).toBe(true);
+      expect(JSON.stringify(body[protocol === 'gemini' ? 'contents' : protocol === 'openai-responses' ? 'input' : 'messages'])).toContain(material);
+    }
+    expect(JSON.stringify(body)).not.toContain('/workspace/archive/');
   });
   it('executes real native tools alongside the output sink and returns results under each original call ID', async () => {
     const request = compiled(); const sink = request.responseCarrier!; const execute = vi.fn(() => ({ name: '林舟', role: '信使' }));

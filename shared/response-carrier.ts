@@ -1,12 +1,19 @@
 import type { ModelRequest, ModelToolCall, PromptMessage, ResponseCarrier } from './types.js';
 
 export function carrierInstruction(carrier: ResponseCarrier, structured: boolean): string {
+  if (carrier.archive === false) return `# 本次实际交付接口\n使用 ${carrier.name} 工具的 ${carrier.field} 字符串交付${structured ? '完整 JSON 结果对象' : '本轮新增正文'}，遵循本次任务和作者指定的结果格式。${structured ? '字符串内填写完整 JSON。' : '需要资料查询、插画或用户决定时，调用本次另行定义的真实工具并使用其返回结果；结果输出工具只提交文字。'}工具名和字段名以本次实际定义为准，不调用未定义的工具，不伪造工具结果。完成提交后结束本轮，不在普通文本重复交付结果。`;
   return `# 本次实际交付接口\n本次使用 ${carrier.name} 工具的 ${carrier.field} 字符串交付${structured ? '完整 JSON 结果对象' : '本轮新增正文'}。所有任务内容和预设输出包装都放在该字符串中，不在普通文本重复。${structured ? '字符串内只放任务 JSON；不加角色招呼、思考、终端命令、标签、摘要或选项。' : '需要资料查询、插画或玩家决定时，直接调用本次另行定义的真实工具，等待真实结果后继续；输出工具仅提交文字，不代替这些工具。'}\n原预设的函数名与字段名以本次实际定义为准。不调用未定义的函数，不伪造工具结果；只完成当前任务，不扩写其他任务。完成结果提交后结束，不再等待输出工具确认。辅助包装不是作品世界事实，不能把主持身份、控制指令或工具过程混进正文。`;
 }
 
 export function responseCarrierTool(carrier: ResponseCarrier, description = '', fieldDescription = '') {
-  return { name: carrier.name, description: description || 'Submit the complete task result here. Use the other declared tools normally when needed. Do not repeat the result outside this call.',
-    parameters: { type: 'object', additionalProperties: false, properties: { [carrier.field]: { type: 'string', description: `${fieldDescription}\n完整任务结果；写作可包含预设辅助包装，JSON 任务只填写完整 JSON 字符串。`.trim() } }, required: [carrier.field] } };
+  // Archived presets and supplied descriptions retain their original contract.
+  const legacy = carrier.archive === true || Boolean(description || fieldDescription);
+  return { name: carrier.name, description: description || (legacy
+    ? 'Submit the complete task result here. Use the other declared tools normally when needed. Do not repeat the result outside this call.'
+    : '提交本轮完整任务结果，字符串内容作为本轮输出。'),
+    parameters: { type: 'object', additionalProperties: false, properties: { [carrier.field]: { type: 'string', description: legacy
+      ? `${fieldDescription}\n完整任务结果；写作可包含预设辅助包装，JSON 任务只填写完整 JSON 字符串。`.trim()
+      : '本轮完整任务结果文本；结构化任务填写完整 JSON 字符串。' } }, required: [carrier.field] } };
 }
 
 /** Linux's helper separates guides from the archive. Keep the archive as text,

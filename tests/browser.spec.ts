@@ -2,8 +2,10 @@ import { chooseBranch, currentBranchId, showGenerationProcess } from './branch-b
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { defaultPromptTemplates } from '../shared/prompt-templates';
-import { withDramatronPresets, TAVERN_PRESET_IDS, NEUTRAL_PRESET_ID, tavernGeneralPresets } from './fixtures/prompt-presets';
+import { withDramatronPresets, withPriorDefaultSelections, TAVERN_PRESET_IDS, NEUTRAL_PRESET_ID, tavernGeneralPresets } from './fixtures/prompt-presets';
 import { TASK_V3_PRESET_IDS } from '../shared/task-prompts-v3';
+import { TASK_V4_PRESET_IDS } from '../shared/task-prompts-v4';
+import { NEUTRAL_V2_PRESET_ID } from '../shared/neutral-preset-v2';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2131,7 +2133,7 @@ test('任务提示词支持编辑编排、变量预览、独立导入导出和�
     await panel.getByRole('button', { name: '导出当前提示词预设', exact: true }).click();
     const download = await downloadPromise; const exportPath = testInfo.outputPath('prompt-preset.json');
     await download.saveAs(exportPath); const exportedText = await readFile(exportPath, 'utf8'); const exported = JSON.parse(exportedText);
-    expect(exported).toMatchObject({ format: 'ai-novel-prompt-preset', version: 2, task: 'writing', preset: { name: '我的写作风格', variables: { style: '克制叙述，重视动作细节' } }, generalPreset: { name: '通用综合 · 中性叙事' } });
+    expect(exported).toMatchObject({ format: 'ai-novel-prompt-preset', version: 2, task: 'writing', preset: { name: '我的写作风格', variables: { style: '克制叙述，重视动作细节' } }, generalPreset: { name: '通用综合 v2 · 清晰分区' } });
     expect(exportedText).not.toContain('providers'); expect(exportedText).not.toContain('apiKey');
     await panel.getByLabel('导入提示词预设 JSON', { exact: true }).fill(exportedText);
     await panel.getByRole('button', { name: '从 JSON 新增预设', exact: true }).click();
@@ -2183,7 +2185,7 @@ test('最终提示词预览显示全部程序规则、四种协议和 RPG，且�
       await panel.getByLabel('预览接口协议', { exact: true }).selectOption(protocol);
       await expect(preview).toContainText('当前阶段只生成本章正文');
       await expect(preview.locator('[data-role="system"]')).toHaveCount(['claude', 'gemini'].includes(protocol) ? 1 : 9);
-      await expect(preview).toContainText('普通文本只交付故事正文');
+      await expect(preview).toContainText('正文只写故事');
       await expect(preview).not.toContainText('调用工具前结束 think/thinking 辅助块');
       await expect(preview).toContainText('不要按编号推算进度');
       expect(await preview.locator('section:not([data-role="system"])').evaluateAll(elements => elements.map(element => element.getAttribute('data-role')))).toEqual(['user', 'assistant', 'user', 'assistant', 'user']);
@@ -2267,7 +2269,7 @@ test('非原生思考与资料查询、生图工具在作者视角显示，刷�
     expect((await page.request.put('/api/settings', { data: { ...previous,
       providers: [{ id: providerId, name: '预设思考验收', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }],
       writingProviderId: providerId, writingModel: 'e2e-preset-activities', planningProviderId: providerId, planningModel: 'e2e-fixture', extractionProviderId: providerId, extractionModel: 'e2e-fixture',
-      modelParameters: [], promptTemplates: defaultPromptTemplates(),
+      modelParameters: [], promptTemplates: withPriorDefaultSelections(),
       taskSettings: { extraction: { outputMode: 'prompt', autoRetry: false, maxRetries: 0, retryDelayMs: 0 } },
       imageSettings: { providerId, model: 'gpt-image-1', protocol: 'openai-images', size: '1024x1024', quality: 'auto', stylePrompt: '', autoPortrait: true, autoCG: false, timeoutMs: 120000 },
     } })).ok()).toBeTruthy();
@@ -2342,7 +2344,7 @@ test('四类任务和通用预设可用，规划入口移除，世界设定与�
     await settings.getByRole('button',{name:'任务模型',exact:true}).click();await selectModelTask(settings, '摘要压缩');await expect(settings.getByLabel('启用剧情规划',{exact:true})).toHaveCount(0);await expect(settings.getByRole('region',{name:'剧情规划模型设置',exact:true})).toHaveCount(0);await expect(settings.getByRole('region',{name:'摘要压缩模型设置',exact:true})).toBeVisible();
     await settings.getByRole('button',{name:'提示词编排',exact:true}).click();const panel=settings.getByTestId('prompt-templates-panel');
     await expect(panel.getByRole('tab',{name:'剧情规划',exact:true})).toHaveCount(0);await expect(panel.getByRole('tab')).toHaveCount(5);
-    await expect(panel.getByLabel('提示词块 1 内容',{exact:true})).toHaveValue(/# 小说正文写作/);await expect(panel.getByLabel('提示词块 1 内容',{exact:true})).not.toHaveValue(/日式视觉小说/);
+    await expect(panel.getByLabel('提示词块 1 内容',{exact:true})).toHaveValue(/# 当前任务：故事正文/);await expect(panel.getByLabel('提示词块 1 内容',{exact:true})).not.toHaveValue(/日式视觉小说/);
     await panel.getByRole('tab',{name:'通用预设',exact:true}).click();await expect(panel.getByTestId('prompt-block')).toHaveCount(4);await expect(panel.locator('[data-block-id="dramatron-role"]')).toHaveCount(0);await expect(panel.locator('[data-block-id="material-boundary"]')).toHaveCount(0);
     await page.screenshot({path:testInfo.outputPath('protection-only-general-desktop.png'),animations:'disabled'});await settings.getByRole('button',{name:'返回作品',exact:true}).click();
     await createProject(page,'无规划入口验证');await tab(page,'剧情与伏笔');await expect(page.getByRole('button',{name:'让 AI 规划',exact:true})).toHaveCount(0);await expect(page.getByLabel('规划章节标题',{exact:true})).toHaveCount(0);await expect(page.getByRole('button',{name:'添加章节规划',exact:true})).toHaveCount(0);
@@ -2352,25 +2354,52 @@ test('四类任务和通用预设可用，规划入口移除，世界设定与�
   } finally {await page.request.put('/api/settings',{data:previous});}
 });
 
-test('内置通用只有中性版，默认选择和恢复目录保存刷新后不补回最早移植版', async ({ page }, testInfo) => {
+test('新版通用与四任务默认可选、资料预览可读，旧版本保留且保存刷新后稳定', async ({ page }, testInfo) => {
   const previous = await (await page.request.get('/api/settings')).json();
+  const stats = async () => (await (await page.request.get(`${mockUrl.replace('/v1', '')}/__e2e/stats`)).json()).modelRequests;
+  const before = await stats();
   try {
     expect((await page.request.put('/api/settings', { data: { ...previous, promptTemplates: defaultPromptTemplates() } })).ok()).toBe(true);
     await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
     const settings = page.getByTestId('settings-page'); await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
     const panel = settings.getByTestId('prompt-templates-panel'); await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(1);
-    await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(NEUTRAL_PRESET_ID);
-    await expect(panel.getByLabel('恢复默认框架', { exact: true }).locator('option')).toHaveCount(1);
-    await expect(panel.getByLabel('恢复默认框架', { exact: true })).toHaveValue(NEUTRAL_PRESET_ID);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveText(['通用综合 v2 · 清晰分区', '通用综合 · 中性叙事']);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(NEUTRAL_V2_PRESET_ID);
+    await expect(panel.getByLabel('恢复默认框架', { exact: true }).locator('option')).toHaveCount(2);
+    await expect(panel.getByLabel('恢复默认框架', { exact: true })).toHaveValue(NEUTRAL_V2_PRESET_ID);
+    await expect(panel.getByLabel('辅助标签处理', { exact: true })).toHaveValue('off');
     await expect(panel.getByLabel('删除当前提示词预设', { exact: true })).toBeDisabled();
+    const preview = panel.getByLabel('提示词编译预览', { exact: true });
+    await expect(preview).toContainText('最近章节原文');
+    await expect(preview).not.toContainText('示例storyMaterialsText');
+    await expect(preview).not.toContainText('<interaction_history>');
+    await panel.locator('summary').filter({ hasText: '发送的工具定义' }).click();
+    const tools = panel.getByLabel('提示词工具定义', { exact: true });
+    await expect(tools).toContainText('search_story');
+    await expect(tools).not.toContainText('最新正文结尾');
+    await expect(tools).not.toContainText('不要等待');
+    for (const [task, label] of [['writing', '正文写作'], ['extraction', '资料提取'], ['compression', '摘要压缩'], ['image', '生图提示词']] as const) {
+      await panel.getByRole('tab', { name: label, exact: true }).click();
+      await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(TASK_V4_PRESET_IDS[task]);
+      await expect(panel.getByLabel('搭配通用预设', { exact: true })).toHaveValue(NEUTRAL_V2_PRESET_ID);
+      await expect(preview).not.toContainText('示例extractionIndexText');
+      await expect(preview).not.toContainText('示例imageInputText');
+    }
+    await panel.getByRole('tab', { name: '正文写作', exact: true }).click();
+    await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(TASK_V3_PRESET_IDS.writing);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true })).toHaveValue(TASK_V3_PRESET_IDS.writing);
+    await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(TASK_V4_PRESET_IDS.writing);
     await settings.getByRole('button', { name: '保存设置', exact: true }).click(); await expect(settings.getByRole('status').filter({ hasText: '设置已保存' })).toBeVisible();
     await page.reload(); await page.getByRole('button', { name: '设置', exact: true }).click(); await settings.getByRole('button', { name: '提示词编排', exact: true }).click();
     await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveText(['通用综合 · 中性叙事']);
-    await page.screenshot({ path: testInfo.outputPath('neutral-only-desktop.png'), animations: 'disabled' });
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveText(['通用综合 v2 · 清晰分区', '通用综合 · 中性叙事']);
+    const saved = await (await page.request.get('/api/settings')).json();
+    expect(saved.promptTemplates.selected).toEqual(TASK_V4_PRESET_IDS);
+    expect(saved.promptTemplates.general.selected).toBe(NEUTRAL_V2_PRESET_ID);
+    await page.screenshot({ path: testInfo.outputPath('prompt-v4-desktop.png'), animations: 'disabled' });
     await page.setViewportSize({ width: 390, height: 844 }); await panel.getByLabel('当前提示词预设', { exact: true }).scrollIntoViewIfNeeded();
-    await page.screenshot({ path: testInfo.outputPath('neutral-only-mobile.png'), animations: 'disabled' }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('prompt-v4-mobile.png'), animations: 'disabled' }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    expect(await stats()).toBe(before);
   } finally { await page.request.put('/api/settings', { data: previous }); }
 });
 
@@ -2386,7 +2415,7 @@ test('四份原版结构从文件导入后能查看真实工具与消息重排�
     }
     await panel.getByRole('tab', { name: '通用预设', exact: true }).click();
     await panel.locator('summary').filter({ hasText: '发送的工具定义' }).click();
-    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(1);
+    await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(2);
     for (const id of [...TAVERN_PRESET_IDS, NEUTRAL_PRESET_ID]) {
       if (id === NEUTRAL_PRESET_ID) await panel.getByLabel('当前提示词预设', { exact: true }).selectOption(id);
       else {
@@ -2506,7 +2535,7 @@ test('通用预设和四任务支持文件导入导出，整套恢复先确认�
       await naming.getByLabel('预设名称', { exact: true }).fill(`导入${label}`);
       if (task === 'general') {
         await naming.getByRole('button', { name: '取消', exact: true }).click();
-        await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(1);
+        await expect(panel.getByLabel('当前提示词预设', { exact: true }).locator('option')).toHaveCount(defaultPromptTemplates().general!.presets.length);
         await panel.getByLabel('导入提示词预设文件', { exact: true }).setInputFiles({ name: 'general.json', mimeType: 'application/json', buffer: Buffer.from(text) });
         naming = page.getByRole('dialog', { name: '导入预设', exact: true }); await naming.getByLabel('预设名称', { exact: true }).fill(`导入${label}`);
       }
@@ -2516,11 +2545,11 @@ test('通用预设和四任务支持文件导入导出，整套恢复先确认�
     }
     const downloadAll = page.waitForEvent('download'); await panel.getByRole('button', { name: '导出全部提示词', exact: true }).click();
     const backupText = await readFile((await (await downloadAll).path())!, 'utf8'); const backup = JSON.parse(backupText);
-    expect(Object.keys(backup)).toEqual(['format', 'version', 'templates']); expect(backup.templates.presets.image).toHaveLength(2);
+    expect(Object.keys(backup)).toEqual(['format', 'version', 'templates']); expect(backup.templates.presets.image).toHaveLength(defaultPromptTemplates().presets.image.length + 1);
     await panel.getByLabel('提示词预设名称', { exact: true }).fill('待替换草稿');
     const upload = () => panel.getByLabel('导入提示词预设文件', { exact: true }).setInputFiles({ name: 'all.json', mimeType: 'application/json', buffer: Buffer.from(backupText) });
     await upload(); let confirm = page.getByRole('dialog', { name: '导入整套提示词', exact: true });
-    await expect(confirm).toContainText('生图提示词：2 个'); await confirm.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(confirm).toContainText(`生图提示词：${defaultPromptTemplates().presets.image.length + 1} 个`); await confirm.getByRole('button', { name: '取消', exact: true }).click();
     await expect(panel.getByLabel('提示词预设名称', { exact: true })).toHaveValue('待替换草稿');
     await upload(); confirm = page.getByRole('dialog', { name: '导入整套提示词', exact: true });
     await confirm.getByRole('button', { name: '替换当前提示词编辑', exact: true }).click();
@@ -2625,7 +2654,7 @@ test('生图设置、自动人物与场景工具、全文选段 CG、重绘参�
     await expect(modal.locator('.image-source-text')).toHaveText('到白石城，发现城门下藏着一把');
     await modal.getByRole('button', { name: '开始绘制', exact: true }).click(); await expect.poll(async () => (await listImages()).filter((image: StoryImage) => image.status === 'completed').length).toBe(4);
     const selectionStats = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
-    const selectionInput = JSON.parse(selectionStats.lastPromptOptimizationRequest.prompt);
+    const selectionInput = selectionStats.lastPromptOptimizationRequest.input;
     expect(selectionInput.storyContext).toContain('他拾起钥匙，决定沿着石阶寻找守城人留下的线索。');
     expect(selectionInput.storyContext).toContain('目标片段前文'); expect(selectionInput.storyContext).toContain('目标片段后文');
     const selectedCG = (await listImages()).find((image: StoryImage) => image.kind === 'cg' && !image.automatic && image.selection);
