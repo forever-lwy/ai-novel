@@ -1,26 +1,14 @@
-import { accessSync, chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, unlinkSync, writeFileSync, type Dirent } from 'node:fs';
+import { accessSync, closeSync, constants, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, unlinkSync, writeFileSync, type Dirent } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, join, parse, resolve } from 'node:path';
+import { join, parse, resolve } from 'node:path';
 
-/** New data follows its containing directory's sharing policy; existing grants stay untouched. */
-function creationMode(parent: string, directory: boolean): number {
-  const inherited = lstatSync(parent).mode;
-  return directory ? 0o700 | (inherited & 0o2077) : 0o600 | (inherited & 0o066);
-}
-
-export function ensureDataDirectory(directory: string, parent?: string): void {
-  const existed = existsSync(directory);
-  const mode = process.platform === 'win32' || !parent ? 0o700 : creationMode(parent, true);
-  mkdirSync(directory, { recursive: true, mode });
-  // Apply sharing bits after umask, only to a directory we just created.
-  if (!existed && process.platform !== 'win32') chmodSync(directory, mode | (lstatSync(directory).mode & 0o2000));
+/** Use ordinary filesystem creation rules and leave existing permissions untouched. */
+export function ensureDataDirectory(directory: string): void {
+  mkdirSync(directory, { recursive: true });
 }
 
 export function writeDataFile(path: string, data: string | NodeJS.ArrayBufferView): void {
-  const mode = process.platform === 'win32' ? 0o600 : creationMode(dirname(path), false);
-  writeFileSync(path, data, { flag: 'wx', mode });
-  // Explicit group/ACL sharing must survive a more restrictive process umask.
-  if (process.platform !== 'win32') chmodSync(path, mode);
+  writeFileSync(path, data, { flag: 'wx' });
 }
 
 export function ensureDataFile(path: string): void {
@@ -29,9 +17,7 @@ export function ensureDataFile(path: string): void {
 }
 
 export function createDataTempDirectory(prefix: string): string {
-  const directory = mkdtempSync(prefix);
-  if (process.platform !== 'win32') chmodSync(directory, creationMode(dirname(directory), true));
-  return directory;
+  return mkdtempSync(prefix);
 }
 
 function accessError(path: string, cause: unknown): Error {
@@ -42,7 +28,7 @@ function accessError(path: string, cause: unknown): Error {
 function verifyWindowsAccess(path: string, directory: boolean): void {
   if (!directory) { closeSync(openSync(path, 'r+')); return; }
   const probe = join(path, '.ai-novel-access-' + randomUUID());
-  const descriptor = openSync(probe, 'wx', 0o600);
+  const descriptor = openSync(probe, 'wx');
   try { closeSync(descriptor); } finally { unlinkSync(probe); }
 }
 

@@ -34,7 +34,7 @@ export class ExtensionService {
   private closed = false;
   constructor(private settings: SettingsStore, dataDir: string) {
     this.runtimeDir = join(dataDir, 'extension-runtime');
-    ensureDataDirectory(this.runtimeDir, dataDir);
+    ensureDataDirectory(this.runtimeDir);
   }
   private current(): ExtensionSettings {
     if (!this.cached) { const raw = this.settings.secretMeta('extensions-v1'); this.cached = raw ? JSON.parse(raw) as ExtensionSettings : emptyExtensions(); }

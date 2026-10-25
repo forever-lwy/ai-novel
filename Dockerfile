@@ -11,8 +11,7 @@ ENV NODE_ENV=production HOST=0.0.0.0 PORT=4317 DATA_DIR=/app/data
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-RUN mkdir -m 0700 /app/data && chown node:node /app/data
-USER node
+RUN mkdir -p /app/data
 VOLUME ["/app/data"]
 EXPOSE 4317
 HEALTHCHECK --interval=30s --timeout=3s CMD node -e "fetch('http://127.0.0.1:4317/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

@@ -1,5 +1,14 @@
 # 第一阶段验收记录
 
+## 2026-10-25：普通文件创建权限与维护者手动归属
+
+- 普通文件、数据库、密钥及目录创建不再指定 `0700/0600`，也不再根据父目录模式计算共享位或在创建后 chmod。统一使用系统创建默认值与进程 umask，默认 ACL 和 setgid 由文件系统处理；临时删除目录保留标准 mkdtemp 行为。Windows 临时访问探针同样不再指定文件模式，访问校验和符号链接拒绝继续保留。
+- 保留 `wx` 独占创建，旧数据库、密钥和原文内容不覆盖；调用方移除不再需要的父目录参数。没有新增依赖或运行 UID/GID 配置；Dockerfile 移除固定 node 用户、目录 chown 与私有模式，Compose 恢复 Docker 默认 capabilities。默认只挂载 ./data，继续只读根文件系统、临时 /tmp、禁止提权、进程／内存限制，不增加 Docker socket 挂载或 privileged。
+- 定向 `node node_modules/vitest/vitest.mjs run tests/private-files.test.ts tests/http-security.test.ts tests/store-security.test.ts tests/auth-security.test.ts tests/extensions.test.ts tests/project-deletion.test.ts --maxWorkers=2`：**6 文件、80 项通过，2 项 POSIX 实机测试在 Windows 跳过，共 82 项**。覆盖不同 umask、普通文件默认不向组／其他用户开放写入、不按父目录模式扩大写权限、系统 setgid 继承、旧模式与内容保留、不执行 chmod、原文／密钥拒绝覆盖，以及实际 Windows ACL 访问与服务启动。
+- `npm run typecheck`、`npm run build` 通过；构建保留既有第三方注释与包体提示。同步 README、部署、使用和项目状态，说明普通 rootful Docker 可访问手动 chown 后的数据，容器新文件归 root，已有旧模式须由维护者按需调整；Rootless／用户编号映射及额外挂载须按实际配置核对。
+- Windows 临时访问探针最后去掉显式模式后，HTTP 安全 **1 文件、16 项**另行重跑通过。Compose YAML 解析与差异检查确认仅移除 cap_drop，唯一宿主机绑定为 ./data，无 privileged、无 user 覆盖，原有只读与禁止提权等配置保留；Dockerfile 无 USER、chown 或私有目录模式。5 份修改文档的 UTF-8、代码围栏、68 个本地文件链接及其中 15 个锚点检查、`git diff --check` 通过。
+- 本次使用临时文件、隔离 SQLite、Windows ACL 及模拟 POSIX 文件系统；未操作私人资料或配置、调用真实供应商、运行完整程序／浏览器回归。当前无 Docker 命令，未验证真实 Linux 文件模式、跨 UID 访问、容器启动或服务器重启。
+
 ## 2026-10-25：数据目录授权保留与新文件共享继承
 
 - 基于当时最新 `7b5c6c3` 核对并修改，保留已有正文、插画、Gemini 输出修复及此前的 `./data` 绑定挂载。启动访问检查不再重写 POSIX 模式或 Windows ACL；数据库和加密密钥重开也不强制缩权，不修改文件所有者或容器运行账号。

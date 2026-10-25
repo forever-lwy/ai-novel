@@ -53,7 +53,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   const config = httpSecurityConfig();
   const dataDir = resolve(options.dataDir || process.env.DATA_DIR || './data');
   ensureDataDirectory(dataDir);
-  const uploadDir = join(dataDir, 'sources'); ensureDataDirectory(uploadDir, dataDir);
+  const uploadDir = join(dataDir, 'sources'); ensureDataDirectory(uploadDir);
   const store = new Store(dataDir);
   let settings: SettingsStore;
   try {
@@ -158,7 +158,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
           return path;
         });
         if (paths.length) {
-          ensureDataDirectory(deletionDir, dataDir); stagedDirectory = createDataTempDirectory(join(deletionDir, 'delete-'));
+          ensureDataDirectory(deletionDir); stagedDirectory = createDataTempDirectory(join(deletionDir, 'delete-'));
           for (const path of paths) {
             try { renameSync(path, join(stagedDirectory, basename(path))); }
             catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
