@@ -16,6 +16,12 @@ if (!existsSync(join(staticDir, 'index.html'))) throw new Error('请先 npm run 
 const dataDir = mkdtempSync(join(tmpdir(), 'ai-novel-browser-'));
 
 function fixtureReply(system, prompt) {
+  if (system.includes('独立的插画定位任务')) {
+    const scenes = JSON.parse(prompt.split('# 待定位的插画\n')[1].split('\n\n# 本章正文')[0]);
+    const paragraphs = [...prompt.matchAll(/^\[(\d+)\] (.+)$/gm)];
+    const paragraph = paragraphs.find(row => row[2].includes('旧钥匙')) || paragraphs[0];
+    return JSON.stringify({ placements: scenes.map(scene => ({ imageId: scene.id, paragraph: paragraph ? Number(paragraph[1]) : null })) });
+  }
   if (system.includes('# 章节标题修复')) {
     const input = JSON.parse(prompt);
     return JSON.stringify({ chapters: input.chapters.map(chapter => {
@@ -294,11 +300,11 @@ const modelServer = createServer(async (req, res) => {
     if (['e2e-images', 'e2e-images-parallel'].includes(body.model) && !body.messages?.some(message => message.role === 'tool')) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const sourceText = '林舟来到白石城，发现城门下藏着一把旧钥匙。';
-      // A CG can only cite prose already delivered before its native call.
+      // Scene descriptions do not need to quote prose or specify an insertion position.
       res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: sourceText + '\n\n' }, finish_reason: null }] })}\n\n`);
       const calls = [
         { index: 0, id: 'image-portrait', type: 'function', function: { name: 'generate_character_portrait', arguments: JSON.stringify({ name: '林舟', description: '一位穿着旅行斗篷的年轻旅人。' }) } },
-        ...(body.tools?.some(tool => tool.function?.name === 'generate_scene_cg') ? [{ index: 1, id: 'image-scene', type: 'function', function: { name: 'generate_scene_cg', arguments: JSON.stringify({ prompt: 'WRITER_DIRECT_CG：古城门下，林舟穿着旅行斗篷拾起石阶边的钥匙，侧面中景，晨光照亮石阶。', referenceNames: ['林舟'], sourceText }) } }] : []),
+        ...(body.tools?.some(tool => tool.function?.name === 'generate_scene_cg') ? [{ index: 1, id: 'image-scene', type: 'function', function: { name: 'generate_scene_cg', arguments: JSON.stringify({ prompt: 'WRITER_DIRECT_CG：古城门下，林舟穿着旅行斗篷拾起石阶边的钥匙，侧面中景，晨光照亮石阶。', referenceNames: ['林舟'], sceneDescription: '清晨的古城门前，林舟弯身拾起石阶旁的旧钥匙。' }) } }] : []),
       ];
       res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: calls }, finish_reason: 'tool_calls' }] })}\n\n`);
       res.end('data: [DONE]\n\n'); return;

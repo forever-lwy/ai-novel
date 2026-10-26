@@ -21,6 +21,7 @@ export const imageSchema = z.object({
   id: z.string().min(1), projectId: z.string().min(1), branchId: z.string().min(1), baseRevisionId: z.string().min(1),
   kind: z.enum(['portrait', 'entity', 'map', 'cg']), status: z.enum(['queued', 'running', 'completed', 'failed', 'paused', 'stale', 'cancelled']),
   title: z.string().max(500), prompt: z.string().max(100000), entityId: z.string().optional(), chapterId: z.string().optional(), sourceText: z.string().max(2000000).optional(),
+  sceneDescription: z.string().max(20000).optional(), placementStatus: z.enum(['pending', 'matched', 'unmatched', 'failed']).optional(), placementError: z.string().max(20000).optional(),
   selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), referenceImageId: z.string().optional(),
   material: z.string().max(100000).optional(), storyContext: z.string().max(2000000).optional(), instruction: z.string().max(20000).optional(),
   writingPrompt: z.string().max(20000).optional(), writingReferenceNames: z.array(z.string().max(300)).max(16).optional(), writingParameters: imageParametersSchema.optional(), promptSource: z.enum(['writing', 'optimizer']).optional(),
@@ -87,6 +88,13 @@ export class ImageStore {
   get(id: string): StoryImage | undefined { const row = this.db.prepare('SELECT data FROM image_assets WHERE id=?').get(id); return row ? JSON.parse(String(row.data)) : undefined; }
   /** Display links follow manual edits; the stored image keeps its original prose evidence. */
   project(image: StoryImage, state: StoryState): StoryImage {
+    const original = this.projectChapter(image, state);
+    const placement = state.imagePlacements?.[image.id];
+    if (!placement) return original;
+    const manual = this.projectChapter({ ...image, chapterId: placement.chapterId, selection: placement.selection, sourceText: placement.sourceText, placementStatus: placement.selection ? 'matched' : 'unmatched', placementError: undefined }, state);
+    return { ...manual, placementStatus: manual.selection ? 'matched' : 'unmatched', placementSource: 'manual', placementGroupKey: imageGroupKey(original) };
+  }
+  private projectChapter(image: StoryImage, state: StoryState): StoryImage {
     const chapter = state.chapters.find(chapter => includesChapterVersion(chapter, image.chapterId));
     if (!chapter || chapter.id === image.chapterId) return image;
     let selection = image.selection;

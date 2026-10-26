@@ -7,7 +7,7 @@ import { VisualOutputEditor } from './VisualOutputEditor';
 import { humanIssuePath, parseVisualOutput, unwrapVisualText } from './output-form';
 import { RequestDiagnostics } from './RequestDiagnostics';
 
-const stageNames: Record<OutputStage, string> = { planning: '历史规划', compression: '摘要压缩', writing: '正文生成', 'chapter-title': '章节自动命名', extraction: '资料提取' };
+const stageNames: Record<OutputStage, string> = { planning: '历史规划', compression: '摘要压缩', writing: '正文生成', 'chapter-title': '章节自动命名', extraction: '资料提取', 'image-placement': '匹配 CG 位置' };
 const outputStatusNames: Record<ModelOutputRecord['status'], string> = { received: '已收到', invalid: '校验未通过', applied: '已应用' };
 
 function downloadText(text: string, filename: string) {
@@ -54,7 +54,8 @@ export function ModelOutputsPanel({ job, branchName, onClose, onApplied, onDirty
   const mutationInFlight = useRef(false);
   editor.current = { draft, savedDraft, pasteMode, pastedText };
   const dirty = draft !== savedDraft || pastedText.length > 0;
-  const canImport = ['failed', 'paused'].includes(job.status);
+  const placement = job.kind === 'image-placement';
+  const canImport = !placement && ['failed', 'paused'].includes(job.status);
   const ownerPath = `/jobs/${job.id}/outputs`;
 
   useEffect(() => {
@@ -160,7 +161,7 @@ export function ModelOutputsPanel({ job, branchName, onClose, onApplied, onDirty
     finally { mutationInFlight.current = false; if (mounted.current) setBusy(false); }
   }
   async function apply() {
-    if (!detail || !detail.canApply || busy || loadingDetail) return;
+    if (placement || !detail || !detail.canApply || busy || loadingDetail) return;
     const outputId = detail.output.id;
     const text = draft;
     const baseRevisionId = detail.output.baseRevisionId;
@@ -191,7 +192,7 @@ export function ModelOutputsPanel({ job, branchName, onClose, onApplied, onDirty
 
   const output = detail?.output;
   const compression = job.purpose === 'compress-summary';
-  const parsed = useMemo(() => output && output.stage !== 'writing' ? parseVisualOutput(draft, output.stage, compression) : null, [draft, output?.stage, compression]);
+  const parsed = useMemo(() => output && output.stage !== 'writing' && output.stage !== 'image-placement' ? parseVisualOutput(draft, output.stage, compression) : null, [draft, output?.stage, compression]);
   const prose = useMemo(() => { if (output?.stage !== 'writing') return draft; try { return unwrapVisualText(draft).text; } catch { return draft; } }, [draft, output?.stage]);
   function showJson(help = '') {
     setEditorMode('json'); setFocusHelp(help); setFocusRequest(null);
@@ -202,17 +203,17 @@ export function ModelOutputsPanel({ job, branchName, onClose, onApplied, onDirty
     setEditorMode('form'); setFocusHelp(''); setFocusRequest({ path, nonce: Date.now() });
   }
 
-  return <Modal title="模型输出 / 手工修正" wide onClose={close}>
+  return <Modal title={placement ? 'CG 定位输出' : '模型输出 / 手工修正'} wide onClose={close}>
     <div className="output-panel">
       <div className="output-intro">
         <div><span className="eyebrow">MODEL RESPONSE ARCHIVE</span><p><strong>{compression ? '摘要压缩' : jobNames[job.kind]}</strong> · {branchName} · {dateText(job.createdAt)}</p></div>
         <span className="output-private"><EyeOff size={13} />私人创作记录</span>
       </div>
-      <p className="hint">原始响应和最初文本会分别保留。手工修正只在本地保存、校验并应用，不会重新调用模型。</p>
+      <p className="hint">{placement ? '这里保留独立 CG 定位请求和响应，只供查看。定位失败可关闭窗口后单独重试，不会重新生成正文或图片。' : '原始响应和最初文本会分别保留。手工修正只在本地保存、校验并应用，不会重新调用模型。'}</p>
       {error && <Notice error={error} onClose={() => setError('')} />}
       {message && <div className="notice success" role="status"><CheckCircle2 size={16} /><span>{message}</span></div>}
       <div className="output-toolbar row between wrap">
-        <button className="button secondary small" disabled={busy || !canImport} title={canImport ? '保存历史响应，不调用模型' : '任务暂停或失败后，可以粘贴历史响应'} onClick={startPaste}><ClipboardPaste size={15} />粘贴历史响应</button>
+        {!placement && <button className="button secondary small" disabled={busy || !canImport} title={canImport ? '保存历史响应，不调用模型' : '任务暂停或失败后，可以粘贴历史响应'} onClick={startPaste}><ClipboardPaste size={15} />粘贴历史响应</button>}
         <button className="text-button" disabled={busy || loadingList} onClick={() => void refresh()}><RefreshCw size={14} />刷新输出记录</button>
       </div>
       <div className="output-layout">
@@ -242,12 +243,13 @@ export function ModelOutputsPanel({ job, branchName, onClose, onApplied, onDirty
             <RequestDiagnostics key={output.id} capture={output} filename={`model-output-${output.id}-request`} />
             {output.incomplete && <div className="notice"><AlertCircle size={16} /><span>该次响应可能被截断。请核对完整结构与引文后再应用。</span></div>}
             {output.adjustments && output.adjustments.length > 0 && <details className="output-fold output-adjustments"><summary>系统已整理 {output.adjustments.length} 处 · 展开查看说明</summary><ul>{output.adjustments.map((adjustment, index) => <li key={index}><strong>{humanIssuePath(adjustment.path)}</strong><span>{adjustment.message}</span></li>)}</ul><p className="hint">这些是自动补全或对齐说明，不代表校验错误；原响应与最初文本仍保留。</p></details>}
-            <div className="output-editor-modes" role="group" aria-label="修正方式"><button className={editorMode === 'form' ? 'active' : ''} onClick={() => { setEditorMode('form'); setFocusHelp(''); setFocusRequest(null); }}><ListChecks size={15} />可视化修正</button><button className={editorMode === 'json' ? 'active' : ''} onClick={() => showJson()}><Code2 size={15} />高级 JSON</button>{draft !== savedDraft && <span className="draft-badge">未保存</span>}</div>
+            {!placement && <><div className="output-editor-modes" role="group" aria-label="修正方式"><button className={editorMode === 'form' ? 'active' : ''} onClick={() => { setEditorMode('form'); setFocusHelp(''); setFocusRequest(null); }}><ListChecks size={15} />可视化修正</button><button className={editorMode === 'json' ? 'active' : ''} onClick={() => showJson()}><Code2 size={15} />高级 JSON</button>{draft !== savedDraft && <span className="draft-badge">未保存</span>}</div>
             <div className="visual-help"><BookOpen size={18} /><div><strong>{compression ? '直接修正压缩摘要候选，保留原摘要的关键事实' : output.stage === 'chapter-title' ? '根据本章内容填写章节名' : output.stage === 'extraction' ? '按资料卡片修改，不需要编辑代码' : output.stage === 'planning' ? '按故事规划修改，不需要编辑代码' : '直接修改正文，再保存到故事中'}</strong><ol><li>有错误时，从“需要修正的地方”点击“去修改”。</li><li>{compression ? '压缩结果要比本次原摘要更短；修复后的候选仍需你另行确认才用于写作。' : output.stage === 'chapter-title' ? '题名不附加章节编号。正文已经保存，应用后可继续资料整理。' : output.stage === 'extraction' ? '引用有误时先选原文段落，再用整段或选中的文字填入。' : output.stage === 'planning' ? '核对章节预期规划和伏笔安排，保留原有设定。' : '核对下方正文并直接修改，原始响应不会被覆盖。'}</li><li>点击底部“保存并校验应用”。这一步不会调用模型。</li></ol>{output.issues.length > 0 && <p>问题标记来自上次校验；修改后再次保存，系统才会重新检查。</p>}</div></div>
+            </>}
             {output.issues.length > 0 ? <section className="output-issues" aria-label="具体校验问题">
               <h3><AlertCircle size={16} />需要修正的地方 <span>{output.issues.length}</span></h3>
               {output.issues.map((issue, index) => <article className="output-issue" key={`${issue.path}-${index}`}>
-                <div className="output-issue-heading"><strong>{humanIssuePath(issue.path)}</strong><button type="button" className="button secondary small" onClick={() => locateIssue(issue.path)}>去修改<ArrowRight size={13} /></button></div><p>{issue.message}</p><code>{issue.path || '输出内容'}</code>
+                <div className="output-issue-heading"><strong>{humanIssuePath(issue.path)}</strong>{!placement && <button type="button" className="button secondary small" onClick={() => locateIssue(issue.path)}>去修改<ArrowRight size={13} /></button>}</div><p>{issue.message}</p><code>{issue.path || '输出内容'}</code>
                 {(issue.quote !== undefined || issue.sourceText !== undefined) && <dl className="output-issue-comparison">
                   {issue.quote !== undefined && <><dt>模型提供的引文</dt><dd className="output-quote">{issue.quote || '（空引文）'}</dd></>}
                   {issue.sourceText !== undefined && <><dt>对应原文{issue.paragraph ? ` · 第 ${issue.paragraph} 段` : ''}</dt><dd className="output-source-text">{issue.sourceText || '（此段不存在或为空）'}</dd></>}
@@ -256,7 +258,7 @@ export function ModelOutputsPanel({ job, branchName, onClose, onApplied, onDirty
               </article>)}
             </section> : output.error && <Notice error={output.error} />}
             {focusHelp && <div className="notice"><AlertCircle size={14} /><span>{focusHelp}</span></div>}
-            {editorMode === 'json' ? <><div className="output-edit-heading row between wrap"><label htmlFor="model-output-draft">修正后的文本 / JSON</label></div><textarea id="model-output-draft" className="output-code-editor" spellCheck={false} rows={17} value={draft} onChange={event => setDraft(event.target.value)} readOnly={!detail.canApply} disabled={busy} /><p className="hint">高级模式保留完整结构。修改后可切回“可视化修正”；不会清空或丢弃当前内容。只改输出，不覆盖原响应。</p></> : output.stage === 'writing' ? <div className="visual-field"><label htmlFor="model-prose-draft">修正后的正文</label><textarea id="model-prose-draft" className="output-prose-editor" rows={17} value={prose} onChange={event => setDraft(event.target.value)} readOnly={!detail.canApply} disabled={busy} /></div> : parsed?.ok ? <VisualOutputEditor compression={compression} value={parsed.value} stage={output.stage} issues={output.issues} sourceParagraphs={detail.sourceParagraphs} disabled={busy || !detail.canApply} onChange={value => setDraft(JSON.stringify(value, null, 2))} focusRequest={focusRequest} onCannotFocus={() => showJson('这个问题没有对应的表单字段。请在高级 JSON 中检查标记的结构或内容。')} /> : <div className="visual-parse-help" role="status"><AlertCircle size={23} /><h3>内容仍在，但暂时无法显示成表单</h3><p>{parsed && !parsed.ok ? parsed.message : '请先检查模型输出的内容。'}</p><div className="row wrap"><button className="button primary small" onClick={() => showJson()}>去高级 JSON 修复</button><button className="button secondary small" disabled={busy || !canImport} onClick={startPaste}>粘贴另一份完整输出</button></div><p className="hint">没有替换为空白内容。你也可以先下载当前草稿，保留修改。</p></div>}
+            {placement ? <><p className="hint">CG 定位结果（只读）。匹配失败或没有合适位置时，图片仍保留在所属章节。</p><pre className="output-raw" aria-label="CG 定位结果">{draft || '没有返回定位内容。'}</pre></> : editorMode === 'json' ? <><div className="output-edit-heading row between wrap"><label htmlFor="model-output-draft">修正后的文本 / JSON</label></div><textarea id="model-output-draft" className="output-code-editor" spellCheck={false} rows={17} value={draft} onChange={event => setDraft(event.target.value)} readOnly={!detail.canApply} disabled={busy} /><p className="hint">高级模式保留完整结构。修改后可切回“可视化修正”；不会清空或丢弃当前内容。只改输出，不覆盖原响应。</p></> : output.stage === 'writing' ? <div className="visual-field"><label htmlFor="model-prose-draft">修正后的正文</label><textarea id="model-prose-draft" className="output-prose-editor" rows={17} value={prose} onChange={event => setDraft(event.target.value)} readOnly={!detail.canApply} disabled={busy} /></div> : parsed?.ok ? <VisualOutputEditor compression={compression} value={parsed.value} stage={output.stage} issues={output.issues} sourceParagraphs={detail.sourceParagraphs} disabled={busy || !detail.canApply} onChange={value => setDraft(JSON.stringify(value, null, 2))} focusRequest={focusRequest} onCannotFocus={() => showJson('这个问题没有对应的表单字段。请在高级 JSON 中检查标记的结构或内容。')} /> : <div className="visual-parse-help" role="status"><AlertCircle size={23} /><h3>内容仍在，但暂时无法显示成表单</h3><p>{parsed && !parsed.ok ? parsed.message : '请先检查模型输出的内容。'}</p><div className="row wrap"><button className="button primary small" onClick={() => showJson()}>去高级 JSON 修复</button><button className="button secondary small" disabled={busy || !canImport} onClick={startPaste}>粘贴另一份完整输出</button></div><p className="hint">没有替换为空白内容。你也可以先下载当前草稿，保留修改。</p></div>}
             <div className="row wrap between"><button className="text-button" onClick={() => downloadText(draft, `model-output-${output.id}-edited-draft.txt`)}><Download size={14} />下载当前输出草稿</button><button className="text-button" onClick={() => void copy(draft)}><Copy size={14} />复制当前文本</button></div>
             <details className="output-fold">
               <summary>查看原始响应（只读）</summary>
@@ -273,7 +275,7 @@ export function ModelOutputsPanel({ job, branchName, onClose, onApplied, onDirty
               <div className="output-source-paragraphs" aria-label="引用原文段落">{detail.sourceParagraphs.map(paragraph => <div className="output-source-paragraph" key={paragraph.paragraph}><span>第 {paragraph.paragraph} 段</span><p>{paragraph.text}</p><button className="icon-button" aria-label={`复制原文第 ${paragraph.paragraph} 段`} onClick={() => void copy(paragraph.text)}><Copy size={13} /></button></div>)}</div>
             </details>}
             {!detail.canApply && <div className="notice"><AlertCircle size={15} /><span>{detail.unavailableReason || '当前任务状态不允许应用这条输出。仍可查看、复制或下载留存的内容。'}</span></div>}
-            <div className="output-apply-footer"><p className="hint">仅在本地校验和应用，不调用模型。应用成功后不会自动继续运行后续步骤。</p><button className="button primary" disabled={busy || loadingDetail || !detail.canApply || !draft.trim()} onClick={() => void apply()}><Save size={15} />{busy ? '正在校验…' : '保存并校验应用'}</button></div>
+            {!placement && <div className="output-apply-footer"><p className="hint">仅在本地校验和应用，不调用模型。应用成功后不会自动继续运行后续步骤。</p><button className="button primary" disabled={busy || loadingDetail || !detail.canApply || !draft.trim()} onClick={() => void apply()}><Save size={15} />{busy ? '正在校验…' : '保存并校验应用'}</button></div>}
           </div>}
         </div>
       </div>

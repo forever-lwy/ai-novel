@@ -41,6 +41,33 @@ describe('story illustration controls', () => {
     expect(html).not.toContain('SECRET_IMAGE'); expect(html).not.toContain('重新绘制'); expect(html).not.toContain('AI 修改'); expect(html).not.toContain('生图详情'); expect(html).not.toContain('启用图片'); expect(html).not.toContain('删除图片');
   });
 
+  it('keeps generated CG usable when placement is pending or failed and displays its scene separately', () => {
+    const scene = image({ kind: 'cg', entityId: undefined, chapterId: 'chapter', sceneDescription: '雨中的城门前，林舟举起火把。', bindingStatus: 'bound', placementStatus: 'failed', placementError: '定位模型暂时不可用', active: true });
+    const details = render(createElement(ImageGenerationDetails, { image: scene }));
+    expect(details).toContain(scene.sceneDescription); expect(details).toContain('正文位置匹配失败'); expect(details).toContain('定位模型暂时不可用');
+    const html = render(createElement(StoryImageCards, { images: [scene], author: true, onGenerate: () => {}, onAction: () => {} }));
+    expect(html).toContain('src="/api/image.png"'); expect(html).toContain('停用图片'); expect(html).toContain('重新绘制'); expect(html).not.toContain('重试绘制');
+    expect(html).toContain('图片保留章节关联');
+    const pending = render(createElement(ImageGenerationDetails, { image: { ...scene, placementStatus: 'pending', placementError: undefined } }));
+    expect(pending).toContain('已关联章节，等待匹配正文位置'); expect(pending).not.toContain('匹配失败');
+    const reader = render(createElement(StoryImageCards, { images: [scene], author: false }));
+    expect(reader).not.toContain('定位模型暂时不可用'); expect(reader).not.toContain(scene.sceneDescription);
+  });
+
+  it('lets authors adjust saved CG placement without exposing the action on portraits, drafts or reader cards', () => {
+    const cg = image({ kind: 'cg', entityId: undefined, chapterId: 'chapter', placementSource: 'manual', placementStatus: 'matched', selection: { start: 3, end: 8 } });
+    const cards = render(createElement(StoryImageCards, { images: [cg], author: true, onPlacement: () => {} }));
+    expect(cards).toContain('修改绑定位置');
+    expect(render(createElement(ImageGenerationDetails, { image: cg }))).toContain('已手动绑定正文位置');
+    expect(render(createElement(ImageGenerationDetails, { image: { ...cg, selection: undefined, placementStatus: 'unmatched' } }))).toContain('已手动设为仅关联章节');
+    expect(render(createElement(StoryImageCards, { images: [{ ...cg, bindingStatus: 'pending' }], author: true, onPlacement: () => {} }))).not.toContain('修改绑定位置');
+    expect(render(createElement(StoryImageCards, { images: [image()], author: true, onPlacement: () => {} }))).not.toContain('修改绑定位置');
+    expect(render(createElement(StoryImageCards, { images: [cg], author: false, onPlacement: () => {} }))).not.toContain('修改绑定位置');
+    const gallery = render(createElement(ImageGallery, { images: [cg], entities: [], chapters: [], author: true, busy: false, onGenerate: () => {}, onAction: () => {}, onChapter: () => {}, onEntity: () => {}, onPlacement: () => {} }));
+    expect(gallery).toContain('修改绑定位置');
+    expect(render(createElement(ChapterImageCards, { images: [cg], entities: [], chapters: [], author: true, onPlacement: () => {} }))).toContain('修改绑定位置');
+  });
+
   it('authors can redraw or edit completed images, explicitly retry interrupted work, and cancel active requests', () => {
     const html = render(createElement(StoryImageCards, { images: [image(), image({ id: 'failed', status: 'failed', error: 'HTTP 500', url: undefined }), image({ id: 'paused', status: 'paused', url: undefined }), image({ id: 'active', status: 'running', url: undefined })], author: true, onGenerate: () => {}, onAction: () => {} }));
     expect(html).toContain('重新绘制'); expect(html).toContain('AI 修改'); expect(html).toContain('HTTP 500'); expect(html).toContain('重试绘制'); expect(html).toContain('恢复绘制'); expect(html).toContain('取消绘制');

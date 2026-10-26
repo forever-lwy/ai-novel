@@ -81,13 +81,40 @@ export class ImageService {
     const image: StoryImage = {
       id: randomUUID(), projectId: job.projectId, branchId: job.branchId, baseRevisionId: job.baseRevisionId,
       kind: request.kind, status: 'queued', title: request.kind === 'portrait' ? `${request.name} · 立绘` : `${String(job.payload.title || '正在创作的章节')} · CG`,
-      prompt: '', promptStatus: 'pending', material: request.kind === 'portrait' ? `人物：${request.name}\n写作 AI 已确认的外观与绘制要求：\n${request.description}` : `目标场景：\n${request.sourceText}\n写作 AI 的画面要求：\n${request.description}`,
-      instruction: '', sourceText: request.sourceText, automatic: true, visibility: 'secret', publicMaterial: false,
+      prompt: '', promptStatus: 'pending', material: request.kind === 'portrait' ? `人物：${request.name}\n写作 AI 已确认的外观与绘制要求：\n${request.description}` : `场景描述：\n${request.sceneDescription || request.description || request.sourceText || ''}\n写作 AI 的画面要求：\n${request.description}`,
+      instruction: '', automatic: true, visibility: 'secret', publicMaterial: false,
+      ...(request.kind === 'cg' ? { sceneDescription: request.sceneDescription || request.description || request.sourceText, placementStatus: 'pending' as const } : {}),
       writingJobId: job.id, bindingStatus: 'pending', pendingEntityName: request.name,
       ...(request.prompt ? { writingPrompt: request.prompt, writingReferenceNames: request.referenceNames, writingParameters: request.parameters } : {}),
       createdAt: stamp(), updatedAt: stamp(),
     };
     this.store.images.insert(image); this.queue.push(image.id); this.writingProgress(job.branchId); return image;
+  }
+  /** Associate paid assets with saved prose before the independent material extraction. */
+  bindWritingChapter(writingJobId: string, branchId: string, baseRevisionId: string, chapterId: string, checkpoint?: (revisionId: string) => void): { view: BranchView; images: StoryImage[] } | undefined {
+    this.available(branchId, baseRevisionId, false);
+    const chapter = this.store.chapter(branchId, chapterId);
+    const prepared = this.store.images.all(this.store.getBranch(branchId).projectId).filter(image => image.branchId === branchId && image.writingJobId === writingJobId && image.kind === 'cg' && image.bindingStatus === 'pending' && this.writingOwner(image));
+    for (const image of prepared) {
+      image.chapterId = chapterId; image.title = `${chapter.title} · CG`; image.bindingStatus = 'bound';
+      image.sceneDescription ??= image.sourceText || image.material || image.writingPrompt || '';
+      image.sourceText = undefined; image.selection = undefined; image.placementStatus = 'pending'; image.placementError = undefined;
+      if (this.legacyAssociationPixels({ ...image, bindingStatus: 'pending' })) { image.status = 'completed'; image.error = undefined; }
+    }
+    return prepared.length ? this.register(branchId, baseRevisionId, prepared, checkpoint) : undefined;
+  }
+  /** Position metadata never advances a story revision or blocks material extraction. */
+  applyScenePlacement(imageId: string, chapterId: string, selection?: { start: number; end: number }, error?: string): StoryImage {
+    const image = this.store.images.get(imageId);
+    if (!image || image.kind !== 'cg' || image.bindingStatus !== 'bound' || image.chapterId !== chapterId) throw new HttpError('插画关联已经变化，定位结果未应用', 409);
+    const state = this.store.state(image.branchId);
+    if (state.imagePlacements?.[image.id]) return this.store.images.project(image, state);
+    if (!state.chapters.some(chapter => chapter.id === chapterId) || !state.imageIds?.includes(image.id)) throw new HttpError('章节已修改或插画已移除，定位结果未应用', 409);
+    const chapter = this.store.chapter(image.branchId, chapterId);
+    if (selection && (!Number.isInteger(selection.start) || !Number.isInteger(selection.end) || selection.start < 0 || selection.end <= selection.start || selection.end > chapter.text.length || !chapter.text.slice(selection.start, selection.end).trim())) throw new HttpError('插画定位的正文范围无效');
+    image.selection = selection; image.sourceText = selection ? chapter.text.slice(selection.start, selection.end) : undefined;
+    image.placementStatus = selection ? 'matched' : error ? 'failed' : 'unmatched'; image.placementError = error?.slice(0, 20000);
+    this.save(image); return image;
   }
   private configuration(projectId: string, optional = false) {
     const settings = this.getSettings(projectId); const config = normalizeImageSettings(settings.imageSettings);
@@ -100,7 +127,7 @@ export class ImageService {
     if (this.closed) throw new HttpError('生图服务已停止', 409);
     const branch = this.store.assertVersion(branchId, base);
     if (this.deletingProjects.has(branch.projectId)) throw new HttpError('作品正在删除，请稍候', 409);
-    if (checkJobs && this.store.db.prepare("SELECT 1 FROM jobs WHERE branch_id=? AND status IN ('queued','running','paused') LIMIT 1").get(branchId)) throw new HttpError('请先完成或取消本故事线的文字任务，再操作图片', 409);
+    if (checkJobs && this.store.db.prepare("SELECT 1 FROM jobs WHERE branch_id=? AND status IN ('queued','running','paused') AND COALESCE(json_extract(data,'$.kind'),'')<>'image-placement' LIMIT 1").get(branchId)) throw new HttpError('请先完成或取消本故事线的文字任务，再操作图片', 409);
     return branch;
   }
   private find(branchId: string, imageId: string, author: boolean, chapterId?: string): StoryImage {
@@ -125,7 +152,7 @@ export class ImageService {
     const referenceCharacters = image.referenceCharacters?.map(character => { const current = imageEntity(state, character.entityId); return { ...character, entityId: current?.id ?? character.entityId, name: current?.name ?? character.name }; });
     const active = this.store.images.active(image, state);
     const previewUrl = url ? `${url}&size=preview` : undefined;
-    return author ? { ...image, entityId, referenceCharacters, active, url, previewUrl } : { ...image, entityId, active, prompt: '', sourceText: undefined, sourceSelection: undefined, selection: undefined, referenceImageId: undefined, selectedReferenceImageIds: undefined, error: undefined, material: undefined, storyContext: undefined, writingJobId: undefined, bindingStatus: undefined, pendingEntityName: undefined, dependencyImageIds: undefined, writingPrompt: undefined, writingReferenceNames: undefined, writingParameters: undefined, promptSource: undefined, instruction: undefined, materialEntityIds: undefined, materialFactIds: undefined, materialRelationIds: undefined, publicMaterial: undefined, referenceImageIds: undefined, referenceEntityIds: undefined, referenceCharacters: undefined, generationParameters: undefined, promptStatus: undefined, optimizedAt: undefined, url, previewUrl };
+    return author ? { ...image, entityId, referenceCharacters, active, url, previewUrl } : { ...image, entityId, active, prompt: '', sceneDescription: undefined, placementStatus: undefined, placementError: undefined, placementSource: undefined, placementGroupKey: undefined, sourceText: undefined, sourceSelection: undefined, selection: undefined, referenceImageId: undefined, selectedReferenceImageIds: undefined, error: undefined, material: undefined, storyContext: undefined, writingJobId: undefined, bindingStatus: undefined, pendingEntityName: undefined, dependencyImageIds: undefined, writingPrompt: undefined, writingReferenceNames: undefined, writingParameters: undefined, promptSource: undefined, instruction: undefined, materialEntityIds: undefined, materialFactIds: undefined, materialRelationIds: undefined, publicMaterial: undefined, referenceImageIds: undefined, referenceEntityIds: undefined, referenceCharacters: undefined, generationParameters: undefined, promptStatus: undefined, optimizedAt: undefined, url, previewUrl };
   }
   list(branchId: string, author = false, chapterId?: string): StoryImage[] {
     const branch = this.store.getBranch(branchId); const state = author ? this.store.state(branchId) : this.store.readingState(branchId, chapterId);
@@ -155,6 +182,23 @@ export class ImageService {
     }, `${active ? '启用' : '停用'}图片：${image.title}`); this.stopInvalidRuns(branchId); this.pump();
     return { view, images: this.list(branchId, true) };
   }
+  /** Author-confirmed positions belong to this story revision, not the shared pixels. */
+  setPlacement(branchId: string, imageId: string, input: { baseRevisionId: string; chapterId: string; selection?: { start: number; end: number } }): { view: BranchView; images: StoryImage[] } {
+    this.available(branchId, input.baseRevisionId);
+    const image = this.find(branchId, imageId, true); const current = this.store.state(branchId);
+    if (image.kind !== 'cg') throw new HttpError('只有 CG 可以修改正文绑定位置');
+    if (image.bindingStatus === 'pending') throw new HttpError('请先保存正文并关联章节，再修改绑定位置', 409);
+    const projected = this.store.images.project(image, current);
+    if (projected.chapterId !== input.chapterId || !current.chapters.some(chapter => chapter.id === input.chapterId)) throw new HttpError('图片关联章节已变化，请重新打开绑定位置', 409);
+    const chapter = this.store.chapter(branchId, input.chapterId); const selection = input.selection;
+    if (selection && (!Number.isInteger(selection.start) || !Number.isInteger(selection.end) || selection.start < 0 || selection.end <= selection.start || selection.end > chapter.text.length || !chapter.text.slice(selection.start, selection.end).trim())) throw new HttpError('请选择有效的正文位置');
+    const placement = { chapterId: input.chapterId, ...(selection ? { selection: { ...selection }, sourceText: chapter.text.slice(selection.start, selection.end) } : {}) };
+    const view = this.store.updateImageReferences(branchId, input.baseRevisionId, input.chapterId, state => {
+      if (!state.imageIds?.includes(image.id)) throw new HttpError('图片已从当前故事线移除，请刷新后重试', 409);
+      (state.imagePlacements ??= {})[image.id] = structuredClone(placement);
+    }, `手动修改 CG 绑定位置：${image.title}`);
+    return { view, images: this.list(branchId, true) };
+  }
   delete(branchId: string, imageId: string, baseRevisionId: string): { view: BranchView; images: StoryImage[] } {
     const draft = this.find(branchId, imageId, true);
     if (draft.bindingStatus === 'pending') {
@@ -166,6 +210,7 @@ export class ImageService {
     this.available(branchId, baseRevisionId); const image = this.find(branchId, imageId, true);
     const view = this.store.updateImageReferences(branchId, baseRevisionId, this.store.images.project(image, this.store.state(branchId)).chapterId, state => {
       this.store.images.hydrate(state); state.imageIds = (state.imageIds ?? []).filter(id => id !== imageId); state.activeImageIds = state.activeImageIds!.filter(id => id !== imageId);
+      if (state.imagePlacements) delete state.imagePlacements[imageId];
     }, `删除当前故事线图片：${image.title}`); this.stopInvalidRuns(branchId); this.pump();
     return { view, images: this.list(branchId, true) };
   }
@@ -179,6 +224,7 @@ export class ImageService {
     const { config } = this.configuration(this.store.getBranch(branchId).projectId)!; const branch = this.store.getBranch(branchId);
     if (input.chapterId && !state.chapters.some(chapter => chapter.id === input.chapterId)) throw new HttpError('用于生图的章节不属于当前故事线');
     if (input.selection && input.kind !== 'cg') throw new HttpError('正文选区只能用于生成 CG');
+    if (input.sceneDescription && input.kind !== 'cg') throw new HttpError('场景描述只能用于生成 CG');
     if (input.entityId && (input.kind === 'cg' || input.kind === 'map')) throw new HttpError('CG 和地图不能绑定单个资料实体');
     let title = '', material = '', visibility: StoryImage['visibility'] = input.instruction?.trim() || extraDescription.trim() ? 'secret' : 'public';
     const publicState = visibility === 'public' ? this.store.readingState(branchId, input.chapterId) : undefined;
@@ -211,7 +257,7 @@ export class ImageService {
         sourceText = chapter.text.slice(start, end);
       }
       if (!sourceText.trim()) throw new HttpError('用于生成 CG 的剧情不能为空');
-      title = `${chapter.title} · CG`; material = `章节：${chapter.title}\n剧情：\n${sourceText}`;
+      title = `${chapter.title} · CG`; material = `章节：${chapter.title}\n${input.sceneDescription?.trim() ? `本次绘制的场景：\n${input.sceneDescription.trim()}\n章节正文仅用于理解背景与保持一致。\n` : ''}剧情：\n${sourceText}`;
     }
     if (input.referenceImageId) {
       if (!input.instruction?.trim()) throw new HttpError('请填写对参考图片的修改要求');
@@ -238,7 +284,9 @@ export class ImageService {
     const task = input.kind === 'portrait' ? '生成人物全身立绘，突出人物外貌、服装与气质。' : input.kind === 'map' ? '依据地点与地理关系生成地图，不要擅自增加未确认的城市或地点。' : input.kind === 'cg' ? '将已发生的剧情绘制为场景 CG，保持人物与环境一致。' : '依据资料生成对应实体的插画。';
     const description = [task, material, extraDescription && `写作模型对画面的要求：${extraDescription}`].filter(Boolean).join('\n\n');
     if (description.length > 100000) throw new HttpError('生图素材过长，请选择较短的剧情或精简资料');
-    return { id: randomUUID(), projectId: branch.projectId, branchId, baseRevisionId: input.baseRevisionId, kind: input.kind, status: 'queued', title, prompt: '', material: description, instruction: input.instruction?.trim() || '', promptStatus: 'pending', entityId: input.entityId, chapterId: input.chapterId, selection: input.selection, sourceText, referenceImageId: input.referenceImageId, selectedReferenceImageIds: input.selectedReferenceImageIds?.slice(), automatic, visibility, publicMaterial: visibility === 'public', materialEntityIds, materialFactIds, materialRelationIds, createdAt: stamp(), updatedAt: stamp() };
+    const previousScene = input.sceneDescription ? (state.imageIds ?? []).flatMap(id => this.store.images.get(id) ?? []).find(image => image.kind === 'cg' && image.chapterId === input.chapterId && image.sceneDescription === input.sceneDescription) : undefined;
+    const placementStatus = input.selection ? 'matched' as const : previousScene?.placementStatus === 'failed' ? 'failed' as const : 'unmatched' as const;
+    return { id: randomUUID(), projectId: branch.projectId, branchId, baseRevisionId: input.baseRevisionId, kind: input.kind, status: 'queued', title, prompt: '', material: description, instruction: input.instruction?.trim() || '', promptStatus: 'pending', entityId: input.entityId, chapterId: input.chapterId, selection: input.selection, sourceText: input.sceneDescription && !input.selection ? undefined : sourceText, ...(input.sceneDescription ? { sceneDescription: input.sceneDescription, placementStatus, placementError: placementStatus === 'failed' ? previousScene?.placementError : undefined } : {}), referenceImageId: input.referenceImageId, selectedReferenceImageIds: input.selectedReferenceImageIds?.slice(), automatic, visibility, publicMaterial: visibility === 'public', materialEntityIds, materialFactIds, materialRelationIds, createdAt: stamp(), updatedAt: stamp() };
   }
   private register(branchId: string, baseRevisionId: string, prepared: StoryImage[], checkpoint?: (revisionId: string) => void, retryOf?: string): { view: BranchView; images: StoryImage[] } {
     const registerInto = (state: StoryState) => {
@@ -262,6 +310,13 @@ export class ImageService {
         image.referenceCharacters = image.referenceImageIds.flatMap(id => { const reference = this.store.images.get(id); const entity = reference?.entityId ? imageEntity(this.store.revisionState(revisionId), reference.entityId) : undefined; return reference?.kind === 'portrait' && entity ? [{ entityId: entity.id, imageId: id, name: entity.name }] : []; });
         image.referenceEntityIds = image.referenceCharacters.map(character => character.entityId); this.save(image);
       }
+      // CGs may already belong to the chapter while their draft portraits are
+      // only now receiving canonical entity identities after extraction.
+      const writers = new Set(prepared.map(image => image.writingJobId).filter(Boolean));
+      for (const image of this.store.images.all(this.store.getBranch(branchId).projectId)) if (image.branchId === branchId && image.kind === 'cg' && image.bindingStatus === 'bound' && writers.has(image.writingJobId) && image.referenceImageIds?.length) {
+        image.referenceCharacters = image.referenceImageIds.flatMap(id => { const reference = this.store.images.get(id); const entity = reference?.entityId ? imageEntity(this.store.revisionState(revisionId), reference.entityId) : undefined; return reference?.kind === 'portrait' && entity ? [{ entityId: entity.id, imageId: id, name: entity.name }] : []; });
+        image.referenceEntityIds = image.referenceCharacters.map(character => character.entityId); this.save(image);
+      }
       checkpoint?.(revisionId);
     });
     this.queue.push(...prepared.filter(image => image.status === 'queued' && !this.queue.includes(image.id) && !this.runs.has(image.id)).map(image => image.id)); queueMicrotask(() => this.pump());
@@ -282,7 +337,8 @@ export class ImageService {
     const sameReferences = previous.selectedReferenceImageIds !== undefined || !(config.useCharacterReferences === false && previous.referenceCharacters?.length);
     let sameDimensions = true;
     if (previous.generationParameters) { try { const selected = resolveImageParameters(config, previous.generationParameters); sameDimensions = Object.entries(selected).every(([key, value]) => previous.generationParameters?.[key as keyof typeof selected] === value); } catch { sameDimensions = false; } }
-    const image: StoryImage = this.current(previous, branchId) && sameModel && sameReferences && sameDimensions ? { ...previous, id: randomUUID(), branchId, baseRevisionId, status: 'queued', automatic: false, createdAt: stamp(), updatedAt: stamp(), error: undefined, mimeType: undefined, url: undefined } : this.prepare(branchId, { baseRevisionId, kind: previous.kind, entityId: previous.entityId ? imageEntity(this.store.state(branchId), previous.entityId)?.id : undefined, chapterId: target.chapterId, selection: target.selection, instruction: previous.instruction, referenceImageId: previous.referenceImageId, selectedReferenceImageIds: previous.selectedReferenceImageIds }, false, this.store.state(branchId));
+    const image: StoryImage = this.current(previous, branchId) && sameModel && sameReferences && sameDimensions ? { ...previous, id: randomUUID(), branchId, baseRevisionId, status: 'queued', automatic: false, createdAt: stamp(), updatedAt: stamp(), error: undefined, mimeType: undefined, url: undefined } : this.prepare(branchId, { baseRevisionId, kind: previous.kind, entityId: previous.entityId ? imageEntity(this.store.state(branchId), previous.entityId)?.id : undefined, chapterId: target.chapterId, selection: target.selection, sceneDescription: previous.sceneDescription, instruction: previous.instruction, referenceImageId: previous.referenceImageId, selectedReferenceImageIds: previous.selectedReferenceImageIds }, false, this.store.state(branchId));
+    if (image.placementStatus === 'pending') image.placementStatus = 'unmatched';
     if (image.promptStatus !== 'completed') {
       image.dependencyImageIds = undefined;
       if (this.sameStoryMaterial(previous, branchId) && previous.material !== undefined) { image.material = previous.material; image.instruction = previous.instruction ?? image.instruction; }
@@ -434,7 +490,7 @@ export class ImageService {
     });
     const state = this.store.state(branchId);
     if (!this.store.images.visible(image, state, true)) return false;
-    if (imageReferences(image).some(id => { const reference = this.store.images.get(id); return !reference || !this.store.images.active(reference, state); })) return false;
+    if (imageReferences(image).some(id => { const reference = this.store.images.get(id); return !reference || !(this.store.images.active(reference, state) || image.writingJobId && reference.writingJobId === image.writingJobId && reference.bindingStatus === 'pending' && this.pendingCurrent(reference)); })) return false;
     return this.sameStoryMaterial(image, branchId);
   }
   private sameStoryMaterial(image: StoryImage, branchId = image.branchId) {
@@ -444,17 +500,20 @@ export class ImageService {
     // Compare its saved chapter boundary, so edits/rollback still invalidate it.
     if (image.writingJobId && image.bindingStatus === 'bound' && image.chapterId) {
       if (!state.chapters.some(chapter => chapter.id === image.chapterId)) return false;
+      // A writing-provided scene is grounded in immutable saved prose. Naming
+      // and canon extraction can advance independently while its pixels draw.
+      if (image.kind === 'cg' && image.sceneDescription) return Boolean(state.imageIds?.includes(image.id));
       state = this.store.readingState(branchId, image.chapterId, false);
     }
     // Registering another image may advance the revision without changing prose or canon.
     const starting = this.store.revisionState(image.baseRevisionId);
-    const { imageIds: ignoredStart, activeImageIds: ignoredStartActive, ...startMaterial } = starting; const { imageIds: ignoredCurrent, activeImageIds: ignoredCurrentActive, ...currentMaterial } = state;
+    const { imageIds: ignoredStart, activeImageIds: ignoredStartActive, imagePlacements: ignoredStartPlacements, ...startMaterial } = starting; const { imageIds: ignoredCurrent, activeImageIds: ignoredCurrentActive, imagePlacements: ignoredCurrentPlacements, ...currentMaterial } = state;
     return JSON.stringify(startMaterial) === JSON.stringify(currentMaterial);
   }
   private refreshBinding(image: StoryImage) {
     const stored = this.store.images.get(image.id);
-    if (stored && image.bindingStatus === 'pending' && stored.bindingStatus !== 'pending') {
-      for (const key of ['baseRevisionId', 'bindingStatus', 'chapterId', 'entityId', 'selection', 'title', 'referenceCharacters', 'referenceEntityIds'] as const) Object.assign(image, { [key]: stored[key] });
+    if (stored && (image.bindingStatus === 'pending' && stored.bindingStatus !== 'pending' || stored.kind === 'cg' && stored.sceneDescription && stored.bindingStatus === 'bound')) {
+      for (const key of ['baseRevisionId', 'bindingStatus', 'chapterId', 'entityId', 'sourceText', 'selection', 'sceneDescription', 'placementStatus', 'placementError', 'title', 'referenceCharacters', 'referenceEntityIds'] as const) Object.assign(image, { [key]: stored[key] });
     }
   }
   /** Resolve only references actually used by this scene, before reserving a worker. */

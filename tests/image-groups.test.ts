@@ -32,6 +32,22 @@ describe('gallery groups', () => {
     expect(imageGroupKey(image('merged'), 'canonical')).toBe('entity:canonical');
   });
 
+  it('keeps chapter-bound scenes separate before placement and retains scene descriptions for discovery', () => {
+    const cg = { kind: 'cg' as const, entityId: undefined, chapterId: chapter.id, placementStatus: 'pending' as const };
+    const first = image('scene', { ...cg, sceneDescription: '林舟在雨中推开城门。' });
+    const redraw = image('scene-redraw', { ...cg, sceneDescription: first.sceneDescription, referenceImageId: first.id });
+    const other = image('other-scene', { ...cg, sceneDescription: '旅人在驿站围炉夜谈。', placementStatus: 'unmatched' });
+    const whole = image('whole', { ...cg, placementStatus: undefined });
+    const groups = groupStoryImages([first, redraw, other, whole], [], [chapter]);
+    expect(groups).toHaveLength(3);
+    expect(groups.find(group => group.id === imageGroupKey(first))).toMatchObject({ title: '城门初遇 · 场景 CG', excerpt: first.sceneDescription, images: [first, redraw] });
+    expect(groups.find(group => group.id === imageGroupKey(other))?.searchText).toContain('驿站围炉夜谈');
+    const matched = { ...first, selection: { start: 10, end: 20 }, placementStatus: 'matched' as const };
+    expect(imageGroupKey(matched)).toBe(imageGroupKey(first));
+    expect(imageGroupKey({ ...other, selection: matched.selection, placementStatus: 'matched' })).not.toBe(imageGroupKey(matched));
+    expect(imageGroupKey(whole)).toBe('cg:chapter:full');
+  });
+
   it('falls back to the newest successful version without enabling it, and exposes unfinished-only groups', () => {
     const groups = groupStoryImages([image('old'), image('new', { createdAt: '2026-10-21T02:00:00Z' }), image('failed', { createdAt: '2026-10-21T03:00:00Z', status: 'failed', url: undefined }), image('waiting', { entityId: 'waiting-person', status: 'queued', url: undefined })], [], []);
     expect(groups[0].cover.id).toBe('new'); expect(groups[0].cover.active).toBe(false); expect(groups[0].images).toHaveLength(3);

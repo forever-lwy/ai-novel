@@ -424,6 +424,6 @@ export function ImageSettingsEditor({ settings, onChange }: { settings: Settings
     <p className="hint image-reference-capability">{!capabilities.knownModel ? '自定义型号按所选图片协议发送请求，请使用支持对应生图与参考图能力的图片模型。' : capabilities.referenceMode === 'multiple' ? `当前型号支持多张参考图；本工作台最多使用 ${capabilities.maxReferences} 张，其中人物参考最多 ${capabilities.maxCharacterReferences} 人。` : capabilities.referenceMode === 'single' ? '当前型号支持一张参考图；修改已有 CG 时，这个位置用于原图。' : '当前型号不提供人物参考图，CG 根据人物资料绘制。'}AI 从对应场景选择人物，尚未完成的立绘不会作为参考图。</p>
     <label className="checkbox"><input type="checkbox" checked={image.autoPortrait} onChange={event => patch({ autoPortrait: event.target.checked })} />新人物自动生成立绘</label>
     <label className="checkbox"><input type="checkbox" checked={image.autoCG} onChange={event => patch({ autoCG: event.target.checked })} />场景变化或大场面时自动生成 CG</label>
-    <p className="hint">插画与正文同时生成，仅等待实际需要的参考图；正文和资料保存后自动关联原图片。写作页面和图册可查看进度、提示词及人物参考，失败和中断由作者手动重试。</p>
+    <p className="hint">插画与正文同时生成，仅等待实际需要的参考图。CG 附带场景描述，先关联本章，正文保存后由资料提取模型单独匹配正文位置，与资料整理分别进行；人物立绘在资料确认后关联人物。写作页面和图册可查看进度，失败和中断由作者手动重试。</p>
   </>;
 }

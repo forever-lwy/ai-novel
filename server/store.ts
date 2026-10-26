@@ -74,8 +74,8 @@ export const rpgChoiceSchema = z.object({ question: z.string().trim().min(1).max
 const savedRpgChoiceSchema = rpgChoiceSchema.extend({ id: z.string().min(1) });
 const rpgSessionSchema = rpgSetupSchema.extend({ character: rpgSetupSchema.shape.character.extend({ name: z.string(), description: z.string() }), nextChoice: savedRpgChoiceSchema.extend({ jobId: z.string().min(1), chapterId: z.string().min(1), maxWords: z.number().int().min(100).max(20000), instruction: z.string().max(30000), followingChoices: z.array(savedRpgChoiceSchema).max(95).optional() }).optional() });
 const sourceReferenceSchema = z.object({ branchId: z.string().min(1), revisionId: z.string().min(1), sourceIds: z.array(z.string().min(1)).refine(values => new Set(values).size === values.length).optional() }).strict();
-const stateSchema = z.object({ sourceReference: sourceReferenceSchema.optional(), rpg: rpgSessionSchema.optional(), activeImageIds: z.array(z.string().min(1)).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
-const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
+const stateSchema = z.object({ sourceReference: sourceReferenceSchema.optional(), rpg: rpgSessionSchema.optional(), activeImageIds: z.array(z.string().min(1)).optional(), imagePlacements: z.record(z.string().min(1), z.object({ chapterId: z.string().min(1), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).strict().optional(), sourceText: z.string().max(2000000).optional() }).strict()).optional(), imageIds: z.array(z.string().min(1)).optional(), chapters: z.array(refSchema), entities: z.array(entitySchema), relations: z.array(z.object({ id: z.string(), fromId: z.string(), toId: z.string(), label: z.string(), visibility: z.enum(['public', 'secret']), citation: citationSchema.optional() })), foreshadows: z.array(z.object({ id: z.string(), title: z.string(), detail: z.string(), status: z.enum(['planned', 'planted', 'resolved', 'abandoned']), plantedChapterId: z.string().optional(), resolvedChapterId: z.string().optional(), dueChapter: z.number().int().positive().optional(), revealCondition: z.string(), relatedEntityIds: z.array(z.string()) })), outline: z.object({ coarse: z.string().optional(), worldview: z.string().optional(), locked: z.string(), fine: z.array(z.object({ chapter: z.number().int().positive(), title: z.string(), goal: z.string() })), summaryCompression: z.object({ text: z.string(), chapterIds: z.array(z.string()) }).optional() }) });
+const jobSchema = z.object({ id: z.string().min(1), projectId: z.string(), branchId: z.string(), kind: z.enum(['import', 'extract', 'generate', 'plan', 'image-placement']), status: z.enum(['queued', 'running', 'paused', 'failed', 'completed', 'cancelled', 'stale']), baseRevisionId: z.string(), progress: z.number().int().nonnegative(), total: z.number().int().nonnegative(), message: z.string(), error: z.string().optional(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), createdAt: z.string(), updatedAt: z.string(), payload: z.record(z.string(), z.unknown()) });
 const writingActivitySchema = z.object({ id: z.string().min(1), kind: z.enum(['thinking', 'tool']), text: z.string().optional(), thinkingSource: z.enum(['native', 'preset']).optional(), thinkingTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), name: z.string().optional(), arguments: z.record(z.string(), z.unknown()).optional(), result: z.unknown().optional(), status: z.enum(['running', 'completed', 'failed']), error: z.string().optional(), proseOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() });
 const backupSchema = z.object({ projectSettings: z.unknown().optional(), images: z.array(imageBackupSchema).default([]), version: z.literal(1), project: z.object({ id: z.string().min(1), title: z.string(), premise: z.string(), mode: z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']), createdAt: z.string(), updatedAt: z.string(), mainBranchId: z.string().min(1) }), branches: z.array(z.object({ id: z.string(), projectId: z.string(), name: z.string(), revisionId: z.string(), parentBranchId: z.string().optional(), forkChapterId: z.string().optional(), forkChapterTitle: z.string().max(500).optional(), createdAt: z.string(), deletedAt: z.string().datetime().optional() })).min(1), revisions: z.array(z.object({ revision: z.object({ id: z.string(), branchId: z.string(), parentId: z.string().optional(), restoredFromRevisionId: z.string().optional(), label: z.string(), createdAt: z.string(), chapterCount: z.number().int().nonnegative() }), state: z.unknown().optional(), snapshot: z.string().optional() }).refine(r => Boolean(r.state) !== Boolean(r.snapshot))).min(1).max(RESTORE_MAX_REVISIONS), chapters: z.array(refSchema.extend({ text: z.string() })), jobs: z.array(jobSchema).default([]), importChapters: z.array(z.object({ jobId: z.string(), position: z.number().int().nonnegative(), title: z.string(), text: z.string() })).default([]), outputs: z.array(modelOutputSchema).default([]), writingDrafts: z.array(z.object({ jobId: z.string(), text: z.string() })).default([]), writingActivities: z.array(z.object({ jobId: z.string(), activities: z.array(writingActivitySchema) })).default([]) });
 
@@ -255,7 +255,7 @@ export class Store {
     try {
       const branch = this.assertVersion(branchId, base); const project = this.getProject(branch.projectId);
       if (project.mainBranchId === branchId) throw new HttpError('主线不能删除；如需删除整个作品，请返回书架操作', 409);
-      if (this.db.prepare("SELECT 1 FROM jobs WHERE branch_id=? AND status IN ('queued','running','paused') LIMIT 1").get(branchId) || this.images.all(branch.projectId).some(image => image.branchId === branchId && ['queued', 'running', 'paused'].includes(image.status))) throw new HttpError('请先完成或取消本分支的文字与生图任务，再删除分支', 409);
+      if (this.db.prepare("SELECT 1 FROM jobs WHERE branch_id=? AND status IN ('queued','running','paused') AND COALESCE(json_extract(data,'$.kind'),'')!='image-placement' LIMIT 1").get(branchId) || this.images.all(branch.projectId).some(image => image.branchId === branchId && ['queued', 'running', 'paused'].includes(image.status))) throw new HttpError('请先完成或取消本分支的文字与生图任务，再删除分支', 409);
       // Keep immutable ancestors and references used by surviving story lines and backups.
       branch.deletedAt = now(); this.db.prepare('UPDATE branches SET data=? WHERE id=?').run(JSON.stringify(branch), branchId);
       project.updatedAt = now(); this.db.prepare('UPDATE projects SET data=? WHERE id=?').run(JSON.stringify(project), project.id);
@@ -383,6 +383,7 @@ export class Store {
       // Navigation still includes later prose, but its materials never enter this reader snapshot.
       state.chapters = this.state(branchId).chapters.map(c => ({ ...c, summary: '' }));
       state.imageIds = visibleImageIds;
+      delete state.imagePlacements;
       state.activeImageIds = visibleImageIds;
     }
     return { branch, state, revisions: author ? this.history(branchId) : [], ...(!author && readingChapterId ? { readingChapterId } : {}) };
@@ -483,6 +484,7 @@ export class Store {
         state.chapters = state.chapters.filter(chapter => chapter.id !== chapterId);
         state.imageIds = state.imageIds?.filter(id => !includesChapterVersion(removedChapter, this.images.get(id)?.chapterId));
         state.activeImageIds = state.activeImageIds?.filter(id => state.imageIds?.includes(id));
+        if (state.imagePlacements) state.imagePlacements = Object.fromEntries(Object.entries(state.imagePlacements).filter(([id]) => state.imageIds?.includes(id)));
         state.outline.fine = state.outline.fine.map(plan => ({ ...plan, chapter: plan.chapter > index + 1 ? plan.chapter - 1 : plan.chapter })).filter(plan => plan.chapter > state.chapters.length);
         for (const clue of state.foreshadows) if (clue.dueChapter && clue.dueChapter > index + 1) clue.dueChapter--;
         if (state.rpg?.nextChoice?.chapterId === chapterId) delete state.rpg.nextChoice;
@@ -883,6 +885,7 @@ export class Store {
     const remap = (value: unknown, key = ''): unknown => {
       // Process payloads are historical observations, like raw model responses. Only their owning job is remapped.
       if (key === 'rpgContinuation' || key === 'projectSettings') return clone(value);
+      if (key === 'imagePlacements' && value && typeof value === 'object' && !Array.isArray(value)) return Object.fromEntries(Object.entries(value).map(([imageId, placement]) => [map.get(imageId) ?? imageId, remap(placement)]));
       if (key === 'sourceIds' && Array.isArray(value)) return value.map(sourceId => {
         if (typeof sourceId !== 'string' || !Object.hasOwn(sourceIdMap, sourceId) || typeof sourceIdMap[sourceId] !== 'string' || !sourceIdMap[sourceId]) throw new HttpError('备份原作参考缺少原文件映射，请使用包含原文件的完整作品备份');
         return sourceIdMap[sourceId];
@@ -919,7 +922,7 @@ export class Store {
       if (imageRevision.revision.branchId !== image.branchId || !draft && !baseState.imageIds?.includes(image.id) || image.entityId && !baseState.entities.some(entity => entity.id === image.entityId) || image.chapterId && !baseState.chapters.some(chapter => chapter.id === image.chapterId)) throw new HttpError('备份图片起始版本无效');
       const validReference = (id: string) => {
         const reference = imagesById.get(id);
-        return reference && id !== image.id && (baseState.imageIds?.includes(id) || draft && reference.kind === 'portrait' && reference.writingJobId === image.writingJobId && reference.branchId === image.branchId);
+        return reference && id !== image.id && (baseState.imageIds?.includes(id) || Boolean(image.writingJobId) && reference.kind === 'portrait' && reference.writingJobId === image.writingJobId && reference.branchId === image.branchId && reference.projectId === image.projectId && reference.bindingStatus !== 'discarded');
       };
       if (image.dependencyImageIds?.some(id => !validReference(id) || imagesById.get(id)?.kind !== 'portrait') || new Set(image.dependencyImageIds ?? []).size !== (image.dependencyImageIds ?? []).length) throw new HttpError('备份图片等待的参考图关联无效');
       if (references.some(referenceId => !validReference(referenceId) || imagesById.get(referenceId)?.status !== 'completed') || [...(image.materialEntityIds ?? []), ...(image.referenceEntityIds ?? []), ...(image.referenceCharacters ?? []).map(character => character.entityId)].some(entityId => !baseState.entities.some(entity => entity.id === entityId))) throw new HttpError('备份图片参考素材不属于起始版本');
@@ -928,7 +931,8 @@ export class Store {
       if (image.kind === 'cg' && !draft) {
         const chapter = restored.chapters.find(chapter => chapter.id === image.chapterId);
         const source = image.selection && chapter ? chapter.text.slice(image.selection.start, image.selection.end) : chapter?.text;
-        if (!chapter || !source?.trim() || source !== image.sourceText || image.selection && (image.selection.start >= image.selection.end || image.selection.end > chapter.text.length)) throw new HttpError('备份 CG 剧情引用无效');
+        const chapterOnly = Boolean(image.sceneDescription?.trim()) && image.placementStatus !== 'matched' && !image.selection && !image.sourceText;
+        if (!chapter || !source?.trim() || !chapterOnly && source !== image.sourceText || image.selection && (image.selection.start >= image.selection.end || image.selection.end > chapter.text.length)) throw new HttpError('备份 CG 剧情引用无效');
       }
       if (image.status === 'completed' && (!asset.contentBase64 || !image.mimeType)) throw new HttpError('备份缺少已完成的图片');
       if (asset.contentBase64) {
@@ -958,6 +962,12 @@ export class Store {
       const included = new Set(state.chapters.map(c => c.id)); const entities = new Set(state.entities.map(e => e.id));
       if ((state.imageIds ?? []).some(imageId => !imageIds.has(imageId)) || new Set(state.imageIds ?? []).size !== (state.imageIds ?? []).length) throw new HttpError('备份版本图片引用无效');
       if ((state.activeImageIds ?? []).some(imageId => !state.imageIds?.includes(imageId)) || new Set(state.activeImageIds ?? []).size !== (state.activeImageIds ?? []).length) throw new HttpError('备份版本启用图片引用无效');
+      for (const [imageId, placement] of Object.entries(state.imagePlacements ?? {})) {
+        const image = imagesById.get(imageId); const chapter = restored.chapters.find(chapter => chapter.id === placement.chapterId);
+        const target = state.chapters.find(chapter => includesChapterVersion(chapter, placement.chapterId));
+        const selection = placement.selection;
+        if (!state.imageIds?.includes(imageId) || image?.kind !== 'cg' || !chapter || !target || !includesChapterVersion(target, image.chapterId) || selection && (selection.start >= selection.end || selection.end > chapter.text.length || chapter.text.slice(selection.start, selection.end) !== placement.sourceText || !placement.sourceText?.trim()) || !selection && placement.sourceText !== undefined) throw new HttpError('备份手动插画位置关联无效');
+      }
       for (const imageId of state.imageIds ?? []) { const image = restored.images.find(asset => asset.image.id === imageId)!.image; if (image.bindingStatus === 'pending' || image.bindingStatus === 'discarded' || (image.entityId && !entities.has(image.entityId)) || (image.chapterId && !state.chapters.some(chapter => includesChapterVersion(chapter, image.chapterId)))) throw new HttpError('备份图片不属于当前资料或章节'); }
       const compression = state.outline.summaryCompression;
       if (compression && (!compression.text.trim() || !compression.chapterIds.length || new Set(compression.chapterIds).size !== compression.chapterIds.length || compression.chapterIds.some(chapterId => !included.has(chapterId)))) throw new HttpError('备份压缩摘要存在无效章节关联');
@@ -985,7 +995,17 @@ export class Store {
         job.payload.rpgLookupAliases = { ...Object.fromEntries(Object.entries(previous).map(([oldId, target]) => [oldId, map.get(target) ?? (Object.hasOwn(sourceIdMap, target) ? sourceIdMap[target] : target)])), ...Object.fromEntries(map), ...sourceIdMap };
       }
       for (const field of ['blockIndex', 'importIndex']) if (job.payload[field] !== undefined && (!Number.isInteger(job.payload[field]) || Number(job.payload[field]) < 0)) throw new HttpError('备份任务进度无效');
-      for (const field of ['generatedChapterId', 'extractChapterId', 'importCurrentChapterId', 'chapterId', 'targetChapterId', 'pendingTitleChapterId']) if (job.payload[field] && !chapterIds.has(String(job.payload[field]))) throw new HttpError('备份任务章节不存在');
+      for (const field of ['generatedChapterId', 'extractChapterId', 'importCurrentChapterId', 'chapterId', 'targetChapterId', 'pendingTitleChapterId', 'placementChapterId', 'pendingCGChapterId']) if (job.payload[field] && !chapterIds.has(String(job.payload[field]))) throw new HttpError('备份任务章节不存在');
+      if (job.payload.pendingCGChapterId !== undefined && (job.kind !== 'generate' || typeof job.payload.pendingCGChapterId !== 'string' || job.payload.generatedChapterId !== job.payload.pendingCGChapterId)) throw new HttpError('备份待关联 CG 章节无效');
+      if (job.kind === 'image-placement') {
+        const writing = jobs.get(String(job.payload.writingJobId));
+        const snapshot = restoredState(restored.revisions.findIndex(entry => entry.revision.id === job.baseRevisionId));
+        const ids = job.payload.imageIds;
+        if (typeof job.payload.placementChapterId !== 'string' || !snapshot.chapters.some(chapter => chapter.id === job.payload.placementChapterId) || writing?.kind !== 'generate' || writing.branchId !== job.branchId || writing.projectId !== job.projectId || writing.payload.generatedChapterId !== job.payload.placementChapterId || !Array.isArray(ids) || !ids.length || ids.length > 12 || new Set(ids).size !== ids.length || ids.some(id => {
+          const image = typeof id === 'string' ? imagesById.get(id) : undefined;
+          return !image || image.kind !== 'cg' || image.projectId !== job.projectId || image.branchId !== job.branchId || image.writingJobId !== writing.id || image.chapterId !== job.payload.placementChapterId;
+        })) throw new HttpError('备份 CG 定位任务关联无效');
+      }
       if (job.payload.pendingTitleChapterId !== undefined) {
         const writing = jobs.get(String(job.payload.writingJobId));
         const snapshot = restoredState(restored.revisions.findIndex(entry => entry.revision.id === job.baseRevisionId));

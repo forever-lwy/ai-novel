@@ -32,7 +32,8 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
       runtime: { illustrations: { portrait: true, cg: true } } });
     const cg = preview.tools.find(tool => tool.name === 'generate_scene_cg')!;
     const portrait = preview.tools.find(tool => tool.name === 'generate_character_portrait')!;
-    expect(cg.parameters.required).toEqual(['prompt', 'sourceText']);
+    expect(cg.parameters.required).toEqual(['prompt', 'sceneDescription']);
+    expect(cg.parameters.properties).not.toHaveProperty('sourceText');
     expect(portrait.parameters.required).toEqual(['name', 'description']);
     expect(cg.description).toContain('requested'); expect(cg.description).toContain('rejected/error');
     const descriptions = JSON.stringify([cg, portrait]);
@@ -42,6 +43,9 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     expect(messages).toContain('本次绘图设置');
     expect(messages).toContain('TOOL_GUIDE_STYLE：水彩画风。');
     expect(messages).toContain('TOOL_GUIDE_AUTHOR：人物外貌以已有立绘为准。');
+    expect(messages).toContain('用 sceneDescription 描述本章要画的具体场景');
+    expect(messages).toContain('位置匹配与资料整理分别进行');
+    expect(messages).not.toContain('先输出对应场景正文');
     expect(messages).toContain('尺寸 size：自动选择');
     expect(messages).not.toContain('宽度 width：');
     expect(messages).toContain('须为 16 的整数倍');

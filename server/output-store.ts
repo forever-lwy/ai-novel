@@ -5,7 +5,7 @@ import type { CapturedModelResponse, ModelOutputRecord, ModelOutputSummary, Outp
 
 export const modelOutputSchema = z.object({
   id: z.string().min(1), jobId: z.string().min(1), projectId: z.string().min(1), branchId: z.string().min(1), baseRevisionId: z.string().min(1),
-  stage: z.enum(['planning', 'compression', 'writing', 'chapter-title', 'extraction']), chapterId: z.string().optional(), blockIndex: z.number().int().nonnegative().optional(),
+  stage: z.enum(['planning', 'compression', 'writing', 'chapter-title', 'extraction', 'image-placement']), chapterId: z.string().optional(), blockIndex: z.number().int().nonnegative().optional(),
   createdAt: z.string(), updatedAt: z.string(), status: z.enum(['received', 'invalid', 'applied']),
   rawResponse: z.string(), text: z.string(), inputTokens: z.number().nonnegative(), outputTokens: z.number().nonnegative(), httpStatus: z.number().int().optional(), incomplete: z.boolean().optional(),
   request: z.object({ protocol: z.enum(['openai-chat', 'openai-responses', 'gemini', 'claude']), model: z.string(), url: z.string(), method: z.literal('POST'), headers: z.record(z.string(), z.string()), body: z.string(), startedAt: z.string(), timeoutMs: z.number().positive(), stream: z.boolean() }).optional(),

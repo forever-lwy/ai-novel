@@ -2603,16 +2603,33 @@ test('正文尚未写完时插画已生成，保存后继续使用原图片', as
     await expectImagePixels(images.locator('img'));
     const draft = await (await page.request.get(`/api/branches/${branchId}/images`)).json();
     expect(draft.every((image: StoryImage) => image.bindingStatus === 'pending' && !image.chapterId)).toBe(true);
+    expect(draft.find((image: StoryImage) => image.kind === 'cg')).toMatchObject({ sceneDescription: '清晨的古城门前，林舟弯身拾起石阶旁的旧钥匙。' });
+    expect(draft.find((image: StoryImage) => image.kind === 'cg').selection).toBeUndefined();
     const before = await (await page.request.get(`/api/branches/${branchId}`)).json(); expect(before.state.chapters).toHaveLength(0);
     const stats = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
     expect(stats.lastImageRequest.referenceCount).toBe(1); expect(stats.lastImageRequest.prompt).toContain('WRITER_DIRECT_CG');
     await page.screenshot({ path: testInfo.outputPath('images-before-writing-completes.png'), animations: 'disabled' });
     await release();
     await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}/images`)).json()).every((image: StoryImage) => image.bindingStatus === 'bound')).toBe(true);
+    await expect.poll(async () => (await (await page.request.get(`/api/branches/${branchId}/images`)).json()).find((image: StoryImage) => image.kind === 'cg')?.placementStatus).toBe('matched');
     await expect(page.getByRole('button', { name: '生成本章 CG', exact: true })).toBeVisible();
     const bound = await (await page.request.get(`/api/branches/${branchId}/images`)).json();
-    expect(bound.map((image: StoryImage) => image.id)).toEqual(draft.map((image: StoryImage) => image.id));
+    expect(bound.map((image: StoryImage) => image.id).sort()).toEqual(draft.map((image: StoryImage) => image.id).sort());
     expect((await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json()).imageRequests).toBe(stats.imageRequests);
+    await page.locator('.workspace-tabs button').filter({ hasText: '任务' }).click();
+    const placement = page.locator('.job-card').filter({ hasText: '匹配 CG 位置' });
+    await expect(placement).toHaveCount(1);
+    await placement.getByRole('button', { name: '查看定位输出', exact: true }).click();
+    const output = page.getByRole('dialog');
+    await expect(output).toContainText('独立 CG 定位请求');
+    await expect(output.getByRole('button', { name: '粘贴历史响应', exact: true })).toHaveCount(0);
+    await expect(output.getByRole('button', { name: '可视化修正', exact: true })).toHaveCount(0);
+    await expect(output).toContainText('placements');
+    await page.screenshot({ path: testInfo.outputPath('cg-placement-output-desktop.png'), animations: 'disabled' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(output).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('cg-placement-output-mobile.png'), animations: 'disabled' });
   } finally { await release(); await page.request.put('/api/settings', { data: previous }); }
 });
 
@@ -2924,6 +2941,64 @@ for (const width of [1440, 390]) test(`手动编辑正文保留生成过程和�
   await card.getByRole('button', { name: '停用图片', exact: true }).click(); await expect(card).toHaveAttribute('data-image-active', 'false');
   await page.getByRole('button', { name: '返回本章插画', exact: true }).click(); await expect(page.locator('.chapter-images')).toContainText('本章暂无启用的插画');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
+
+for (const width of [1440, 390]) test(`用户可修改 CG 绑定位置，保留原图和分支选择 ${width}px`, async ({ page }, testInfo) => {
+  const directory = mkdtempSync(join(tmpdir(), 'novel-manual-placement-browser-')); const store = new Store(directory); let backup: Buffer;
+  const text = '😀林舟推开城门。\r\n\r\n他在石阶边捡起旧钥匙。\r\n\r\n晨光照亮了城墙。'; const second = '他在石阶边捡起旧钥匙。';
+  try {
+    const project = store.createProject({ title: `手动 CG 位置 ${width}` }); const branchId = project.mainBranchId;
+    const saved = store.saveChapter(branchId, { baseRevisionId: store.getBranch(branchId).revisionId, title: '城门与钥匙', text });
+    const chapterId = saved.state.chapters[0].id;
+    store.applyExtraction(branchId, saved.branch.revisionId, chapterId, { summary: '城门拾钥。', entities: [], relations: [], foreshadows: [] }, true);
+    const state = store.state(branchId); const stamp = new Date().toISOString();
+    const images: StoryImage[] = ['启用的旧版整章 CG', '另一个整章构图'].map((title, index) => ({ id: `manual-scene-${index}`, projectId: project.id, branchId, baseRevisionId: store.getBranch(branchId).revisionId, kind: 'cg', title, status: 'completed', prompt: '原始绘图提示词', sourceText: text, chapterId, automatic: false, visibility: 'public', mimeType: 'image/png', createdAt: stamp, updatedAt: stamp }));
+    images.forEach(image => store.images.insert(image, { bytes: readingPng, mimeType: 'image/png' }));
+    state.imageIds = images.map(image => image.id); state.activeImageIds = [images[0].id];
+    store.commit(branchId, store.getBranch(branchId).revisionId, state, '保存手动位置验收图片', revisionId => images.forEach(image => store.images.update({ ...image, baseRevisionId: revisionId })));
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: store.exportProject(project.id), sources: [] }));
+  } finally { store.close(); }
+  const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'manual-cg.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(restored.ok(), await restored.text()).toBe(true); const project = await restored.json(); const branchId = project.mainBranchId;
+  const initial = await (await page.request.get(`/api/branches/${branchId}`)).json();
+  const imageList = async (branch = branchId): Promise<StoryImage[]> => (await page.request.get(`/api/branches/${branch}/images`)).json();
+  const target = (await imageList()).find(image => image.title === '启用的旧版整章 CG')!;
+  const forkResponse = await page.request.post(`/api/branches/${branchId}/fork`, { data: { baseRevisionId: initial.branch.revisionId, name: '修改前的故事线' } });
+  expect(forkResponse.ok()).toBe(true); const fork = await forkResponse.json();
+  const stats = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json();
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 }); await page.goto('/');
+  await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await showGenerationProcess(page);
+  await openChapterImageGroup(page, target);
+  const cards = page.locator('.chapter-image-versions [data-image-id]'); const card = page.locator(`.chapter-image-versions [data-image-id="${target.id}"]`);
+  await expect(cards).toHaveCount(2); await expect(card).toHaveAttribute('data-image-active', 'true');
+  await card.getByRole('button', { name: '修改绑定位置', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '修改绑定位置', exact: true });
+  await dialog.getByRole('radio', { name: /第 2 段/ }).check();
+  if (width === 1440) {
+    const route = (url: URL) => url.pathname === `/api/branches/${branchId}/images/${target.id}/placement`;
+    await page.route(route, intercepted => intercepted.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: '位置保存冲突，请核对当前版本。' }) }));
+    await dialog.getByRole('button', { name: '保存绑定位置', exact: true }).click();
+    await expect(dialog).toContainText('位置保存冲突'); await expect(dialog.getByRole('radio', { name: /第 2 段/ })).toBeChecked();
+    await page.unroute(route);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath(`manual-cg-placement-${width}.png`), animations: 'disabled' });
+  await dialog.getByRole('button', { name: '保存绑定位置', exact: true }).click(); await expect(dialog).toHaveCount(0);
+  const updated = (await imageList()).find(image => image.id === target.id)!;
+  expect(updated).toMatchObject({ id: target.id, placementSource: 'manual', sourceText: second, selection: { start: text.indexOf(second), end: text.indexOf(second) + second.length }, active: true, prompt: target.prompt });
+  expect(imageGroupKey(updated)).toBe(imageGroupKey(target)); await expect(cards).toHaveCount(2); await expect(card).toHaveAttribute('data-image-active', 'true');
+  await card.getByRole('button', { name: '修改绑定位置', exact: true }).click(); await expect(dialog.getByRole('radio', { name: /第 2 段/ })).toBeChecked();
+  await dialog.getByRole('radio', { name: /仅关联章节/ }).check(); await dialog.getByRole('button', { name: '保存绑定位置', exact: true }).click(); await expect(dialog).toHaveCount(0);
+  const cleared = (await imageList()).find(image => image.id === target.id)!; expect(cleared.placementSource).toBe('manual'); expect(cleared.selection).toBeUndefined(); expect(cleared.active).toBe(true);
+  await page.reload(); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await showGenerationProcess(page);
+  await openChapterImageGroup(page, cleared); await card.getByRole('button', { name: '修改绑定位置', exact: true }).click();
+  await expect(dialog.getByRole('radio', { name: /仅关联章节/ })).toBeChecked(); await dialog.getByRole('button', { name: '取消', exact: true }).click();
+  const forkImage = (await imageList(fork.branch.id)).find(image => image.id === target.id)!; expect(forkImage.selection).toBeUndefined(); expect(forkImage.sourceText).toBe(text); expect(forkImage.active).toBe(true); expect(forkImage.placementSource).not.toBe('manual');
+  const latest = await (await page.request.get(`/api/branches/${branchId}`)).json();
+  const rolled = await page.request.post(`/api/branches/${branchId}/rollback`, { data: { baseRevisionId: latest.branch.revisionId, revisionId: initial.branch.revisionId } }); expect(rolled.ok(), await rolled.text()).toBe(true);
+  const original = (await imageList()).find(image => image.id === target.id)!; expect(original.sourceText).toBe(text); expect(original.placementSource).not.toBe('manual');
+  const after = await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json(); expect(after.modelRequests).toBe(stats.modelRequests); expect(after.imageRequests).toBe(stats.imageRequests); expect(errors).toEqual([]);
 });
 
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {

@@ -186,7 +186,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     const branchId = param(request); engine.assertIdle(branchId);
     return store.deleteBranch(branchId, base(request.body));
   });
-  const imageInputSchema = z.object({ baseRevisionId: revision, kind: z.enum(['portrait', 'entity', 'map', 'cg']), entityId: z.string().min(1).max(100).optional(), chapterId: z.string().min(1).max(100).optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), instruction: z.string().max(20000).optional(), referenceImageId: z.string().min(1).max(100).optional(), selectedReferenceImageIds: z.array(z.string().min(1).max(100)).max(16).optional() }).strict();
+  const imageInputSchema = z.object({ baseRevisionId: revision, kind: z.enum(['portrait', 'entity', 'map', 'cg']), entityId: z.string().min(1).max(100).optional(), chapterId: z.string().min(1).max(100).optional(), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).optional(), instruction: z.string().max(20000).optional(), sceneDescription: z.string().trim().min(1).max(20000).optional(), referenceImageId: z.string().min(1).max(100).optional(), selectedReferenceImageIds: z.array(z.string().min(1).max(100)).max(16).optional() }).strict();
   app.get('/api/branches/:id/images', async request => images.list(param(request), true));
   app.post('/api/branches/:id/images', async request => { return images.generate(param(request), imageInputSchema.parse(request.body)); });
   const imagePreviews = new ImagePreviews();
@@ -209,6 +209,10 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.post('/api/branches/:id/images/:imageId/retry', async request => { return images.retry(param(request), param(request, 'imageId'), base(request.body)); });
   app.post('/api/branches/:id/images/:imageId/cancel', async request => { return images.cancel(param(request), param(request, 'imageId')); });
   app.put('/api/branches/:id/images/:imageId/active', async request => { const input = z.object({ baseRevisionId: revision, active: z.boolean() }).strict().parse(request.body); return images.setActive(param(request), param(request, 'imageId'), input.baseRevisionId, input.active); });
+  app.put('/api/branches/:id/images/:imageId/placement', async request => {
+    const input = z.object({ baseRevisionId: revision, chapterId: z.string().min(1).max(100), selection: z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).strict().optional() }).strict().parse(request.body);
+    return images.setPlacement(param(request), param(request, 'imageId'), input);
+  });
   app.delete('/api/branches/:id/images/:imageId', async request => { return images.delete(param(request), param(request, 'imageId'), base(request.body)); });
   app.get('/api/branches/:id/chapters/:chapterId', async request => store.chapter(param(request), param(request, 'chapterId')));
   app.delete('/api/branches/:id/chapters/:chapterId', async request => {

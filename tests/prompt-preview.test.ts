@@ -76,7 +76,10 @@ describe.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'c
     expect(JSON.stringify(wire)).toContain('历史材料中的旧工具旁白和乱码不作为文风模仿');
     const illustrationRules = preview.runtimeBlocks.find(block => block.name === '自动插画规则')?.content;
     expect(illustrationRules).toContain('请求登记后继续写作，无需等待图片完成');
-    expect(illustrationRules).toContain('先输出对应场景正文');
+    expect(illustrationRules).toContain('用 sceneDescription 描述本章要画的具体场景');
+    expect(illustrationRules).toContain('无需引用已输出正文或指定正文位置');
+    expect(illustrationRules).toContain('正文保存后由资料提取模型根据场景描述单独匹配正文位置');
+    expect(illustrationRules).not.toContain('sourceText');
     for (const tool of preview.tools.filter(tool => tool.name.startsWith('generate_'))) {
       expect(tool.description).not.toMatch(/无需等待|先输出对应场景正文|由写作模型|完整上下文|首次出场/);
     }

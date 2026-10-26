@@ -21,7 +21,7 @@ function harness(autoCG: boolean, toolCalls = true, configured = true, imageFail
       request.onTextDelta?.(prose);
       if (toolCalls) {
         await request.tools?.find(tool => tool.name === 'generate_character_portrait')?.execute({ name: '林舟', description: '青色长袍' });
-        await request.tools?.find(tool => tool.name === 'generate_scene_cg')?.execute({ sourceText: '城外千军万马正在迎战。', description: '战场大场面' });
+        await request.tools?.find(tool => tool.name === 'generate_scene_cg')?.execute({ sceneDescription: '城外两支军队正在激战。', prompt: '战场大场面' });
       }
       return { text: prose, inputTokens: 10, outputTokens: 20 };
     }),
@@ -42,7 +42,7 @@ describe('writing illustration requests', () => {
     const state = ctx.store.state(ctx.project.mainBranchId); const chapter = state.chapters[0];
     expect(ctx.store.chapter(ctx.project.mainBranchId, chapter.id).text).toBe(prose);
     expect(ctx.generateAutomatic).toHaveBeenCalledTimes(1);
-    expect(ctx.generateAutomatic.mock.calls[0].slice(0, 5)).toEqual([ctx.project.mainBranchId, expect.any(String), chapter.id, [{ kind: 'portrait', name: '林舟', description: '青色长袍' }, { kind: 'cg', description: '战场大场面', sourceText: '城外千军万马正在迎战。' }], [state.entities[0].id]]);
+    expect(ctx.generateAutomatic.mock.calls[0].slice(0, 5)).toEqual([ctx.project.mainBranchId, expect.any(String), chapter.id, [{ kind: 'portrait', name: '林舟', description: '青色长袍' }, { kind: 'cg', description: '战场大场面', prompt: '战场大场面', sceneDescription: '城外两支军队正在激战。' }], [state.entities[0].id]]);
   });
   it('leaves automatic CG unavailable when disabled and still supplies newly extracted characters', async () => {
     const ctx = harness(false, false); await waitFor(() => ctx.generateAutomatic.mock.calls.length > 0);

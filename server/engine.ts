@@ -18,7 +18,7 @@ import type { ExtensionService } from './extensions.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
 import { imageModelCapabilities } from '../shared/image-capabilities.js';
 import { imageParametersSchema } from './image-store.js';
-import { matchWritingScene } from './image-source.js';
+import { sceneParagraphs, scenePlacementRequest, parseScenePlacements } from './image-placement.js';
 import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, StoryReference } from '../shared/types.js';
 export { extractionSchema } from './extraction.js';
 
@@ -61,7 +61,7 @@ export class StoryEngine {
   private closed = false;
   private chargedExtractionErrors = new WeakSet<ModelOutputError>();
   private nonRetryableExtractionErrors = new WeakSet<Error>();
-  constructor(private store: Store, private getSettings: (projectId?: string) => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'> & Partial<Pick<ImageService, 'generateDuringWriting' | 'writingProgress'>>, private extensions?: ExtensionService) {}
+  constructor(private store: Store, private getSettings: (projectId?: string) => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'> & Partial<Pick<ImageService, 'generateDuringWriting' | 'writingProgress' | 'bindWritingChapter' | 'applyScenePlacement'>>, private extensions?: ExtensionService) {}
   start() {
     if (this.started) return; this.started = true;
     for (const job of this.jobsInternal()) if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary' && ['queued', 'running', 'paused', 'failed'].includes(job.status)) {
@@ -78,6 +78,16 @@ export class StoryEngine {
       } catch (e) { this.store.db.exec('ROLLBACK'); throw e; }
     }
     for (const job of this.jobsInternal()) if (job.status === 'running' || job.status === 'completed' && typeof job.payload.pendingIllustrationChapterId === 'string') { job.status = 'paused'; job.message = '服务已重启；已保存整理进度，请手动继续'; this.save(job); }
+    // Reconcile a crash between saving prose and associating its CGs locally;
+    // any newly recovered paid placement request remains paused.
+    for (const writing of this.jobsInternal()) if (writing.kind === 'generate' && writing.status === 'completed' && typeof writing.payload.pendingCGChapterId === 'string') {
+      const chapterId = writing.payload.pendingCGChapterId;
+      try {
+        if (!this.store.state(writing.branchId).chapters.some(chapter => chapter.id === chapterId)) continue;
+        writing.baseRevisionId = this.store.getBranch(writing.branchId).revisionId;
+        this.bindChapterImages(writing, chapterId, true);
+      } catch { /* Deleted branches and superseded prose cannot receive recovered CGs. */ }
+    }
     this.pump();
   }
   async close() {
@@ -116,7 +126,7 @@ export class StoryEngine {
     const branch = this.store.getBranch(branchId);
     if (this.closed) throw new HttpError('任务服务正在关闭', 503);
     if (this.deletingProjects.has(branch.projectId)) throw new HttpError('作品正在删除', 409);
-    if (this.jobsInternal(branch.projectId).some(job => job.branchId === branchId && (['queued', 'running', 'paused'].includes(job.status) || this.controllers.has(job.id)))) throw new HttpError('请先完成或取消当前故事线的任务，再操作章节或资料', 409);
+    if (this.jobsInternal(branch.projectId).some(job => job.kind !== 'image-placement' && job.branchId === branchId && (['queued', 'running', 'paused'].includes(job.status) || this.controllers.has(job.id)))) throw new HttpError('请先完成或取消当前故事线的任务，再操作章节或资料', 409);
   }
   reextractChapter(branchId: string, base: string, chapterId: string) {
     this.assertIdle(branchId); this.store.assertVersion(branchId, base); this.store.chapter(branchId, chapterId);
@@ -140,13 +150,14 @@ export class StoryEngine {
   listOutputs(jobId: string): ModelOutputSummary[] { this.get(jobId); return this.store.outputs.list(jobId); }
   private output(jobId: string, outputId: string): ModelOutputRecord { this.get(jobId); const output = this.store.outputs.get(outputId); if (!output || output.jobId !== jobId) throw new HttpError('模型输出不存在', 404); return output; }
   private outputBlocker(job: Job, output: ModelOutputRecord): string | undefined {
+    if (output.stage === 'image-placement') return '插画定位记录供查看；需要重新匹配时请重试独立定位任务';
     if (output.status === 'applied') return '此输出已经应用，不能重复应用';
     if (job.payload.rpgChoice && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice) return '剧情正在等待用户选择，请先回答当前剧情节点';
     if (output.stage === 'planning' && job.payload.purpose !== 'compress-summary') return '剧情规划功能已移除，历史输出仅供查看';
     if (!['failed', 'paused'].includes(job.status)) return '请先暂停任务；已取消、过期或完成的任务不能应用输出';
     if (this.controllers.has(job.id)) return '请求仍在结束中，请稍后再应用';
     if (job.branchId !== output.branchId || job.baseRevisionId !== output.baseRevisionId || this.store.getBranch(job.branchId).revisionId !== output.baseRevisionId) return '故事线已有新版本，此输出只能查看';
-    if (this.jobsInternal(undefined, true).some(other => other.id !== job.id && other.branchId === job.branchId)) return '本故事线有其他进行中的任务';
+    if (this.jobsInternal(undefined, true).some(other => other.kind !== 'image-placement' && job.kind !== 'image-placement' && other.id !== job.id && other.branchId === job.branchId)) return '本故事线有其他进行中的任务';
     if (output.stage === 'extraction' && (String(job.payload.extractChapterId ?? '') !== output.chapterId || Number(job.payload.blockIndex ?? 0) !== output.blockIndex)) return '资料整理进度已经变化，此输出只能查看';
     if (output.stage === 'chapter-title' && job.payload.pendingTitleChapterId !== output.chapterId) return '章节命名进度已经变化，此输出只能查看';
     if (['planning', 'compression'].includes(output.stage) && job.payload.purpose === 'compress-summary' && output.blockIndex !== undefined && output.blockIndex !== (job.payload.compressionWork as CompressionWork | undefined)?.completed) return '摘要压缩进度已经变化，此输出只能查看';
@@ -177,6 +188,7 @@ export class StoryEngine {
   private failOutput(output: ModelOutputRecord, error: unknown) { if (this.store.outputs.get(output.id)?.status !== 'applied') this.store.outputs.update(output.id, { status: 'invalid', error: this.redact(error instanceof Error ? error.message : '输出未通过校验，可在作者模式中修正'), issues: this.issues(error).map(issue => ({ ...issue, path: this.redact(issue.path), message: this.redact(issue.message), ...(issue.quote !== undefined ? { quote: this.redact(issue.quote) } : {}), ...(issue.sourceText !== undefined ? { sourceText: this.redact(issue.sourceText) } : {}) })) }); }
   private redact(text: string): string { return redactModelPayload(text, [...this.getSettings().providers.flatMap(config => config.apiKey ? [config.apiKey] : []), ...(this.extensions?.secrets() ?? [])]); }
   importOutput(jobId: string, text: string): ModelOutputRecord {
+    if (this.get(jobId).kind === 'image-placement') throw new HttpError('插画定位输出仅供查看，请重试独立定位任务', 409);
     const job = this.get(jobId); if (job.payload.purpose !== 'compress-summary' && (job.kind === 'plan' || job.payload.generatedChapterId && job.payload.pendingStage === 'planning')) throw new HttpError('剧情规划功能已移除，历史输出仅供查看', 410); if (!['failed', 'paused'].includes(job.status) || this.controllers.has(job.id)) throw new HttpError('仅可为已暂停或失败且请求已结束的任务导入输出', 409);
     this.store.assertVersion(job.branchId, job.baseRevisionId);
     let stage = job.payload.pendingStage as OutputStage | undefined;
@@ -281,12 +293,13 @@ export class StoryEngine {
   }
   enqueue(branchId: string, kind: JobKind, payload: Record<string, unknown>, onQueued?: () => void): Job {
     if (this.closed) throw new HttpError('任务服务正在关闭', 503);
+    if (kind === 'image-placement') throw new HttpError('插画定位由正文保存后自动创建', 400);
     if (kind === 'plan' && payload.purpose !== 'compress-summary') throw new HttpError('剧情规划功能已移除', 410);
     let branch = this.store.assertVersion(branchId, String(payload.baseRevisionId ?? ''));
     if (this.deletingProjects.has(branch.projectId)) throw new HttpError('作品正在删除，不能创建任务', 409);
     let state = this.store.state(branchId); const rewriting = kind === 'generate' && Boolean(payload.chapterId);
     const startingRpg = kind === 'generate' && payload.mode === 'rpg' && payload.rpg !== undefined;
-    const branchJobs = this.jobsInternal().filter(job => job.branchId === branchId && ['queued', 'running', 'paused', 'failed'].includes(job.status));
+    const branchJobs = this.jobsInternal().filter(job => job.kind !== 'image-placement' && job.branchId === branchId && ['queued', 'running', 'paused', 'failed'].includes(job.status));
     const backgroundJobs = branchJobs.filter(job => job.kind === 'extract' && (job.status !== 'failed' || this.store.state(branchId).chapters.some(chapter => chapter.status !== 'ready')));
     const unfinished = state.chapters.some(chapter => chapter.status !== 'ready');
     if (rewriting && (backgroundJobs.length || unfinished) && !payload.discardBackground) throw new HttpError('后台资料整理尚未完成，可以等待完成，或选择放弃后台任务后重新生成', 409);
@@ -370,8 +383,8 @@ export class StoryEngine {
         this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, continuation.text);
       }
       if (job.kind === 'plan' && job.payload.purpose !== 'compress-summary') throw new HttpError('剧情规划功能已移除，历史记录仅供查看', 410);
-      this.store.assertVersion(job.branchId, job.baseRevisionId);
-      if (this.jobsInternal(undefined, true).some(other => other.id !== job.id && other.branchId === job.branchId)) throw new HttpError('故事线已有其他任务', 409);
+      if (job.kind === 'image-placement') this.assertPlacementCurrent(job); else this.store.assertVersion(job.branchId, job.baseRevisionId);
+      if (this.jobsInternal(undefined, true).some(other => other.kind !== 'image-placement' && job.kind !== 'image-placement' && other.id !== job.id && other.branchId === job.branchId)) throw new HttpError('故事线已有其他任务', 409);
       delete job.payload.extractionRetry;
       job.status = 'queued'; job.error = undefined; job.message = '等待继续'; this.save(job); queueMicrotask(() => this.pump());
     }
@@ -390,7 +403,7 @@ export class StoryEngine {
       this.store.assertVersion(branchId, input.baseRevisionId);
       if (state.chapters.at(-1)?.id !== nextChoice.chapterId || nextChoice.chapterId !== job.payload.generatedChapterId) throw new HttpError('章末剧情已经变化，此选项已失效', 409);
       if (state.chapters.some(chapter => chapter.status !== 'ready')) throw new HttpError('请先完成本章资料整理，再选择进入下一章', 409);
-      if (this.jobsInternal(undefined, true).some(other => other.branchId === branchId)) throw new HttpError('故事线已有进行中或暂停的任务，请先完成或取消', 409);
+      if (this.jobsInternal(undefined, true).some(other => other.kind !== 'image-placement' && other.branchId === branchId)) throw new HttpError('故事线已有进行中或暂停的任务，请先完成或取消', 409);
       const answer = this.choiceAnswer(nextChoice, input);
       // The choice, new version and next job commit together; a duplicate cannot queue another request.
       delete state.rpg!.nextChoice;
@@ -409,7 +422,7 @@ export class StoryEngine {
     this.store.assertVersion(job.branchId, job.baseRevisionId);
     this.assertRpgProvider(job);
     const answer = this.choiceAnswer(choice, input);
-    if (this.jobsInternal(undefined, true).some(other => other.id !== job.id && other.branchId === job.branchId)) throw new HttpError('故事线已有其他任务', 409);
+    if (this.jobsInternal(undefined, true).some(other => other.kind !== 'image-placement' && job.kind !== 'image-placement' && other.id !== job.id && other.branchId === job.branchId)) throw new HttpError('故事线已有其他任务', 409);
     job.payload.rpgChoiceAnswer = answer;
     job.status = 'queued'; job.error = undefined; job.message = '已保存选择，等待继续剧情'; this.save(job);
     queueMicrotask(() => this.pump()); return this.publicJob(job);
@@ -428,11 +441,11 @@ export class StoryEngine {
   }
   private pump() {
     if (!this.started || this.closed) return;
-    for (const job of this.jobsInternal(undefined, true).reverse()) if (job.status === 'queued' && !this.deletingProjects.has(job.projectId) && !this.controllers.has(job.id) && ![...this.controllers.keys()].some(key => this.get(key).branchId === job.branchId)) {
+    for (const job of this.jobsInternal(undefined, true).reverse()) if (job.status === 'queued' && !this.deletingProjects.has(job.projectId) && !this.controllers.has(job.id) && (job.kind === 'image-placement' || ![...this.controllers.keys()].some(key => { const running = this.get(key); return running.kind !== 'image-placement' && running.branchId === job.branchId; }))) {
       const controller = new AbortController(); this.controllers.set(job.id, controller); const run = this.run(job.id, controller).finally(() => { this.controllers.delete(job.id); this.runs.delete(job.id); this.pump(); }); this.runs.set(job.id, run);
     }
   }
-  private live(jobId: string): Job { const job = this.get(jobId); if (this.closed || job.status !== 'running') throw new DOMException('任务已停止', 'AbortError'); this.store.assertVersion(job.branchId, job.baseRevisionId); return job; }
+  private live(jobId: string): Job { const job = this.get(jobId); if (this.closed || job.status !== 'running') throw new DOMException('任务已停止', 'AbortError'); if (job.kind === 'image-placement') this.assertPlacementCurrent(job); else this.store.assertVersion(job.branchId, job.baseRevisionId); return job; }
   private provider(role: 'writing' | 'planning' | 'extraction', projectId: string): ProviderConfig {
     const settings = normalizeModelSettings(this.getSettings(projectId)); const providerId = settings[`${role}ProviderId`]; const config = settings.providers.find(p => p.id === providerId);
     const task = role === 'writing' ? '写作' : role === 'planning' ? '摘要压缩' : '资料提取';
@@ -553,12 +566,13 @@ export class StoryEngine {
       job.status = 'completed'; job.error = undefined;
       if (original && input.selection) this.store.shiftWritingActivityOffsets(job.id, this.redact(String(original.text).slice(0, input.selection.start)).length);
       this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, text);
-      this.outputCheckpoint(job, output, { ...job.payload, pendingPlotPlan: undefined, generatedChapterId: saved.id, postWritingPlanning: undefined, pendingStage: undefined }, job.total, '正文已保存，资料在后台整理', local, true)(revisionId, branchId);
+      this.outputCheckpoint(job, output, { ...job.payload, pendingPlotPlan: undefined, generatedChapterId: saved.id, pendingCGChapterId: (job.payload.imageRequests as WritingImageRequest[] | undefined)?.some(image => image.kind === 'cg' && image.imageId) ? saved.id : undefined, postWritingPlanning: undefined, pendingStage: undefined }, job.total, '正文已保存，资料在后台整理', local, true)(revisionId, branchId);
       this.queueExtraction(job, saved.id, local);
     }, state => {
       if (job.payload.sourceReference) state.sourceReference = structuredClone(job.payload.sourceReference as StoryReference);
       if (state.rpg && job.payload.rpgNextChoice) state.rpg.nextChoice = { ...structuredClone(job.payload.rpgNextChoice as RpgChoice), jobId: job.id, chapterId: state.chapters.at(-1)!.id, maxWords: normalizeChapterWords(input.maxWords), instruction: input.instruction };
     });
+    this.bindChapterImages(job, String(job.payload.generatedChapterId), local);
     this.notifyWriting(job);
     queueMicrotask(() => this.pump());
   }
@@ -566,6 +580,63 @@ export class StoryEngine {
     const autoTitle = writing.payload.autoTitle && !writing.payload.titleGenerated;
     const background: Job = { id: randomUUID(), projectId: writing.projectId, branchId: writing.branchId, kind: 'extract', status: paused ? 'paused' : 'queued', baseRevisionId: writing.baseRevisionId, progress: 0, total: 1, message: paused ? `正文已修复；请手动继续后台${autoTitle ? '命名与' : ''}资料整理` : `正文已保存，等待后台${autoTitle ? '命名与' : ''}资料整理`, inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { extractChapterId: chapterId, blockIndex, writingJobId: writing.id, ...(autoTitle ? { pendingTitleChapterId: chapterId } : {}) } };
     this.save(background);
+  }
+  private bindChapterImages(writing: Job, chapterId: string, paused: boolean) {
+    if (!this.images?.bindWritingChapter) return;
+    try {
+      const bound = this.images.bindWritingChapter(writing.id, writing.branchId, writing.baseRevisionId, chapterId, revisionId => {
+        writing.baseRevisionId = revisionId; delete writing.payload.pendingCGChapterId; this.save(writing, false);
+        for (const extraction of this.jobsInternal(writing.projectId).filter(job => job.kind === 'extract' && job.payload.writingJobId === writing.id && ['queued', 'paused'].includes(job.status))) {
+          extraction.baseRevisionId = revisionId; this.save(extraction);
+        }
+        // Same transaction as the image references: neither can survive alone.
+        this.queueImagePlacement(writing, chapterId, paused);
+      });
+      if (!bound) { this.queueImagePlacement(writing, chapterId, paused); delete writing.payload.pendingCGChapterId; this.save(writing, false); }
+    } catch (error) {
+      Object.assign(writing, this.get(writing.id));
+      writing.payload.imageError = this.redact(error instanceof Error ? error.message : '插画章节关联失败'); this.save(writing, false);
+    }
+  }
+  private queueImagePlacement(writing: Job, chapterId: string, paused: boolean) {
+    const state = this.store.state(writing.branchId);
+    const imageIds = this.store.images.all(writing.projectId).filter(image => image.branchId === writing.branchId && image.writingJobId === writing.id && image.kind === 'cg' && image.chapterId === chapterId && image.bindingStatus === 'bound' && image.placementStatus === 'pending' && state.imageIds?.includes(image.id)).map(image => image.id);
+    if (!imageIds.length || this.jobsInternal(writing.projectId).some(job => job.kind === 'image-placement' && job.payload.writingJobId === writing.id)) return;
+    const job: Job = { id: randomUUID(), projectId: writing.projectId, branchId: writing.branchId, kind: 'image-placement', status: paused ? 'paused' : 'queued', baseRevisionId: writing.baseRevisionId, progress: 0, total: imageIds.length, message: paused ? '插画已关联章节；请手动继续匹配位置' : '等待根据场景描述匹配插画位置', inputTokens: 0, outputTokens: 0, createdAt: now(), updatedAt: now(), payload: { placementChapterId: chapterId, imageIds, writingJobId: writing.id } };
+    this.save(job);
+  }
+  private assertPlacementCurrent(job: Job) {
+    const chapterId = String(job.payload.placementChapterId ?? '');
+    const state = this.store.state(job.branchId);
+    const base = this.store.revisionState(job.baseRevisionId);
+    if (!chapterId || !base.chapters.some(chapter => chapter.id === chapterId) || !state.chapters.some(chapter => chapter.id === chapterId)) throw new HttpError('插画对应的章节版本已经变化，定位结果未写入', 409);
+    if (this.store.getBranch(job.branchId).projectId !== job.projectId) throw new HttpError('插画定位的作品关联无效', 409);
+  }
+  private async placeChapterImages(jobId: string, signal: AbortSignal) {
+    let job = this.live(jobId); const chapterId = String(job.payload.placementChapterId);
+    const chapter = this.store.chapter(job.branchId, chapterId); const paragraphs = sceneParagraphs(chapter.text);
+    const state = this.store.state(job.branchId);
+    const ids = (job.payload.imageIds as string[]).filter(id => {
+      const image = this.store.images.get(id);
+      return image?.branchId === job.branchId && image.chapterId === chapterId && state.imageIds?.includes(id) && !state.imagePlacements?.[id];
+    });
+    if (!ids.length) { job.status = 'completed'; job.progress = job.total; job.message = '插画位置已由作者指定或图片已移除，无需自动匹配'; this.save(job); return; }
+    const scenes = ids.map(id => ({ id, sceneDescription: this.store.images.get(id)!.sceneDescription! }));
+    const provider = this.provider('extraction', job.projectId);
+    job.message = '正在根据场景描述匹配插画位置'; this.save(job);
+    const request = this.budget(job, provider, { ...scenePlacementRequest(chapter.text, scenes), signal });
+    const { result, output } = await this.requestCaptured(jobId, 'image-placement', request, req => this.models.generateStructured(provider, req, value => parseScenePlacements(value, ids, paragraphs.length)), result => JSON.stringify(result.value), chapterId);
+    job = this.live(jobId);
+    for (const placement of result.value.placements) {
+      // Removing a single image while matching should not prevent other images from binding.
+      const current = this.store.state(job.branchId);
+      if (!current.imageIds?.includes(placement.imageId) || current.imagePlacements?.[placement.imageId]) continue;
+      const paragraph = placement.paragraph === null ? undefined : paragraphs[placement.paragraph - 1];
+      this.images?.applyScenePlacement?.(placement.imageId, chapterId, paragraph ? { start: paragraph.start, end: paragraph.end } : undefined);
+    }
+    this.store.outputs.update(output.id, { status: 'applied', error: undefined, issues: [] });
+    job = this.live(jobId); job.status = 'completed'; job.progress = job.total; delete job.payload.pendingStage;
+    job.message = result.value.placements.some(row => row.paragraph === null) ? '匹配完成；部分插画仅关联章节，未找到可靠位置' : '插画位置已匹配'; this.save(job);
   }
   private applyGeneratedTitle(job: Job, output: ModelOutputRecord, title: string, local: boolean) {
     if (!output.chapterId || job.payload.pendingTitleChapterId !== output.chapterId) throw new HttpError('章节命名进度已经变化', 409);
@@ -595,11 +666,8 @@ export class StoryEngine {
     const tools: ModelTool[] = [];
     const register = (request: WritingImageRequest) => {
       const live = this.live(jobId);
-      const draft = request.kind === 'cg' ? String(this.store.db.prepare('SELECT text FROM job_writing_drafts WHERE job_id=?').get(jobId)?.text ?? '') : '';
-      const scene = request.kind === 'cg' ? matchWritingScene(draft, request.sourceText) : undefined;
-      if (request.kind === 'cg' && !scene) return { status: 'rejected', error: 'sourceText 未能唯一匹配本章已经输出的正文，本次没有启动生图。请逐字引用已输出的单个连续场景片段，保留真实换行，不要填写字面量反斜杠加 n、改写、拼接或引用尚未输出的内容，再提交工具调用。' };
       const requests = (live.payload.imageRequests ?? []) as WritingImageRequest[];
-      if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? previous.name === request.name : matchWritingScene(draft, previous.sourceText)?.sourceText === scene?.sourceText))) return { status: 'requested', message: '同一人物或场景已登记，未重复创建生图任务。' };
+      if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? previous.name === request.name : previous.sceneDescription === request.sceneDescription && previous.prompt === request.prompt))) return { status: 'requested', message: '同一人物或场景已登记，未重复创建生图任务。' };
       if (requests.length >= 12) throw new HttpError('本章最多接受 12 个自动生图请求，请完成正文后由作者补充。');
       // Persist the owner link before the deferred image pump runs; never await pixels here.
       let imageId: string | undefined;
@@ -613,15 +681,15 @@ export class StoryEngine {
       return register({ kind: 'portrait', ...value });
     } });
     if (config.autoCG) {
-      tools.push({ name: 'generate_scene_cg', description: '登记一张与本章正文片段关联的场景插画请求。prompt 为画面提示词，sourceText 为已输出正文中的连续唯一引用。返回 requested 和可用的 imageId；rejected/error 表示请求未被接受，requested 不表示图片已完成。', parameters: { type: 'object', properties: {
+      tools.push({ name: 'generate_scene_cg', description: '登记一张绑定本章的场景插画请求。prompt 为画面提示词，sceneDescription 为用于正文完成后匹配位置的场景描述。返回 requested 和可用的 imageId；rejected/error 表示请求未被接受，requested 不表示图片已完成。', parameters: { type: 'object', properties: {
         prompt: { type: 'string', description: '单一画面的绘图提示词，包含主体、外貌衣着、动作、环境、光线和构图。' },
-        sourceText: { type: 'string', description: '已输出正文中的连续原文，须能唯一定位；换行保留原字符。' },
+        sceneDescription: { type: 'string', description: '用于匹配正文位置的场景描述，说明人物、地点、动作及事件，无须引用原文。' },
         referenceNames: { type: 'array', items: { type: 'string' }, maxItems: 16, description: '画面使用的已有立绘人物姓名或别名；空数组表示不用人物参考。' },
         parameters: { type: 'object', description: '画布参数建议。可用值见本次绘图设置。', properties: { size: { type: 'string' }, aspectRatio: { type: 'string' }, imageSize: { type: 'string', enum: ['512', '1K', '2K', '4K'] }, width: { type: 'integer' }, height: { type: 'integer' } }, additionalProperties: false },
-      }, required: ['prompt', 'sourceText'], additionalProperties: false }, execute: args => {
+      }, required: ['prompt', 'sceneDescription'], additionalProperties: false }, execute: args => {
         // Older saved conversations may still submit the former description field.
-        const value = z.object({ prompt: z.string().trim().min(1).max(20000).optional(), description: z.string().trim().min(1).max(6000).optional(), sourceText: z.string().trim().min(1).max(10000), referenceNames: z.array(z.string().trim().min(1).max(300)).max(16).optional(), parameters: imageParametersSchema.optional() }).strict().refine(value => value.prompt || value.description, '请提供完整绘图提示词').parse(args);
-        return register({ kind: 'cg', description: value.prompt ?? value.description!, sourceText: value.sourceText, ...(value.prompt ? { prompt: value.prompt, ...(value.referenceNames ? { referenceNames: value.referenceNames } : {}), ...(value.parameters ? { parameters: value.parameters } : {}) } : {}) });
+        const value = z.object({ prompt: z.string().trim().min(1).max(20000).optional(), sceneDescription: z.string().trim().min(1).max(20000).optional(), description: z.string().trim().min(1).max(6000).optional(), sourceText: z.string().trim().min(1).max(10000).optional(), referenceNames: z.array(z.string().trim().min(1).max(300)).max(16).optional(), parameters: imageParametersSchema.optional() }).strict().refine(value => value.prompt || value.description, '请提供完整绘图提示词').refine(value => value.sceneDescription || value.sourceText || value.description, '请提供场景描述').parse(args);
+        return register({ kind: 'cg', description: value.prompt ?? value.description!, sceneDescription: value.sceneDescription ?? value.description ?? value.sourceText!, sourceText: value.sourceText, ...(value.prompt ? { prompt: value.prompt, ...(value.referenceNames ? { referenceNames: value.referenceNames } : {}), ...(value.parameters ? { parameters: value.parameters } : {}) } : {}) });
       } });
     }
     if (!tools.length) return { tools };
@@ -828,6 +896,7 @@ export class StoryEngine {
     let job = this.get(jobId); const startingOutputId = job.payload.lastOutputId; job.status = 'running'; job.message = '正在处理'; this.save(job);
     try {
       this.live(jobId);
+      if (job.kind === 'image-placement') { await this.placeChapterImages(jobId, controller.signal); return; }
       if (job.kind === 'plan') {
         if (job.payload.purpose === 'compress-summary') { await this.compressSummary(jobId, controller.signal); return; }
         throw new HttpError('剧情规划功能已移除', 410);
@@ -844,6 +913,7 @@ export class StoryEngine {
             if (chapter.status !== 'ready' && !this.jobsInternal(undefined, true).some(other => other.branchId === job.branchId && other.kind === 'extract')) this.queueExtraction(job, chapter.id, false, job.payload.extractChapterId === chapter.id ? Number(job.payload.blockIndex ?? 0) : 0);
             this.store.db.exec('COMMIT');
           } catch (error) { this.store.db.exec('ROLLBACK'); throw error; }
+          this.bindChapterImages(job, chapter.id, false);
           this.notifyWriting(job); return;
         }
         const input = job.payload as unknown as GenerateInput;
@@ -925,6 +995,9 @@ export class StoryEngine {
         : '模型输出已保留，请在作者模式的输出记录中查看并修正'
         : failureMessage;
       job.message = job.status === 'stale' ? '起始版本已经变化，结果未写入' : '任务失败，已保存进度，可重试'; this.save(job);
+      if (job.kind === 'image-placement' && job.status === 'failed') for (const imageId of job.payload.imageIds as string[]) {
+        try { this.images?.applyScenePlacement?.(imageId, String(job.payload.placementChapterId), undefined, failureMessage); } catch { /* A removed image or revised chapter is no longer writable. */ }
+      }
     }
   }
 }

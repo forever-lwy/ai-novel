@@ -67,10 +67,11 @@ ${!runtime.continuationAnchorIncluded && variables.continuationAnchor && !variab
     const images = runtime.illustrations;
     if (images?.portrait || images?.cg) system('自动插画规则', '# 插画任务\n' + [
       images.portrait ? '- 新人物首次出场、外观已在正文明确时，请求人物立绘，只使用已描写的特征。' : '',
-      images.cg ? '- 场景切换或出现适合插画的关键瞬间时，请求一次场景 CG。先输出对应场景正文，再选取能唯一定位的连续原文作为 sourceText。' : '',
+      images.cg ? '- 场景切换或出现适合插画的关键瞬间时，请求一次场景 CG。用 sceneDescription 描述本章要画的具体场景，说明人物、地点和关键动作；无需引用已输出正文或指定正文位置。' : '',
       images.cg ? '- 由写作模型结合完整上下文编写画面提示词，说明主体、外貌衣着、动作、环境、时段、光线和构图。人物参考只选择画面实际出场者；自动画布参数从本次可用值中选择，固定设置保持。' : '',
       '- 如 CG 需要尚未请求的新人物立绘，先登记立绘，再登记 CG。请求登记后继续写作，无需等待图片完成；图片队列自行处理参考图依赖。',
-      '- requested 表示已登记，正文保存和资料确认后关联图片。生图状态留在工具结果中，正文从已有情节自然接写。',
+      images.cg ? '- CG 先关联本章，正文保存后由资料提取模型根据场景描述单独匹配正文位置；位置匹配与资料整理分别进行。' : '',
+      '- requested 表示已登记；人物立绘在资料确认后关联人物。生图状态留在工具结果中，正文从已有情节自然接写。',
     ].filter(Boolean).join('\n'));
     if (runtime.illustrationSettings && (images?.portrait || images?.cg)) blocks.push({ name: '本次绘图设置', role: 'user', content: `# 本次绘图设置\n${runtime.illustrationSettings}` });
     const session = variables.mode === 'rpg' ? runtime.rpg : undefined;
