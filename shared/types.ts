@@ -27,6 +27,7 @@ export interface Branch { id: string; projectId: string; name: string; revisionI
 export interface BranchTreeEntry extends Branch { chapters: Pick<ChapterRef, 'id' | 'title'>[] }
 export interface Revision { id: string; branchId: string; parentId?: string; restoredFromRevisionId?: string; label: string; createdAt: string; chapterCount: number }
 export interface BranchView { branch: Branch; state: StoryState; revisions: Revision[]; cacheVersion?: string; /** Reader materials are scoped to this chapter; the chapter directory remains complete. */ readingChapterId?: string }
+export interface ChapterMaterials { branchId: string; chapterId: string; revisionId: string; entities: Entity[]; relations: Relation[]; images: StoryImage[] }
 export interface Source { id: string; projectId: string; filename: string; format: 'txt' | 'epub'; chapterCount: number; createdAt: string; confirmed: boolean }
 export interface SourcePreview { source: Source; chapters: { title: string; text: string }[] }
 export type ProviderProtocol = 'openai-chat' | 'openai-responses' | 'gemini' | 'claude';

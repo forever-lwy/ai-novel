@@ -63,6 +63,17 @@ async function openChapterImageGroup(page: Page, image: StoryImage) {
   await section.locator(`[data-open-image-group="${key}"]`).click();
   await expect(section.locator(`.chapter-image-versions[data-image-group="${key}"]`)).toBeVisible();
 }
+
+async function selectProseRange(paragraph: Locator, start: number, end: number) {
+  return paragraph.evaluate((element, offsets) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, { acceptNode: node => node.parentElement?.closest('[data-prose-control="cg"]') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT });
+    const nodes: Text[] = []; let node: Node | null;
+    while ((node = walker.nextNode())) nodes.push(node as Text);
+    const point = (offset: number) => { let remaining = offset; for (const textNode of nodes) { if (remaining <= textNode.length) return { node: textNode, offset: remaining }; remaining -= textNode.length; } throw new Error('选段位置不存在'); };
+    const from = point(offsets.start), to = point(offsets.end); const range = document.createRange(); range.setStart(from.node, from.offset); range.setEnd(to.node, to.offset);
+    const selection = getSelection()!; selection.removeAllRanges(); selection.addRange(range); element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); return selection.toString();
+  }, { start, end });
+}
 async function visibleProse(page: Page) { return (await page.locator('.manuscript .prose').allTextContents()).join(''); }
 
 test('阅读开关只隐藏生成过程，保留未保存正文、编辑入口且不重新请求资料', async ({ page }) => {
@@ -2666,7 +2677,7 @@ test('生图设置、自动人物与场景工具、全文选段 CG、重绘参�
     await expect(modal).toContainText('写作 AI 生成的生图提示词'); await expect(modal).toContainText('没有再次调用提示词优化模型'); await modal.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
     await page.getByRole('button', { name: '生成本章 CG', exact: true }).click(); await modal.getByRole('button', { name: '开始绘制', exact: true }).click();
     await expect.poll(async () => (await listImages()).filter((image: StoryImage) => image.status === 'completed').length).toBe(3);
-    await page.locator('.prose p').first().evaluate(element => { const range = document.createRange(); range.setStart(element.firstChild!, 3); range.setEnd(element.firstChild!, 17); const selection = getSelection()!; selection.removeAllRanges(); selection.addRange(range); element.parentElement!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); });
+    await selectProseRange(page.locator('.prose p').first(), 3, 17);
     await page.getByRole('button', { name: '生成选段 CG', exact: true }).click();
     await expect(modal.locator('.image-source-text')).toHaveText('到白石城，发现城门下藏着一把');
     await modal.getByRole('button', { name: '开始绘制', exact: true }).click(); await expect.poll(async () => (await listImages()).filter((image: StoryImage) => image.status === 'completed').length).toBe(4);
@@ -3913,4 +3924,82 @@ test('章节维护：单章重提取、清除资料、删除资料和章节，�
     await expect(traveler.locator('.entity-image-preview img')).toHaveCount(1);
     await page.screenshot({ path: testInfo.outputPath('chapter-maintenance-restored-desktop.png'), animations: 'disabled' });
   } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
+for (const width of [1440, 390]) test(`正文剧情插画与章节资料浮窗 ${width}px`, async ({ page }, testInfo) => {
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-reading-popovers-'))); let backup: Buffer;
+  const firstText = '旅人林舟在河岸捡到铜钥，秘密看守藏在暗处，他梦见未来战役。';
+  const sceneText = '旅人林舟在河岸捡到铜钥';
+  try {
+    const { project, branchId } = readingProgressStory(store);
+    const firstId = store.state(branchId).chapters[0].id;
+    const oldPortrait = store.images.all(project.id).find(image => image.title === '河岸立绘')!;
+    const stamp = new Date().toISOString();
+    const scenes: StoryImage[] = ['河岸拾钥', '河岸拾钥的未启用版本'].map((title, index) => ({ id: `reading-selected-cg-${index}`, projectId: project.id, branchId, baseRevisionId: store.getBranch(branchId).revisionId, kind: 'cg', title, status: 'completed', prompt: '本地样例绘图要求', chapterId: firstId, selection: { start: 0, end: sceneText.length }, sourceText: sceneText, automatic: false, visibility: 'public', mimeType: 'image/png', createdAt: stamp, updatedAt: stamp }));
+    scenes.forEach(image => store.images.insert(image, { bytes: readingPng, mimeType: 'image/png' }));
+    store.updateImageReferences(branchId, store.getBranch(branchId).revisionId, firstId, state => {
+      state.imageIds = [...(state.imageIds ?? []), ...scenes.map(image => image.id)]; state.activeImageIds = [...(state.activeImageIds ?? []), scenes[0].id];
+    }, '保存正文浮窗验收选段图片', revisionId => scenes.forEach(image => store.images.update({ ...image, baseRevisionId: revisionId })));
+    const state = store.state(branchId);
+    const latePortrait: StoryImage = { ...oldPortrait, id: 'reading-late-portrait', title: '灯塔新立绘', chapterId: state.chapters[2].id, baseRevisionId: store.getBranch(branchId).revisionId, createdAt: stamp, updatedAt: stamp };
+    store.images.insert(latePortrait, { bytes: readingPng, mimeType: 'image/png' });
+    state.imageIds = [...(state.imageIds ?? []), latePortrait.id]; state.activeImageIds = [...(state.activeImageIds ?? []).filter(id => id !== oldPortrait.id), latePortrait.id];
+    store.commit(branchId, store.getBranch(branchId).revisionId, state, '仅替换第三章进度的立绘', revisionId => store.images.update({ ...latePortrait, baseRevisionId: revisionId }));
+    const data = store.exportProject(project.id); data.project.title = `正文浮窗样例 ${width}`;
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: data, sources: [] }));
+  } finally { store.close(); }
+  const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'reading-popovers.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup } } });
+  expect(restored.ok(), await restored.text()).toBe(true); const project = await restored.json(); const branchId = project.mainBranchId;
+  const images: StoryImage[] = await (await page.request.get(`/api/branches/${branchId}/images`)).json();
+  const selectedCG = images.find(image => image.title === '河岸拾钥')!;
+  const stats = async () => (await (await page.request.get(mockUrl.slice(0, -3) + '/__e2e/stats')).json());
+  const before = await stats(); const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await page.setViewportSize({ width, height: width === 1440 ? 1000 : 844 }); await page.goto('/');
+  await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await showGenerationProcess(page);
+  const popover = page.getByTestId('chapter-entity-popover');
+  const name = (entity: string) => page.locator('.manuscript .prose').getByRole('button', { name: `查看 ${entity} 的资料`, exact: true }).first();
+  const closeMaterial = async () => { await page.getByRole('dialog', { name: /^章节资料 ·/ }).getByRole('button', { name: '关闭对话框', exact: true }).click(); await expect(popover).toHaveCount(0); };
+  const selectChapter = async (title: string) => {
+    if (width === 390) await page.getByRole('button', { name: '打开章节目录', exact: true }).click();
+    await page.locator('.chapter-item').filter({ hasText: title }).click(); await expect(page.locator('.manuscript h1')).toHaveText(title);
+  };
+  await expect(page.locator('.manuscript h1')).toHaveText('第三章 灯塔');
+  await expect(name('林舟')).toBeVisible(); await name('林舟').focus(); await page.keyboard.press('Enter');
+  await expect(popover).toContainText('截至《第三章 灯塔》的资料'); await expect(popover).toContainText('当前受伤');
+  await expect(popover).toContainText('灯塔新立绘'); await expect(popover).not.toContainText('河岸立绘'); await expectImagePixels(popover.locator('img'));
+  await closeMaterial(); await name('铜钥').click(); await expect(popover).toContainText('铜钥断裂'); await closeMaterial();
+  const chapterCG = page.locator('.manuscript .prose-cg-button'); await expect(chapterCG).toHaveCount(1);
+  await expect(chapterCG).toHaveAccessibleName('查看 灯塔场景 的 CG');
+  expect(await chapterCG.evaluate(element => element === element.parentElement?.lastElementChild)).toBe(true);
+  const reading = page.locator('.manuscript-wrap'); const initialScroll = await reading.evaluate(element => element.scrollTop);
+  await chapterCG.click(); await expectImagePixels(page.getByTestId('image-viewer').locator('img'));
+  await page.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
+  await expect.poll(async () => Math.abs(await reading.evaluate(element => element.scrollTop) - initialScroll)).toBeLessThan(2);
+  await page.getByRole('button', { name: '阅读视图', exact: true }).click();
+  await expect(chapterCG).toHaveCount(1); await expect(name('铜钥')).toBeVisible();
+  await name('铜钥').click(); await expect(popover).toContainText('铜钥断裂'); await closeMaterial();
+  await selectChapter('第一章 河岸'); await expect(name('林舟')).toBeVisible();
+  const firstScroll = await reading.evaluate(element => element.scrollTop);
+  await name('林舟').click(); await expect(popover).toContainText('截至《第一章 河岸》的资料'); await expect(popover).toContainText('身份是旅人');
+  await expect(popover).not.toContainText('当前受伤'); await expect(popover).not.toContainText('身份是信使');
+  await expect(popover).toContainText('河岸立绘'); await expect(popover).not.toContainText('灯塔新立绘'); await expectImagePixels(popover.locator('img'));
+  expect(await popover.locator('.chapter-entity-image-button').evaluate(button => { const bounds = button.getBoundingClientRect(); const picture = button.querySelector('img')!.getBoundingClientRect(); return picture.top >= bounds.top && picture.bottom <= bounds.bottom && picture.left >= bounds.left && picture.right <= bounds.right; })).toBe(true);
+  await popover.getByRole('button', { name: '查看资料图片 河岸立绘', exact: true }).click();
+  await expectImagePixels(page.getByTestId('image-viewer').locator('img')); await page.getByRole('button', { name: '放大图片', exact: true }).click();
+  await page.getByRole('button', { name: '关闭图片查看器', exact: true }).click(); await expect(popover).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath(`reading-popovers-${width}.png`), animations: 'disabled' });
+  await closeMaterial(); await expect.poll(async () => Math.abs(await reading.evaluate(element => element.scrollTop) - firstScroll)).toBeLessThan(2);
+  await name('铜钥').click(); await expect(popover).toContainText('铜钥完好'); await expect(popover).not.toContainText('铜钥断裂'); await closeMaterial();
+  const sceneButton = page.locator('.manuscript .prose-cg-button'); await expect(sceneButton).toHaveCount(1);
+  await expect(sceneButton).toHaveAccessibleName('查看 河岸拾钥 的 CG'); await expect(sceneButton.locator('..')).toHaveAttribute('id', 'paragraph-1');
+  await expect(page.locator('.manuscript').getByRole('button', { name: '查看 河岸拾钥的未启用版本 的 CG', exact: true })).toHaveCount(0);
+  await sceneButton.click(); await expectImagePixels(page.getByTestId('image-viewer').locator('img')); await page.getByRole('button', { name: '关闭图片查看器', exact: true }).click();
+  await page.locator(`.chapter-images [data-cover-image-id="${selectedCG.id}"]`).getByRole('button', { name: '关联剧情', exact: true }).click();
+  await expect(page.locator('.highlighted-paragraph')).toContainText(firstText); await page.locator('.highlighted-paragraph').click({ position: { x: 1, y: 1 } }); await expect(page.locator('.highlighted-paragraph')).toHaveCount(0);
+  const selectionText = await selectProseRange(page.locator('.manuscript #paragraph-1'), 1, firstText.indexOf('铜钥') + 2);
+  expect(selectionText).toBe(firstText.slice(1, firstText.indexOf('铜钥') + 2)); await expect(page.getByRole('button', { name: '生成选段 CG', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: '生成选段 CG', exact: true }).click();
+  await expect(page.getByRole('dialog').locator('.image-source-text')).toHaveText(selectionText); await page.getByRole('dialog').getByRole('button', { name: '关闭对话框', exact: true }).click();
+  const after = await stats(); expect(after.modelRequests).toBe(before.modelRequests); expect(after.imageRequests).toBe(before.imageRequests); expect(errors).toEqual([]);
 });

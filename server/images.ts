@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { BranchView, Entity, ImageGenerateInput, Job, Settings, StoryImage, StoryState, WritingImageRequest } from '../shared/types.js';
+import type { BranchView, ChapterMaterials, Entity, ImageGenerateInput, Job, Settings, StoryImage, StoryState, WritingImageRequest } from '../shared/types.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
 import { findEntitiesByName } from './entity-resolution.js';
 import { rebuildCharacterProfileDescription } from './extraction.js';
@@ -158,6 +158,32 @@ export class ImageService {
     const branch = this.store.getBranch(branchId); const state = author ? this.store.state(branchId) : this.store.readingState(branchId, chapterId);
     const listed = (state.imageIds ?? []).flatMap(imageId => { const image = this.store.images.get(imageId); return image && image.projectId === branch.projectId && this.store.images.visible(image, state, author) ? [this.publicImage(image, branchId, author, state, chapterId)] : []; });
     return author ? [...listed, ...this.store.images.all(branch.projectId).filter(image => image.branchId === branchId && image.bindingStatus === 'pending' && this.writingOwner(image)).map(image => this.publicImage(image, branchId, true, state))] : listed;
+  }
+  /** Inline entity cards use the selected chapter's canon, independently of the complete workspace. */
+  chapterMaterials(branchId: string, chapterId: string): ChapterMaterials {
+    const branch = this.store.getBranch(branchId); const state = this.store.readingState(branchId, chapterId, false);
+    const images = this.store.images.activeIds(state).flatMap(imageId => {
+      const image = this.store.images.get(imageId);
+      if (!image || image.projectId !== branch.projectId || !image.entityId || !['portrait', 'entity'].includes(image.kind) || image.status !== 'completed' || !this.store.images.visible(image, state, true)) return [];
+      const displayed = this.publicImage(image, branchId, true, state);
+      const url = `/api/branches/${encodeURIComponent(branchId)}/chapters/${encodeURIComponent(chapterId)}/images/${encodeURIComponent(imageId)}/content?v=${encodeURIComponent(image.updatedAt)}`;
+      return [{ ...displayed, url, previewUrl: `${url}&size=preview` }];
+    });
+    return { branchId, chapterId, revisionId: branch.revisionId, entities: state.entities.filter(entity => !entity.mergedInto), relations: state.relations, images };
+  }
+  private chapterImage(branchId: string, chapterId: string, imageId: string): StoryImage {
+    const branch = this.store.getBranch(branchId); const state = this.store.readingState(branchId, chapterId, false); const image = this.store.images.get(imageId);
+    if (!image || image.projectId !== branch.projectId || !image.entityId || !['portrait', 'entity'].includes(image.kind) || !this.store.images.visible(image, state, true) || !this.store.images.active(image, state, false)) throw new HttpError('此章节进度不包含可查看的实体图片', 404);
+    if (image.status !== 'completed') throw new HttpError('图片尚未生成完成', 409);
+    return image;
+  }
+  chapterContent(branchId: string, chapterId: string, imageId: string): ImageContent {
+    this.chapterImage(branchId, chapterId, imageId);
+    const content = this.store.images.content(imageId); if (!content) throw new HttpError('图片内容不存在', 404); return content;
+  }
+  chapterContentTag(branchId: string, chapterId: string, imageId: string): string {
+    this.chapterImage(branchId, chapterId, imageId);
+    const tag = this.store.images.contentTag(imageId); if (!tag) throw new HttpError('图片内容不存在', 404); return tag;
   }
   content(branchId: string, imageId: string, author = false, chapterId?: string): ImageContent {
     const image = this.find(branchId, imageId, author, chapterId); if (image.status !== 'completed' && !(author && this.legacyAssociationPixels(image))) throw new HttpError('图片尚未生成完成', 409);

@@ -53,12 +53,12 @@ export function WorldPanel({ entities, relations, author, busy, onSave, onMerge,
   </section>;
 }
 
-function EntityFacts({ facts, onCitation }: { facts: Fact[]; onCitation: (citation: Citation) => void }) {
+export function EntityFacts({ facts, onCitation }: { facts: Fact[]; onCitation?: (citation: Citation) => void }) {
   if (!facts.length) return null;
-  return <ul className="fact-list">{facts.map(fact => <li key={fact.id}><div className="fact-topline">{fact.certainty !== 'fact' && <span className={`fact-badge ${fact.certainty}`}>{fact.certainty === 'inference' ? '推测' : '存在冲突'}</span>}{fact.temporal !== 'current' && <span className="fact-badge">{{ past: '过去', future: '未来', unknown: '时间未明' }[fact.temporal]}</span>}{fact.visibility === 'secret' && <EyeOff size={12} />}{fact.locked && <LockKeyhole size={12} />}</div><p>{fact.text}</p>{fact.citation && <button className="citation" onClick={() => onCitation(fact.citation!)} title={fact.citation.quote}><FileText size={12} />原文第 {fact.citation.paragraph} 段</button>}</li>)}</ul>;
+  return <ul className="fact-list">{facts.map(fact => <li key={fact.id}><div className="fact-topline">{fact.certainty !== 'fact' && <span className={`fact-badge ${fact.certainty}`}>{fact.certainty === 'inference' ? '推测' : '存在冲突'}</span>}{fact.temporal !== 'current' && <span className="fact-badge">{{ past: '过去', future: '未来', unknown: '时间未明' }[fact.temporal]}</span>}{fact.visibility === 'secret' && <EyeOff size={12} />}{fact.locked && <LockKeyhole size={12} />}</div><p>{fact.text}</p>{fact.citation && onCitation && <button className="citation" onClick={() => onCitation(fact.citation!)} title={fact.citation.quote}><FileText size={12} />原文第 {fact.citation.paragraph} 段</button>}</li>)}</ul>;
 }
 
-function EntityRelations({ entity, entities, relations }: { entity: Entity; entities: Entity[]; relations: Relation[] }) {
+export function EntityRelations({ entity, entities, relations }: { entity: Entity; entities: Entity[]; relations: Relation[] }) {
   const connections = relations.filter(relation => relation.fromId === entity.id || relation.toId === entity.id);
   return connections.length > 0 && <div className="entity-relations">{connections.map(relation => <span key={relation.id}>{relation.label} · {entities.find(item => item.id === (relation.fromId === entity.id ? relation.toId : relation.fromId))?.name || '关联资料'}</span>)}</div>;
 }

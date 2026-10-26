@@ -215,6 +215,21 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   });
   app.delete('/api/branches/:id/images/:imageId', async request => { return images.delete(param(request), param(request, 'imageId'), base(request.body)); });
   app.get('/api/branches/:id/chapters/:chapterId', async request => store.chapter(param(request), param(request, 'chapterId')));
+  app.get('/api/branches/:id/chapters/:chapterId/materials', async request => images.chapterMaterials(param(request), param(request, 'chapterId')));
+  app.get('/api/branches/:id/chapters/:chapterId/images/:imageId/content', async (request, reply) => {
+    const { size } = z.object({ size: z.enum(['preview']).optional() }).parse(request.query);
+    const branchId = param(request); const chapterId = param(request, 'chapterId'); const imageId = param(request, 'imageId');
+    const contentTag = images.chapterContentTag(branchId, chapterId, imageId);
+    const etag = `${size === 'preview' ? 'W/' : ''}"${contentTag}-${size === 'preview' ? 'preview-v1' : 'original'}"`;
+    if (request.headers['if-none-match']?.split(',').some(value => value.trim().replace(/^W\//, '') === etag.replace(/^W\//, '') || value.trim() === '*')) {
+      return reply.header('Cache-Control', 'private, no-cache').header('ETag', etag).code(304).send();
+    }
+    const content = size === 'preview'
+      ? await imagePreviews.get(etag, () => images.chapterContent(branchId, chapterId, imageId))
+      : images.chapterContent(branchId, chapterId, imageId);
+    if (size === 'preview' && images.chapterContentTag(branchId, chapterId, imageId) !== contentTag) fail('图片已变化，请重新打开', 409);
+    return reply.type(content.mimeType).header('Cache-Control', 'private, no-cache').header('ETag', etag).header('Content-Disposition', 'inline').send(Buffer.from(content.bytes));
+  });
   app.delete('/api/branches/:id/chapters/:chapterId', async request => {
     const branchId = param(request); engine.assertIdle(branchId);
     return store.deleteChapter(branchId, base(request.body), param(request, 'chapterId'));
