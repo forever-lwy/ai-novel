@@ -1,0 +1,183 @@
+/* Shared theme roles. Saved browser preferences override these defaults on html. */
+:root {
+  --app-bg: #f7f7f1;
+  --text: #273a34;
+  --surface: var(--paper);
+  --surface-alt: #f1f4eb;
+  --surface-hover: #eaf0e4;
+  --accent-soft: #e5ecdc;
+  --accent-contrast: #ffffff;
+  --danger-contrast: #ffffff;
+  --success: #35724c;
+  --warning: #876a29;
+  --success-soft: color-mix(in srgb, var(--success) 11%, var(--paper));
+  --warning-soft: color-mix(in srgb, var(--warning) 12%, var(--paper));
+  --danger-soft: color-mix(in srgb, var(--danger) 10%, var(--paper));
+  --interface-font: Inter, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  --reading-font: "Songti SC", "SimSun", Georgia, serif;
+  --ui-scale: 1;
+  --reading-font-size: 18px;
+  --reading-line-height: 2.1;
+  --reading-letter-spacing: 0px;
+  --reading-paragraph-spacing: 20px;
+  --reading-indent: 2em;
+  --reading-width: 890px;
+  --reading-padding: 46px;
+  --reading-align: left;
+  --reading-weight: 400;
+  --reader-text: var(--text);
+  --reader-paper: var(--paper);
+  --background-image: none;
+  font-family: var(--interface-font);
+  font-size: calc(16px * var(--ui-scale));
+  color: var(--text);
+  background-color: var(--app-bg);
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --success: #91cba4;
+  --warning: #dfc07b;
+  --danger-contrast: #301914;
+  color-scheme: dark;
+}
+
+body {
+  min-height: 100dvh;
+  background-color: var(--app-bg);
+  background-image: var(--background-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+/* Keep the app layout and its nested scrolling unchanged when showing a wallpaper. */
+:root[data-background-image="true"] :is(.workspace, .workspace-main, .manuscript-wrap) {
+  background-color: transparent;
+}
+
+.manuscript {
+  width: 100%;
+  max-width: var(--reading-width);
+  padding-inline: min(7vw, var(--reading-padding));
+  background: var(--reader-paper);
+}
+
+.prose,
+.manuscript-textarea {
+  font-family: var(--reading-font);
+  font-size: var(--reading-font-size);
+  line-height: var(--reading-line-height);
+  letter-spacing: var(--reading-letter-spacing);
+  font-weight: var(--reading-weight);
+  color: var(--reader-text);
+  text-align: var(--reading-align);
+  font-synthesis: weight;
+}
+
+.prose p {
+  line-height: inherit;
+  margin-bottom: var(--reading-paragraph-spacing);
+  text-indent: var(--reading-indent);
+}
+
+.prose .prose-entity-link {
+  font-weight: inherit;
+}
+
+.manuscript h1,
+.chapter-title-input {
+  font-family: var(--reading-font);
+  color: var(--reader-text);
+}
+
+.manuscript h1,
+.chapter-title-input {
+  font-size: calc(var(--reading-font-size) * 1.65);
+}
+
+/* Preview uses the same prose rules, within the available settings-column width. */
+.appearance-preview {
+  background: var(--reader-paper);
+  color: var(--reader-text);
+}
+
+.appearance-preview .prose {
+  font-family: var(--reading-font);
+  font-size: var(--reading-font-size);
+  line-height: var(--reading-line-height);
+  font-weight: var(--reading-weight);
+  letter-spacing: var(--reading-letter-spacing);
+  color: var(--reader-text);
+  text-align: var(--reading-align);
+}
+
+.button.danger,
+.button.danger:hover:not(:disabled) {
+  color: var(--danger-contrast);
+  background: var(--danger);
+}
+
+.button.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 85%, #000);
+}
+
+.button.primary {
+  color: var(--accent-contrast);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+/* The geographic diagram uses SVG presentation attributes rather than stylesheet colors. */
+.map-canvas svg text {
+  fill: var(--text);
+  font-family: var(--interface-font);
+}
+
+.map-canvas svg line {
+  stroke: var(--muted);
+}
+
+.map-canvas svg pattern circle {
+  fill: var(--line);
+}
+
+.map-canvas svg g > rect {
+  fill: var(--paper);
+}
+
+.map-canvas svg [data-location-id] > circle {
+  fill: var(--green);
+  stroke: var(--paper);
+}
+
+.map-canvas svg [data-location-id] > text:first-of-type {
+  fill: var(--accent-contrast);
+}
+
+/* Color inputs keep a useful swatch height alongside the normal form controls. */
+input[type="color"] {
+  color-scheme: light;
+}
+
+:root[data-background-image="true"] .settings-page {
+  background-color: color-mix(in srgb, var(--paper) 94%, transparent);
+}
+
+@media (max-width: 760px) {
+  .settings-navigation > button {
+    white-space: normal;
+    line-height: 1.5;
+    min-height: 48px;
+    text-align: center;
+  }
+  .settings-navigation > button > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}

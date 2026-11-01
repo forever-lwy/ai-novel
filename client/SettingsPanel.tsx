@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered, Image, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered, Image, ShieldCheck, Palette } from 'lucide-react';
 import type { CapturedModelResponse, ImageSettings, ModelParameters, ModelRole, Project, ProjectSettingsOverrides, ProjectSettingsView, ProviderConnection, ProviderModel, ProviderProtocol, Settings, TaskSettings } from '../shared/types';
 import { collectProjectOverrides, projectModelSettings, resolveProjectSettings } from '../shared/project-settings';
 import { defaultModelParameters, getModelParameters, upsertModelParameters } from '../shared/model-settings';
@@ -15,6 +15,7 @@ import { normalizeTaskSettings } from '../shared/task-settings';
 import { AccountSecurity } from './AccountSecurity';
 import { ExtensionsPanel } from './ExtensionsPanel';
 import { DataCleanupPanel } from './DataCleanupPanel';
+import { AppearancePanel } from './AppearancePanel';
 
 const protocols: Record<ProviderProtocol, { name: string; url: string }> = {
   'openai-chat': { name: 'OpenAI · Chat Completions', url: 'https://api.openai.com/v1' },
@@ -36,6 +37,7 @@ const sections = [
   { id: 'models', label: '任务模型', icon: SlidersHorizontal, description: '切换下方任务，分别选择模型和设置参数。切换保留未保存的修改，点击“保存设置”后统一生效。' },
   { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '管理通用预设和四类任务提示词、调整消息顺序，并预览编排后的内容。' },
   { id: 'images', label: '生图与自动插画', icon: Image, description: '选择图片模型，设置作品画风、新人物立绘与场景 CG 的自动生成。' },
+  { id: 'appearance', label: '外观', icon: Palette, description: '设置当前浏览器的主题、背景、字体和正文排版，修改立即生效并自动保存。' },
   { id: 'extensions', label: '工具与技能', icon: PlugZap, description: '管理脚本、MCP 与技能，按需向模型披露。' },
   { id: 'cleanup', label: '数据清理', icon: Trash2, description: '按天数或数量保留历史版本、请求和任务，支持自动清理与手动预览。' },
   { id: 'account', label: '账号安全', icon: ShieldCheck, description: '修改登录密码，管理其他设备的登录。' },
@@ -282,11 +284,11 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
   const tasks = normalizeTaskSettings(settings?.taskSettings);
   return <main className="settings-page" data-testid="settings-page" aria-label="设置页面">
     <header className="settings-header"><Brand /><button type="button" className="text-button" disabled={busy || accountBusy || extensionsBusy || cleanupBusy} onClick={back}><ArrowLeft size={16} />返回作品</button></header>
-    <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>{projectId ? `《${project?.title}》作品设置` : '设置'}</h1><p>{projectId ? '默认继承全局，可分别覆盖任务模型、提示词和生图设置。供应商连接统一在全局管理。' : '配置模型服务、任务参数与提示词，管理工作台的账号安全。'}</p>{project && <div className="settings-scope" role="group" aria-label="设置范围"><button type="button" aria-pressed={!projectId} disabled={busy || accountBusy || extensionsBusy || cleanupBusy} onClick={() => switchScope('global')}>全局设置</button><button type="button" aria-pressed={!!projectId} disabled={busy || accountBusy || extensionsBusy || cleanupBusy} onClick={() => switchScope('project')}>作品设置</button></div>}</div>
+    <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>{projectId ? `《${project?.title}》作品设置` : '设置'}</h1><p>{projectId ? '默认继承全局，可分别覆盖任务模型、提示词和生图设置。供应商连接统一在全局管理。' : '配置模型服务、任务参数与提示词，调整外观，管理账号安全。'}</p>{project && <div className="settings-scope" role="group" aria-label="设置范围"><button type="button" aria-pressed={!projectId} disabled={busy || accountBusy || extensionsBusy || cleanupBusy} onClick={() => switchScope('global')}>全局设置</button><button type="button" aria-pressed={!!projectId} disabled={busy || accountBusy || extensionsBusy || cleanupBusy} onClick={() => switchScope('project')}>作品设置</button></div>}</div>
     <div className="settings-layout">
-      <nav className="settings-navigation" aria-label="设置分类">{sections.filter(item => !projectId || ['models', 'prompts', 'images'].includes(item.id)).map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || accountBusy || extensionsBusy || cleanupBusy || !settings} onClick={() => { setSection(item.id); if (item.id === 'extensions') setExtensionsVisited(true); if (item.id === 'cleanup') setCleanupVisited(true); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">{projectId ? '修改只保存到当前作品。恢复继承也需保存后生效。提供商、工具与技能、数据清理、账号安全在全局管理。' : '修改可跨分类保留。模型与创作设置统一保存；工具与技能、数据清理单独保存，账号安全操作单独生效。'}</p></nav>
+      <nav className="settings-navigation" aria-label="设置分类">{sections.filter(item => !projectId || ['models', 'prompts', 'images'].includes(item.id)).map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || accountBusy || extensionsBusy || cleanupBusy || !settings && item.id !== 'appearance'} onClick={() => { setSection(item.id); if (item.id === 'extensions') setExtensionsVisited(true); if (item.id === 'cleanup') setCleanupVisited(true); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">{projectId ? '修改只保存到当前作品。恢复继承也需保存后生效。供应商、外观、工具与技能、数据清理、账号安全在全局管理。' : '修改可跨分类保留。外观自动保存在当前浏览器。模型与创作设置统一保存；工具与技能、数据清理单独保存。'}</p></nav>
       <div className="settings-content">
-        {!settings ? <section className="settings-loading" aria-label="设置加载状态">{loading ? <Spinner /> : <><Notice error={error} /><button type="button" className="button secondary" onClick={() => setLoadAttempt(value => value + 1)}><RefreshCw size={15} />重新加载设置</button></>}</section> : <form ref={form} className="settings-form form-stack" hidden={section === 'account' || section === 'extensions' || section === 'cleanup'} inert={section === 'account' || section === 'extensions' || section === 'cleanup'} noValidate onChange={() => setInputDraftInvalid(!!invalidField())} onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
+        {!settings ? section === 'appearance' ? null : <section className="settings-loading" aria-label="设置加载状态">{loading ? <Spinner /> : <><Notice error={error} /><button type="button" className="button secondary" onClick={() => setLoadAttempt(value => value + 1)}><RefreshCw size={15} />重新加载设置</button></>}</section> : <form ref={form} className="settings-form form-stack" hidden={section === 'account' || section === 'extensions' || section === 'cleanup' || section === 'appearance'} inert={section === 'account' || section === 'extensions' || section === 'cleanup' || section === 'appearance'} noValidate onChange={() => setInputDraftInvalid(!!invalidField())} onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
     <section data-settings-section="providers" hidden={section !== 'providers'} aria-label="供应商连接设置">
     <div className="settings-section-heading"><h2>供应商连接</h2><p>{sections[0].description}</p></div>
     <fieldset className="settings-section-fields form-stack" disabled={busy || !!projectId}>
@@ -355,6 +357,7 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
     <div className="settings-feedback" aria-live="polite">{error && <Notice error={error} />}{message && <div className="notice success" role="status"><CheckCircle2 size={17} />{message}</div>}</div>
     <footer className="settings-save-footer"><p className="hint">{dirty ? `有未保存的修改。保存会应用${projectId ? '本作品' : '全局'}的模型与创作设置。` : projectId ? '仅保存本作品已单独设置的项目，其余继续继承全局。' : '模型与创作设置共用一份配置，保存后统一生效。'}</p><button type="submit" className="button primary" disabled={busy}><Save size={16} />{busy ? '正在处理…' : '保存设置'}</button></footer>
   </form>}
+        {!projectId && section === 'appearance' && <AppearancePanel />}
         {settings && section === 'account' && <AccountSecurity onBusyChange={setAccountBusy} />}
         {settings && extensionsVisited && <div hidden={section !== 'extensions'} inert={section !== 'extensions'}><ExtensionsPanel onDirtyChange={setExtensionsDirty} onBusyChange={setExtensionsBusy} /></div>}
         {settings && !projectId && cleanupVisited && <div hidden={section !== 'cleanup'} inert={section !== 'cleanup'}><DataCleanupPanel onDirtyChange={setCleanupDirty} onBusyChange={setCleanupBusy} /></div>}

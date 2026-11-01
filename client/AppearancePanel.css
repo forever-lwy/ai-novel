@@ -1,0 +1,21 @@
+.appearance-panel{min-width:0}
+.appearance-card{padding:22px;border:1px solid var(--line);border-radius:9px;background:var(--paper);min-width:0}
+.appearance-card h3{margin:0;font-size:calc(16px * var(--ui-scale));font-weight:600;color:var(--ink)}
+.appearance-card .hint{margin:0}
+.appearance-colors{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.appearance-colors>label{display:flex;flex-direction:column;gap:8px;font-size:calc(12px * var(--ui-scale));color:var(--text)}
+.appearance-colors>label>span{display:flex;align-items:center;gap:10px}
+.appearance-colors input[type=color]{width:48px;height:36px;min-height:36px;flex:none;padding:3px;border:1px solid var(--line);background:var(--surface-alt);border-radius:6px;cursor:pointer}
+.appearance-colors code{font:calc(12px * var(--ui-scale)) ui-monospace,monospace;color:var(--muted)}
+.appearance-slider{min-width:0}
+.appearance-slider>span{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.appearance-slider output{font-variant-numeric:tabular-nums;color:var(--muted);font-weight:400}
+.appearance-panel input[type=range]{width:100%;height:32px;min-height:32px;padding:0;accent-color:var(--green);cursor:pointer}
+.appearance-upload{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.appearance-upload>label.button{flex-direction:row;align-items:center}
+.appearance-background-thumbnail{width:160px;height:90px;max-width:100%;object-fit:cover;border:1px solid var(--line);border-radius:6px}
+.appearance-preview-paper{padding:22px clamp(12px,4vw,var(--reading-padding));border-radius:6px;background-color:var(--app-bg);background-image:linear-gradient(var(--reader-paper),var(--reader-paper)),var(--background-image);background-size:cover;background-position:center;min-width:0;overflow-wrap:anywhere}
+.appearance-preview-paper .prose p:last-child{margin-bottom:0}
+.appearance-reset{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.appearance-reset>.hint{margin:0}
+@media(max-width:760px){.appearance-card{padding:16px}.appearance-colors{gap:14px 10px}.appearance-panel .form-grid{grid-template-columns:minmax(0,1fr)}.appearance-reset>.button{width:100%}}
