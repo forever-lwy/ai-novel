@@ -49,7 +49,7 @@ export function unpackResponseCarrier(calls: ModelToolCall[], carrier: ResponseC
   for (const call of outputs) {
     let value: unknown;
     try { value = typeof call.arguments === 'string' ? JSON.parse(call.arguments) : call.arguments; } catch { throw new Error('结果输出工具参数不是完整有效的 JSON。'); }
-    if (!value || typeof value !== 'object' || Array.isArray(value) || typeof (value as Record<string, unknown>)[carrier.field] !== 'string' || Object.keys(value).some(key => key !== carrier.field)) throw new Error(`结果输出工具必须且只能包含 ${carrier.field} 字符串。`);
+    if (!value || typeof value !== 'object' || Array.isArray(value) || typeof (value as Record<string, unknown>)[carrier.field] !== 'string') throw new Error(`结果输出工具必须包含 ${carrier.field} 字符串。`);
     prose = (value as Record<string, string>)[carrier.field];
   }
   return { prose, calls: calls.filter(call => call.name !== carrier.name), carriers: outputs };

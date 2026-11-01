@@ -1,3 +1,5 @@
+import { parseToolArguments } from '../shared/tool-arguments.js';
+
 type Json = Record<string, any>;
 type Call = { key: string; part: Json; streaming: boolean; open: boolean; strings: Set<string> };
 const object = (value: unknown): value is Json => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -53,7 +55,7 @@ export class GeminiFunctionStream {
     let fresh = false;
     try {
       const name = input.name;
-      const id = input.id;
+      const id = input.id === null || typeof input.id === 'string' && !input.id.trim() ? undefined : input.id;
       if (name !== undefined && (typeof name !== 'string' || !name) || id !== undefined && (typeof id !== 'string' || !id)) throw invalid();
       call = id ? this.ids.get(id) : undefined;
       if (!call) {
@@ -64,6 +66,7 @@ export class GeminiFunctionStream {
       if (!call) {
         if (!name) throw invalid();
         call = { key: String(this.calls.length), part: { ...part, functionCall: { ...input } }, streaming: false, open: false, strings: new Set() };
+        if (id === undefined) delete call.part.functionCall.id;
         this.calls.push(call); fresh = true;
       } else {
         if (name && call.part.functionCall.name !== name) throw invalid();
@@ -74,14 +77,20 @@ export class GeminiFunctionStream {
       }
       if (id) { call.part.functionCall.id = id; this.ids.set(id, call); }
       const incremental = input.partialArgs !== undefined || input.willContinue !== undefined || call.streaming;
-      if (!incremental) return { key: call.key, part: call.part, fresh };
+      if (!incremental) {
+        // Some gateways send the call header and its complete args separately,
+        // without partialArgs/willContinue. Keep the final snapshot for this ID.
+        if (input.args !== undefined) call.part.functionCall.args = structuredClone(input.args);
+        return { key: call.key, part: call.part, fresh };
+      }
       call.streaming = true;
       if (input.willContinue !== undefined && typeof input.willContinue !== 'boolean') throw invalid();
+      const args = parseToolArguments(input.args === undefined ? call.part.functionCall.args : input.args);
+      if (!object(args)) throw invalid();
       if (input.args !== undefined) {
-        if (!object(input.args)) throw invalid();
-        call.part.functionCall.args = structuredClone(input.args);
+        call.part.functionCall.args = structuredClone(args);
         call.strings.clear();
-      } else call.part.functionCall.args ??= {};
+      } else call.part.functionCall.args = args;
       // Metadata belongs to the stream, not to the completed call sent back in history.
       delete call.part.functionCall.partialArgs;
       delete call.part.functionCall.willContinue;

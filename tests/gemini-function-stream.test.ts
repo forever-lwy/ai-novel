@@ -47,6 +47,41 @@ describe('Gemini streamed function arguments', () => {
     expect(result.data.candidates[0].historyParts.map((part: any) => part.functionCall.args.id)).toEqual(['ab', 'second', 'L1', 'R2']);
   });
 
+  it('keeps one call when a gateway sends the header before a full-args snapshot without stream flags', () => {
+    const raw = sse([call({ name: 'read_entity', id: 'lookup' }, { thoughtSignature: 'signed-header' })])
+      + sse([call({ id: 'lookup', args: { id: 'person' } })])
+      + sse([call({ id: 'lookup', name: 'read_entity', args: { id: 'person' } })]) + stop;
+    const result = parseModelStream('gemini', raw);
+    expect(result.incomplete).toBe(false); expect(result.error).toBeUndefined();
+    expect(result.data.candidates[0].historyParts).toEqual([
+      call({ name: 'read_entity', id: 'lookup', args: { id: 'person' } }, { thoughtSignature: 'signed-header' }),
+    ]);
+  });
+
+  it.each([null, '', '  '])('treats an empty optional ID %j as absent while assembling streamed arguments', id => {
+    const raw = sse([call({ name: 'read_entity', id, partialArgs: [arg('$.id', 'per', true)], willContinue: true })])
+      + sse([call({ id: 'lookup', partialArgs: [arg('$.id', 'son')] })]) + stop;
+    const result = parseModelStream('gemini', raw);
+    expect(result.incomplete).toBe(false); expect(result.error).toBeUndefined();
+    expect(result.data.candidates[0].historyParts).toEqual([call({ name: 'read_entity', id: 'lookup', args: { id: 'person' } })]);
+  });
+
+  it.each([null, '', '  ', 'null', '{}'])('accepts an empty full-args snapshot %j before argument fragments', args => {
+    const raw = sse([call({ name: 'read_entity', id: 'lookup', args, willContinue: true })])
+      + sse([call({ id: 'lookup', partialArgs: [arg('$.id', 'person')] })]) + stop;
+    const result = parseModelStream('gemini', raw);
+    expect(result.incomplete).toBe(false); expect(result.error).toBeUndefined();
+    expect(result.data.candidates[0].historyParts[0].functionCall.args).toEqual({ id: 'person' });
+  });
+
+  it.each(['', '  ', 'null', '{}', '{"collection":"story"}'])('can append fragments after an ordinary encoded snapshot %j', args => {
+    const raw = sse([call({ name: 'list_text_files', id: 'lookup', args })])
+      + sse([call({ id: 'lookup', partialArgs: [{ jsonPath: '$.limit', numberValue: 3 }] })]) + stop;
+    const result = parseModelStream('gemini', raw);
+    expect(result.incomplete).toBe(false); expect(result.error).toBeUndefined();
+    expect(result.data.candidates[0].historyParts[0].functionCall.args).toEqual({ ...(args.includes('collection') ? { collection: 'story' } : {}), limit: 3 });
+  });
+
   it('emits only top-level carrier prose before completion, preserving Unicode and ignoring inner tool prose', () => {
     const deltas: string[] = [];
     const feed = createStreamTextEmitter('gemini', text => deltas.push(text), { name: 'emit_complete_text', field: 'content' });

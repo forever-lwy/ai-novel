@@ -11,6 +11,7 @@ import { EXTRACTION_SUBMISSION_NAME, EXTRACTION_TOOL_INSTRUCTION } from '../shar
 import { partialWritingProse, unpackWritingResponse, writingResponseTool, WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
 import { cleanDramatronText, createDramatronTextFilter } from '../shared/dramatron-output.js';
 import { archiveCarrierMessages, carrierInstruction, responseCarrierTool, unpackResponseCarrier } from '../shared/response-carrier.js';
+import { parseToolArguments } from '../shared/tool-arguments.js';
 import { rebornMessages } from '../shared/reborn-messages.js';
 export { validateProviderOptions } from './provider-options.js';
 
@@ -588,7 +589,20 @@ async function sendModelRequest(config: ProviderConfig, request: ModelRequest, w
 function responseToolCalls(protocol: ProviderConfig['protocol'], data: JsonObject): ModelToolCall[] {
   if (protocol === 'openai-chat') return objects(data.choices?.[0]?.message?.tool_calls).map(call => ({ id: call.id, name: call.function?.name, arguments: call.function?.arguments }));
   if (protocol === 'openai-responses') return objects(data.output).filter(item => item.type === 'function_call').map(call => ({ id: call.call_id, name: call.name, arguments: call.arguments }));
-  if (protocol === 'gemini') return objects(data.candidates?.[0]?.content?.parts).filter(part => object(part.functionCall)).map((part, index) => ({ id: part.functionCall.id ?? `call_${index}`, name: part.functionCall.name, arguments: part.functionCall.args }));
+  if (protocol === 'gemini') {
+    const parts = objects(data.candidates?.[0]?.content?.parts).filter(part => object(part.functionCall));
+    const usedIds = new Set(parts.map(part => part.functionCall.id));
+    return parts.map((part, index) => {
+      const { id, name, args } = part.functionCall;
+      let callId = id;
+      if (id == null || typeof id === 'string' && !id.trim()) {
+        callId = `call_${index}`;
+        while (usedIds.has(callId)) callId = `_${callId}`;
+        usedIds.add(callId);
+      }
+      return { id: callId, name, arguments: args };
+    });
+  }
   return objects(data.content).filter(part => part.type === 'tool_use').map(call => ({ id: call.id, name: call.name, arguments: call.input }));
 }
 
@@ -762,7 +776,7 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         const tool = tools.find(value => value.name === call.name);
         if (!tool || typeof call.name !== 'string' || typeof call.id !== 'string' || !call.id) throw new Error('模型请求了未提供的资料检索工具。');
         let args: unknown;
-        try { args = typeof call.arguments === 'string' ? JSON.parse(call.arguments) : call.arguments; }
+        try { args = parseToolArguments(call.arguments); }
         catch { throw new Error('模型返回的工具参数不是有效 JSON。'); }
         if (!object(args)) throw new Error('资料检索工具参数必须是 JSON 对象。');
         const activityId = `tool:${index}:${call.id}`;
@@ -791,8 +805,10 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
         body.input.push(...wireResults.map(({ call, output }) => ({ type: 'function_call_output', call_id: call.id, output })));
       } else if (config.protocol === 'gemini') {
         const candidate = data.candidates[0];
-        body.contents.push({ role: 'model', parts: candidate.historyParts ?? candidate.content.parts });
-        body.contents.push({ role: 'user', parts: wireResults.map(({ call, output }) => ({ functionResponse: { name: call.name, ...(call.id.startsWith('call_') ? {} : { id: call.id }), response: { result: JSON.parse(output) } } })) });
+        const parts = candidate.historyParts ?? candidate.content.parts;
+        const suppliedIds = new Set(objects(parts).filter(part => object(part.functionCall)).map(part => part.functionCall.id));
+        body.contents.push({ role: 'model', parts });
+        body.contents.push({ role: 'user', parts: wireResults.map(({ call, output }) => ({ functionResponse: { name: call.name, ...(suppliedIds.has(call.id) ? { id: call.id } : {}), response: { result: JSON.parse(output) } } })) });
       } else {
         body.messages.push({ role: 'assistant', content: data.content });
         body.messages.push({ role: 'user', content: wireResults.map(({ call, output }) => ({ type: 'tool_result', tool_use_id: call.id, content: output })) });

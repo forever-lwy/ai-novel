@@ -1,4 +1,5 @@
 import type { ModelToolCall } from './types.js';
+import { parseToolArguments } from './tool-arguments.js';
 
 export const WRITING_RESPONSE_NAME = 'emit_writing_response';
 
@@ -78,13 +79,13 @@ export function unpackWritingResponse(nativeCalls: ModelToolCall[], allowedNames
   catch { throw new Error('正文工具通道的参数不是完整有效的 JSON。'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('正文工具通道参数必须是对象。');
   const payload = value as Record<string, unknown>;
-  if (typeof payload.prose !== 'string' || !Array.isArray(payload.toolCalls) || payload.toolCalls.length > 4 || Object.keys(payload).some(key => !['prose', 'toolCalls'].includes(key))) throw new Error('正文工具通道必须包含 prose 和 toolCalls，每轮最多四项工具调用。');
+  if (typeof payload.prose !== 'string' || !Array.isArray(payload.toolCalls) || payload.toolCalls.length > 4) throw new Error('正文工具通道必须包含 prose 和 toolCalls，每轮最多四项工具调用。');
   const calls = payload.toolCalls.map((item: unknown, index: number): ModelToolCall => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('内层工具调用必须是对象。');
     const call = item as Record<string, unknown>;
-    if (typeof call.name !== 'string' || !allowedNames.includes(call.name) || typeof call.argumentsJson !== 'string' || Object.keys(call).some(key => !['name', 'argumentsJson'].includes(key))) throw new Error('正文工具通道请求了未提供的工具或参数结构不正确。');
+    if (typeof call.name !== 'string' || !allowedNames.includes(call.name)) throw new Error('正文工具通道请求了未提供的工具或参数结构不正确。');
     let args: unknown;
-    try { args = JSON.parse(call.argumentsJson); } catch { throw new Error('内层工具参数不是有效 JSON。'); }
+    try { args = parseToolArguments(call.argumentsJson); } catch { throw new Error('内层工具参数不是有效 JSON。'); }
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('内层工具参数必须是 JSON 对象。');
     return { id: `${outer.id}:${index}`, name: call.name, arguments: args };
   });
