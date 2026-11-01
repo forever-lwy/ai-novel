@@ -613,10 +613,18 @@
 @media(min-width:761px){
   .reading-overlay>.workspace-header-shell{position:relative}
   .reading-overlay .workspace-toolbars{top:0}
-  .reading-overlay .manuscript-wrap{padding-top:var(--workspace-toolbar-height);scroll-padding-top:calc(var(--workspace-toolbar-height) + 16px)}
+  .reading-overlay .manuscript-wrap{padding-top:var(--workspace-toolbar-height);scroll-padding-top:calc(var(--workspace-toolbar-height) + 16px);overflow-anchor:none}
   .reading-overlay .context-sidebar::before{height:var(--workspace-toolbar-height)}
+  .reading-overlay[data-reading-fullscreen=true]>.workspace-header-shell{position:absolute}
+  .reading-overlay[data-reading-fullscreen=true] .manuscript-wrap{padding-top:0;scroll-padding-top:16px}
+  .reading-overlay[data-reading-fullscreen=true] .context-sidebar::before{height:0}
 }
+.reading-fullscreen-exit{position:absolute;top:0;left:0;right:0;height:56px;display:flex;align-items:flex-start;justify-content:center;padding-top:8px;z-index:40;pointer-events:none}
+.reading-fullscreen-exit>.button{opacity:0;pointer-events:none;box-shadow:0 3px 16px #223b2826;background:#fffefa;transition:opacity .15s}
+.workspace[data-fullscreen-exit=visible]>.reading-fullscreen-exit>.button,.reading-fullscreen-exit:focus-within>.button{opacity:1;pointer-events:auto}
+.reading-fullscreen-exit kbd{font:inherit;font-size:10px;color:#7c8f71;border:1px solid #dce4d4;border-radius:3px;padding:1px 4px;margin-left:3px}
 @media(max-width:760px){
+  .workspace-reading-fullscreen{display:none}
   .workspace{--workspace-header-height:62px;--workspace-toolbar-height:110px}
   .workspace-continue{margin:0 11px 0 6px;padding:9px 10px;font-size:11px;gap:5px}
   .workspace-toolbar-row>.workspace-tabs{gap:16px}
