@@ -14,6 +14,7 @@ import { imageModelCapabilities } from '../shared/image-capabilities';
 import { normalizeTaskSettings } from '../shared/task-settings';
 import { AccountSecurity } from './AccountSecurity';
 import { ExtensionsPanel } from './ExtensionsPanel';
+import { DataCleanupPanel } from './DataCleanupPanel';
 
 const protocols: Record<ProviderProtocol, { name: string; url: string }> = {
   'openai-chat': { name: 'OpenAI · Chat Completions', url: 'https://api.openai.com/v1' },
@@ -36,6 +37,7 @@ const sections = [
   { id: 'prompts', label: '提示词编排', icon: ListOrdered, description: '管理通用预设和四类任务提示词、调整消息顺序，并预览编排后的内容。' },
   { id: 'images', label: '生图与自动插画', icon: Image, description: '选择图片模型，设置作品画风、新人物立绘与场景 CG 的自动生成。' },
   { id: 'extensions', label: '工具与技能', icon: PlugZap, description: '管理脚本、MCP 与技能，按需向模型披露。' },
+  { id: 'cleanup', label: '数据清理', icon: Trash2, description: '按天数或数量保留历史版本、请求和任务，支持自动清理与手动预览。' },
   { id: 'account', label: '账号安全', icon: ShieldCheck, description: '修改登录密码，管理其他设备的登录。' },
 ] as const;
 type SettingsSection = typeof sections[number]['id'];
@@ -95,6 +97,9 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
   const [extensionsBusy, setExtensionsBusy] = useState(false);
   const [extensionsDirty, setExtensionsDirty] = useState(false);
   const [extensionsVisited, setExtensionsVisited] = useState(false);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [cleanupDirty, setCleanupDirty] = useState(false);
+  const [cleanupVisited, setCleanupVisited] = useState(false);
   const [savedSignature, setSavedSignature] = useState('');
   const [inputDraftInvalid, setInputDraftInvalid] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -119,16 +124,16 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
     return () => controller.abort();
   }, [loadAttempt, projectId]);
   useEffect(() => {
-    if (!dirty && !extensionsDirty) return;
+    if (!dirty && !extensionsDirty && !cleanupDirty) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
-  }, [dirty, extensionsDirty]);
+  }, [dirty, extensionsDirty, cleanupDirty]);
   useEffect(() => () => { for (const request of requests.current.values()) { clearTimeout(request.timer); request.controller.abort(); } }, []);
 
-  function back() { if (!busy && !accountBusy && !extensionsBusy && ((!dirty && !extensionsDirty) || window.confirm('设置尚未保存，返回作品会放弃这些修改。确定返回吗？'))) onBack(); }
+  function back() { if (!busy && !accountBusy && !extensionsBusy && !cleanupBusy && ((!dirty && !extensionsDirty && !cleanupDirty) || window.confirm('设置尚未保存，返回作品会放弃这些修改。确定返回吗？'))) onBack(); }
   function switchScope(next: 'global' | 'project') {
-    if (next !== scope && ((!dirty && !extensionsDirty) || window.confirm('当前设置尚未保存，切换范围会放弃这些修改。确定切换吗？'))) onScopeChange(next);
+    if (next !== scope && !busy && !accountBusy && !extensionsBusy && !cleanupBusy && ((!dirty && !extensionsDirty && !cleanupDirty) || window.confirm('当前设置尚未保存，切换范围会放弃这些修改。确定切换吗？'))) onScopeChange(next);
   }
   function inheritance(group: ModelRole | 'promptTemplates' | 'imageSettings', label: string) {
     if (!projectId || !settings || !globalSettings) return null;
@@ -276,12 +281,12 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
   }
   const tasks = normalizeTaskSettings(settings?.taskSettings);
   return <main className="settings-page" data-testid="settings-page" aria-label="设置页面">
-    <header className="settings-header"><Brand /><button type="button" className="text-button" disabled={busy || accountBusy || extensionsBusy} onClick={back}><ArrowLeft size={16} />返回作品</button></header>
-    <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>{projectId ? `《${project?.title}》作品设置` : '设置'}</h1><p>{projectId ? '默认继承全局，可分别覆盖任务模型、提示词和生图设置。供应商连接统一在全局管理。' : '配置模型服务、任务参数与提示词，管理工作台的账号安全。'}</p>{project && <div className="settings-scope" role="group" aria-label="设置范围"><button type="button" aria-pressed={!projectId} disabled={busy || accountBusy || extensionsBusy} onClick={() => switchScope('global')}>全局设置</button><button type="button" aria-pressed={!!projectId} disabled={busy || accountBusy || extensionsBusy} onClick={() => switchScope('project')}>作品设置</button></div>}</div>
+    <header className="settings-header"><Brand /><button type="button" className="text-button" disabled={busy || accountBusy || extensionsBusy || cleanupBusy} onClick={back}><ArrowLeft size={16} />返回作品</button></header>
+    <div className="settings-page-heading"><span className="eyebrow">偏好与创作配置</span><h1 ref={title} tabIndex={-1}>{projectId ? `《${project?.title}》作品设置` : '设置'}</h1><p>{projectId ? '默认继承全局，可分别覆盖任务模型、提示词和生图设置。供应商连接统一在全局管理。' : '配置模型服务、任务参数与提示词，管理工作台的账号安全。'}</p>{project && <div className="settings-scope" role="group" aria-label="设置范围"><button type="button" aria-pressed={!projectId} disabled={busy || accountBusy || extensionsBusy || cleanupBusy} onClick={() => switchScope('global')}>全局设置</button><button type="button" aria-pressed={!!projectId} disabled={busy || accountBusy || extensionsBusy || cleanupBusy} onClick={() => switchScope('project')}>作品设置</button></div>}</div>
     <div className="settings-layout">
-      <nav className="settings-navigation" aria-label="设置分类">{sections.filter(item => !projectId || ['models', 'prompts', 'images'].includes(item.id)).map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || accountBusy || extensionsBusy || !settings} onClick={() => { setSection(item.id); if (item.id === 'extensions') setExtensionsVisited(true); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">{projectId ? '修改只保存到当前作品。恢复继承也需保存后生效。提供商、工具与技能、账号安全在全局管理。' : '修改可跨分类保留。模型与创作设置统一保存；工具与技能单独保存，账号安全操作单独生效。'}</p></nav>
+      <nav className="settings-navigation" aria-label="设置分类">{sections.filter(item => !projectId || ['models', 'prompts', 'images'].includes(item.id)).map(item => <button type="button" key={item.id} aria-current={section === item.id ? 'page' : undefined} className={section === item.id ? 'active' : ''} disabled={busy || accountBusy || extensionsBusy || cleanupBusy || !settings} onClick={() => { setSection(item.id); if (item.id === 'extensions') setExtensionsVisited(true); if (item.id === 'cleanup') setCleanupVisited(true); setMessage(''); }}><item.icon size={17} /><span>{item.label}</span></button>)}<p className="hint">{projectId ? '修改只保存到当前作品。恢复继承也需保存后生效。提供商、工具与技能、数据清理、账号安全在全局管理。' : '修改可跨分类保留。模型与创作设置统一保存；工具与技能、数据清理单独保存，账号安全操作单独生效。'}</p></nav>
       <div className="settings-content">
-        {!settings ? <section className="settings-loading" aria-label="设置加载状态">{loading ? <Spinner /> : <><Notice error={error} /><button type="button" className="button secondary" onClick={() => setLoadAttempt(value => value + 1)}><RefreshCw size={15} />重新加载设置</button></>}</section> : <form ref={form} className="settings-form form-stack" hidden={section === 'account' || section === 'extensions'} inert={section === 'account' || section === 'extensions'} noValidate onChange={() => setInputDraftInvalid(!!invalidField())} onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
+        {!settings ? <section className="settings-loading" aria-label="设置加载状态">{loading ? <Spinner /> : <><Notice error={error} /><button type="button" className="button secondary" onClick={() => setLoadAttempt(value => value + 1)}><RefreshCw size={15} />重新加载设置</button></>}</section> : <form ref={form} className="settings-form form-stack" hidden={section === 'account' || section === 'extensions' || section === 'cleanup'} inert={section === 'account' || section === 'extensions' || section === 'cleanup'} noValidate onChange={() => setInputDraftInvalid(!!invalidField())} onSubmit={(e: FormEvent) => { e.preventDefault(); void save(); }}>
     <section data-settings-section="providers" hidden={section !== 'providers'} aria-label="供应商连接设置">
     <div className="settings-section-heading"><h2>供应商连接</h2><p>{sections[0].description}</p></div>
     <fieldset className="settings-section-fields form-stack" disabled={busy || !!projectId}>
@@ -352,6 +357,7 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
   </form>}
         {settings && section === 'account' && <AccountSecurity onBusyChange={setAccountBusy} />}
         {settings && extensionsVisited && <div hidden={section !== 'extensions'} inert={section !== 'extensions'}><ExtensionsPanel onDirtyChange={setExtensionsDirty} onBusyChange={setExtensionsBusy} /></div>}
+        {settings && !projectId && cleanupVisited && <div hidden={section !== 'cleanup'} inert={section !== 'cleanup'}><DataCleanupPanel onDirtyChange={setCleanupDirty} onBusyChange={setCleanupBusy} /></div>}
       </div>
     </div>
   </main>;

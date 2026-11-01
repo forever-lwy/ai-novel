@@ -7,6 +7,8 @@ import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import { modelOutputSchema, OutputStore } from './output-store.js';
+import { evidenceOutput, extractionEvidenceSchema, type ExtractionEvidence } from './extraction-evidence.js';
+import { retainedChapterIds } from './chapter-retention.js';
 import { findEntitiesByName, reconcileExtractionEntities } from './entity-resolution.js';
 import { rebuildCharacterProfileDescription, normalizeProfileAttribute } from './extraction.js';
 import { repairLegacyExtractionVisibility } from './legacy-extraction-visibility.js';
@@ -140,7 +142,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS job_import_chapters (job_id TEXT NOT NULL, position INTEGER NOT NULL, title TEXT NOT NULL, text TEXT NOT NULL, PRIMARY KEY(job_id,position));
       CREATE TABLE IF NOT EXISTS job_writing_drafts (job_id TEXT PRIMARY KEY, text TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS job_writing_activities (job_id TEXT NOT NULL, activity_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(job_id,activity_id));
-      CREATE INDEX IF NOT EXISTS jobs_branch ON jobs(branch_id,status);`);
+      CREATE INDEX IF NOT EXISTS jobs_branch ON jobs(branch_id,status);
+      CREATE TABLE IF NOT EXISTS extraction_evidence (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS evidence_project ON extraction_evidence(project_id);`);
     this.outputs = new OutputStore(this.db);
     this.images = new ImageStore(this.db);
   }
@@ -198,19 +202,10 @@ export class Store {
       this.getProject(projectId);
       // Chapter text is shared by story lines and historical snapshots, with no project column.
       // Include every stored revision, even one no longer reachable after a rollback.
-      const chapters = new Set<string>(); const retained = new Set<string>();
-      const collect = (owner: unknown, chapterId: string) => (owner === projectId ? chapters : retained).add(chapterId);
-      for (const row of this.db.prepare('SELECT r.state,b.project_id FROM revisions r JOIN branches b ON b.id=r.branch_id').iterate()) {
-        for (const chapter of unpack(row.state).chapters) collect(row.project_id, chapter.id);
-      }
-      for (const row of this.db.prepare('SELECT project_id,data FROM jobs').iterate()) {
-        const job = parse<Job>(row.data);
-        for (const field of ['chapterId', 'generatedChapterId', 'extractChapterId', 'importCurrentChapterId']) {
-          const chapterId = job.payload[field]; if (typeof chapterId === 'string') collect(row.project_id, chapterId);
-        }
-      }
-      for (const row of this.db.prepare('SELECT project_id,chapter_id FROM model_outputs WHERE chapter_id IS NOT NULL').iterate()) collect(row.project_id, String(row.chapter_id));
+      const chapters = retainedChapterIds(this.db, { projectId });
+      const retained = retainedChapterIds(this.db, { excludeProjectId: projectId });
       this.db.prepare('DELETE FROM model_outputs WHERE project_id=?').run(projectId);
+      this.db.prepare('DELETE FROM extraction_evidence WHERE project_id=?').run(projectId);
       this.db.prepare('DELETE FROM image_assets WHERE project_id=?').run(projectId);
       this.db.prepare('DELETE FROM job_import_chapters WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)').run(projectId);
       this.db.prepare('DELETE FROM job_writing_drafts WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)').run(projectId);
@@ -272,7 +267,8 @@ export class Store {
     const state = this.rawRevisionState(revisionId);
     this.repairEditedChapterLinks(revisionId, state);
     const projectId = this.getBranch(this.revision(revisionId).branchId, true).projectId;
-    const outputs = this.db.prepare("SELECT data FROM model_outputs WHERE project_id=? AND stage='extraction' AND status='applied'").all(projectId).map(row => parse<import('../shared/types.js').ModelOutputRecord>(row.data));
+    const outputs = this.db.prepare("SELECT json_remove(data,'$.rawResponse','$.text','$.editedText','$.request','$.diagnostics','$.issues') AS data FROM model_outputs WHERE project_id=? AND stage='extraction' AND status='applied'").all(projectId).map(row => parse<import('../shared/types.js').ModelOutputRecord>(row.data));
+    outputs.push(...this.extractionEvidence(projectId).map(evidenceOutput));
     if (reader || outputs.some(output => output.adjustments?.some(change => /^entities\[\d+\]\.visibility$/.test(change.path) && change.message === '省略字段已补为 "secret"'))) {
       const lineage = this.materialHistory(revisionId); const positions = new Map(lineage.map((revision, index) => [revision.id, index]));
       const included = outputs.filter(output => positions.has(output.baseRevisionId)).sort((a, b) => positions.get(b.baseRevisionId)! - positions.get(a.baseRevisionId)! || (a.blockIndex ?? 0) - (b.blockIndex ?? 0));
@@ -856,24 +852,25 @@ export class Store {
   exportProject(projectId: string) {
     const project = this.getProject(projectId); const branches = this.listBranches(projectId, true);
     // Assets and interrupted jobs may refer to a revision detached by rollback.
-    const chapterIds = new Set<string>();
+    const chapterIds = retainedChapterIds(this.db, { projectId });
     // Preserve global creation order across branches, including millisecond ties.
     const revisions: { revision: Revision; snapshot: string }[] = [];
     for (const row of this.db.prepare('SELECT r.data,r.state FROM revisions r JOIN branches b ON b.id=r.branch_id WHERE b.project_id=? ORDER BY r.rowid').iterate(projectId)) {
-      for (const chapter of unpack(row.state).chapters) chapterIds.add(chapter.id);
       revisions.push({ revision: parse<Revision>(row.data), snapshot: Buffer.from(row.state as Uint8Array).toString('base64') });
     }
-    const chapters = [...chapterIds].map(chapterId => { const row = this.db.prepare('SELECT data,text FROM chapter_texts WHERE id=?').get(chapterId)!; return { ...parse<ChapterRef>(row.data), text: String(row.text) }; });
     const jobs = this.db.prepare('SELECT data FROM jobs WHERE project_id=?').all(projectId).map(r => parse<Job>(r.data));
+    const outputs = this.outputs.all(projectId), extractionEvidence = this.extractionEvidence(projectId), images = this.images.export(projectId);
+    const chapters = [...chapterIds].map(chapterId => { const row = this.db.prepare('SELECT data,text FROM chapter_texts WHERE id=?').get(chapterId); if (!row) throw new HttpError('备份所需章节正文不存在', 409); return { ...parse<ChapterRef>(row.data), text: String(row.text) }; });
     const importChapters = this.db.prepare('SELECT c.job_id AS jobId,c.position,c.title,c.text FROM job_import_chapters c JOIN jobs j ON j.id=c.job_id WHERE j.project_id=? ORDER BY c.job_id,c.position').all(projectId);
     const writingDrafts = this.db.prepare('SELECT d.job_id AS jobId,d.text FROM job_writing_drafts d JOIN jobs j ON j.id=d.job_id WHERE j.project_id=?').all(projectId);
     const writingActivities = jobs.filter(job => job.kind === 'generate').map(job => ({ jobId: job.id, activities: this.listWritingActivities(job.id) })).filter(entry => entry.activities.length);
-    return { version: 1, project, projectSettings: readProjectSettings(this.db, projectId).overrides, branches, revisions, chapters, jobs, importChapters, writingDrafts, writingActivities, outputs: this.outputs.all(projectId), images: this.images.export(projectId) };
+    return { version: 1, project, projectSettings: readProjectSettings(this.db, projectId).overrides, branches, revisions, chapters, jobs, importChapters, writingDrafts, writingActivities, outputs, extractionEvidence, images };
   }
+  extractionEvidence(projectId: string): ExtractionEvidence[] { return this.db.prepare('SELECT data FROM extraction_evidence WHERE project_id=? ORDER BY rowid').all(projectId).map(row => parse<ExtractionEvidence>(row.data)); }
   restoreProject(input: unknown, sourceIdMap: Record<string, string> = {}, onRestore?: (project: Project) => void): Project {
     if (input && typeof input === 'object' && Array.isArray((input as { revisions?: unknown }).revisions) && (input as { revisions: unknown[] }).revisions.length > RESTORE_MAX_REVISIONS) throw restoreCapacityError();
     validateBackupStructure(input);
-    const parsed = backupSchema.safeParse(input); if (!parsed.success) throw new HttpError('作品备份格式不正确或缺少正文与世界资料字段');
+    const parsed = backupSchema.extend({ extractionEvidence: z.array(extractionEvidenceSchema).default([]) }).safeParse(input); if (!parsed.success) throw new HttpError('作品备份格式不正确或缺少正文与世界资料字段');
     const data = parsed.data;
     let projectSettings;
     try { projectSettings = parseProjectSettingsOverrides(data.projectSettings === undefined ? {} : data.projectSettings); }
@@ -881,6 +878,7 @@ export class Store {
     const states = readBackupStates(data.revisions);
     const map = new Map<string, string>(); const register = (value: string) => { if (value && !map.has(value)) map.set(value, id()); };
     register(data.project.id); for (const b of data.branches) register(b.id); for (const c of data.chapters) register(c.id); for (const job of data.jobs) register(job.id); for (const output of data.outputs) register(output.id); for (const asset of data.images) register(asset.image.id);
+    for (const evidence of data.extractionEvidence) register(evidence.id);
     for (let index = 0; index < data.revisions.length; index++) { register(data.revisions[index].revision.id); const state = states[index]; for (const e of state.entities) { register(e.id); for (const f of e.facts) register(f.id); } for (const relation of state.relations) register(relation.id); for (const f of state.foreshadows) register(f.id); }
     const remap = (value: unknown, key = ''): unknown => {
       // Process payloads are historical observations, like raw model responses. Only their owning job is remapped.
@@ -1020,6 +1018,8 @@ export class Store {
       if (job.status === 'running' || job.status === 'queued') { job.status = 'paused'; job.message = '作品已恢复，请手动继续任务'; }
     }
     const outputIds = new Set(restored.outputs.map(o => o.id));
+    const evidenceIds = new Set(restored.extractionEvidence.map(e => e.id));
+    if (evidenceIds.size !== restored.extractionEvidence.length || restored.extractionEvidence.some(e => outputIds.has(e.id) || e.projectId !== restored.project.id || !branchIds.has(e.branchId) || !revisionIds.has(e.baseRevisionId) || !chapterIds.has(e.chapterId))) throw new HttpError('备份资料提取依据关联无效');
     if (outputIds.size !== restored.outputs.length || restored.outputs.some(o => o.projectId !== restored.project.id || !jobs.has(o.jobId) || !branchIds.has(o.branchId) || !revisionIds.has(o.baseRevisionId) || (o.chapterId && !chapterIds.has(o.chapterId)))) throw new HttpError('备份模型输出关联无效');
     for (const job of restored.jobs) if (job.payload.lastOutputId && !outputIds.has(String(job.payload.lastOutputId))) throw new HttpError('备份缺少任务关联的模型输出');
     restored.project.title += '（恢复）'; restored.project.updatedAt = now();
@@ -1045,6 +1045,7 @@ export class Store {
         }
       }
       for (const output of restored.outputs) this.outputs.insert(output);
+      for (const evidence of restored.extractionEvidence) this.db.prepare('INSERT INTO extraction_evidence VALUES(?,?,?)').run(evidence.id, evidence.projectId, JSON.stringify(evidence));
       for (const asset of restored.images) this.images.insert(asset.image, asset.contentBase64 ? { bytes: Buffer.from(asset.contentBase64, 'base64'), mimeType: asset.image.mimeType! } : undefined);
       onRestore?.(restored.project);
       const references = [...states.flatMap(state => state.sourceReference ? [state.sourceReference] : []), ...restored.jobs.flatMap(job => job.payload.sourceReference ? [job.payload.sourceReference as StoryReference] : [])];

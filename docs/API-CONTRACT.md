@@ -19,6 +19,14 @@
 - 写作／RPG、导入与重新提取、自动命名、标题修复、AI 分章规则、摘要压缩、生图提示词优化及手动／自动生图均按所属作品读取配置。设置保存不重发请求、不改正文版本；已发出的请求及历史记录保留原配置。RPG 已保存的工具对话沿用原消息与提示词，原会话模型一致性校验继续生效。
 - 完整备份 v1 新增可选 `projectSettings`，仅保存本作品覆盖，不含 revision、全局默认值或供应商连接／密钥。恢复校验结构但保留尚未在当前实例配置的供应商 ID，不替换连接、不重映射提示词 ID；缺失该字段的旧备份全部继承全局。覆盖大小计入备份容量预检；删除作品一并删除其设置。设置不属于正文历史快照，故事线切换和章节回退不改变作品级配置。
 
+## 数据清理
+
+- `GET /data-cleanup -> {settings,lastRun?}`；`PUT /data-cleanup {settings}` 独立保存全局清理规则并返回同结构。规则为 `{enabled,history:{maxAgeDays,maxCount},requests:{maxAgeDays,maxCount},jobs:{maxAgeDays,maxCount}}`，默认 `enabled:false` 且所有限制为 `0`。天数是 0–36500 的整数，数量是 0–1000000 的整数；拒绝额外字段和隐式类型转换。规则独立于供应商及作品设置，单作品备份不包含规则。
+- `0` 表示不限；天数或数量任一超限即入选。历史数量按每条故事线、请求和任务数量按每部作品计算。仅 `completed/cancelled/stale` 任务可清理，任务清理连带其请求、草稿与生成活动；进行中、失败及仍供当前摘要候选、RPG 选择、图片或其他任务使用的记录保留。历史清理保留当前头、必要章末快照、分支／原作／回退／人工修正依赖，可超过数量限制。
+- `POST /data-cleanup/preview {settings} -> DataCleanupReport` 只读计算范围，不保存规则或清理记录。`POST /data-cleanup/run {settings,expectedFingerprint} -> DataCleanupReport` 重新核对预览指纹后在事务内执行，内容变化返回 409，需重新预览；不因手动执行保存传入规则。报告包含 `{revisions,requests,jobs,chapters,images,protectedRevisions,protectedRequests,protectedJobs,fingerprint,completedAt?}`，预览没有 `completedAt`，执行报告保存为 `lastRun`。当前 `images` 为 0，不回收图片像素；仅回收已无任何引用的旧正文。接口沿用登录和同源校验。
+- 自动清理仅在正常启用后台服务时运行：启动即检查，之后每小时读取已保存规则；默认关闭，保存规则不立即执行，服务关闭时停止计时器。清理永久删除冗余记录，不新增故事版本，不能通过回退撤销，也不执行 `VACUUM`。
+- 删除已应用提取的完整请求时，可在内部 `extraction_evidence` 保留关联及规范化提取结果，用于旧资料兼容；其中没有原始请求、响应或诊断。完整备份 v1 新增可选 `extractionEvidence`，按作品导出、校验并重映射版本／章节标识，旧备份缺省为空；删除作品时一并删除。保留版本和正文依赖闭包确保清理后备份仍可恢复。
+
 ## 原作参考与文本查询工具
 
 续写请求以 `continuationAnchor={chapterId,title,ending,instruction}` 标记最后保存的正文结尾，同时提供最近完整正文；自定义预设省略上下文块时，运行规则仍带入该起点。内部章节数量和索引不映射到章节编号变量；旧 `chapterNumber` 展开为“待写章节／当前章节”，新建章节缺省标题为“新章节”，EPUB 缺题名时为“未命名章节”。原文标题里的真实编号和原文段落／行号保留。

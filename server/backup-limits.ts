@@ -3,6 +3,7 @@ import { statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { RESTORE_MAX_REVISIONS, RESTORE_MAX_STATE_BYTES, RESTORE_MAX_EXPANDED_STATE_BYTES } from './store.js';
+import { retainedChapterIds } from './chapter-retention.js';
 
 export const MAX_BACKUP_BYTES = 128 * 1024 * 1024;
 /** Check sizes before materializing the complete backup, including binary files. */
@@ -21,11 +22,12 @@ export function checkBackupSize(db: DatabaseSync, uploadDir: string, projectId: 
     for (const chapter of state.chapters) chapterIds.add(chapter.id);
   }
   // SQL size checks avoid reading an oversized record before the budget check.
-  for (const table of ['projects', 'project_settings', 'branches', 'jobs', 'model_outputs', 'image_assets'] as const) {
+  for (const table of ['projects', 'project_settings', 'branches', 'jobs', 'model_outputs', 'extraction_evidence', 'image_assets'] as const) {
     const predicate = table === 'projects' ? 'id=?' : 'project_id=?';
     const row = db.prepare(`SELECT COALESCE(SUM(length(CAST(data AS BLOB))),0) AS bytes,COUNT(*) AS records FROM ${table} WHERE ${predicate}`).get(projectId)!;
     add(Number(row.bytes) + Number(row.records) * 128);
   }
+  for (const chapterId of retainedChapterIds(db, { projectId })) chapterIds.add(chapterId);
   const ids = JSON.stringify([...chapterIds]);
   const chapterSize = db.prepare('SELECT COALESCE(SUM(length(CAST(text AS BLOB))+length(CAST(data AS BLOB))),0) AS bytes FROM chapter_texts WHERE id IN (SELECT value FROM json_each(?))').get(ids)!;
   add(Number(chapterSize.bytes));

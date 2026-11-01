@@ -31,6 +31,7 @@ import { validatePromptTemplates } from '../shared/prompt-templates.js';
 import { imageSettingsSchema, modelNameSchema, providerSchema, modelRoleSchema, settingsSchema, parseProjectSettingsOverrides } from './settings-schema.js';
 import { parseTaskSettings } from '../shared/task-settings.js';
 import type { PromptPreviewInput } from '../shared/prompt-runtime.js';
+import { DataCleanupService, registerDataCleanupRoutes } from './data-cleanup.js';
 
 const revision = z.string().min(1).max(100);
 const mode = z.enum(['original', 'continuation', 'fanfiction', 'rewrite', 'rpg']);
@@ -139,6 +140,8 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   app.get('/api/health', async () => ({ ok: true }));
   registerAuthRoutes(app, { settings, store, secureCookies: config.secureCookies, loginAttempts: options.rateLimits?.login });
   registerExtensionRoutes(app, extensions);
+  const cleanup = new DataCleanupService(store, settings, () => engine.activeJobIds(), error => app.log.error(error, '自动数据清理未完成，数据事务已回滚'));
+  registerDataCleanupRoutes(app, cleanup);
   const param = (req: any, key = 'id'): string => z.string().min(1).max(100).parse(req.params[key]);
   const base = (body: unknown) => z.object({ baseRevisionId: revision }).parse(body).baseRevisionId;
   const source = (id: string): SourceRow => (store.db.prepare('SELECT * FROM sources WHERE id=?').get(id) as SourceRow | undefined) || fail('找不到原文文件。', 404);
@@ -492,7 +495,7 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     await app.register(staticFiles, { root: staticDir, prefix: '/' });
     app.setNotFoundHandler((request, reply) => request.url.startsWith('/api/') ? reply.status(404).send({ error: '接口不存在。' }) : reply.sendFile('index.html'));
   }
-  app.addHook('onClose', async () => { extensions.close(); await Promise.all([engine.close(), images.close()]); store.close(); });
-  if (options.startEngine !== false) engine.start();
-  return { app, store, engine, images, settings, extensions, dataDir };
+  app.addHook('onClose', async () => { cleanup.close(); extensions.close(); await Promise.all([engine.close(), images.close()]); store.close(); });
+  if (options.startEngine !== false) { engine.start(); cleanup.start(); }
+  return { app, store, engine, images, settings, extensions, cleanup, dataDir };
 }

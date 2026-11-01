@@ -60,6 +60,7 @@ export class StoryEngine {
   private started = false;
   private closed = false;
   private chargedExtractionErrors = new WeakSet<ModelOutputError>();
+  activeJobIds(): ReadonlySet<string> { return new Set([...this.controllers.keys(), ...this.runs.keys()]); }
   private nonRetryableExtractionErrors = new WeakSet<Error>();
   constructor(private store: Store, private getSettings: (projectId?: string) => Settings, private models: TextModels = { generateText, generateStructured }, private images?: Pick<ImageService, 'generateAutomatic'> & Partial<Pick<ImageService, 'generateDuringWriting' | 'writingProgress' | 'bindWritingChapter' | 'applyScenePlacement'>>, private extensions?: ExtensionService) {}
   start() {
