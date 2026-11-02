@@ -85,14 +85,17 @@ export interface ImageGenerateInput { baseRevisionId: string; kind: StoryImageKi
 /** Writing tools request illustrations; they bind to saved prose and confirmed entities after extraction. */
 export interface WritingImageRequest { kind: 'portrait' | 'cg'; name?: string; description: string; imageId?: string; sourceText?: string; sceneDescription?: string; prompt?: string; referenceNames?: string[]; parameters?: ImageResolvedParameters }
 export type ExtractionOutputMode = 'prompt' | 'structured' | 'tool';
+export interface WritingTaskSettings { maxToolRounds?: number; recentChapterCount: number }
 export interface TaskSettings {
+  /** Older settings omit this group; normalizeTaskSettings supplies its defaults. */
+  writing?: WritingTaskSettings;
   extraction: { outputMode?: ExtractionOutputMode; autoRetry: boolean; maxRetries: number; retryDelayMs: number };
   /** Accepted only for older settings; never used by current tasks. */
   planning?: { enabled: boolean; mode: 'separate' | 'tool' };
 }
 export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings; taskSettings?: TaskSettings }
 /** Missing groups inherit the current global settings; provider connections are always global. */
-export interface ProjectModelSettings { providerId: string; model: string; modelParameters: ModelParameterProfile[]; extraction?: TaskSettings['extraction'] }
+export interface ProjectModelSettings { providerId: string; model: string; modelParameters: ModelParameterProfile[]; writing?: WritingTaskSettings; extraction?: TaskSettings['extraction'] }
 export interface ProjectSettingsOverrides { tasks?: Partial<Record<ModelRole, ProjectModelSettings>>; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings }
 export interface ProjectSettingsRecord { revision: string; overrides: ProjectSettingsOverrides }
 export interface ProjectSettingsView extends ProjectSettingsRecord { global: Settings; effective: Settings }

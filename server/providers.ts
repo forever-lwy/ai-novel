@@ -17,6 +17,7 @@ export { validateProviderOptions } from './provider-options.js';
 
 export const MODEL_TIMEOUT_MS = DEFAULT_MODEL_TIMEOUT_MS;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const MAX_TOOL_ROUNDS = 100;
 
 type JsonObject = Record<string, any>;
 
@@ -625,7 +626,7 @@ function continuationWire(config: ProviderConfig, request: ModelRequest): Return
   if (state && (state.protocol !== config.protocol || state.model !== config.model)) throw new Error('等待选择的模型协议或型号已改变，请恢复原模型设置后继续。');
   const wire = requestBody(config, request);
   if (state) {
-    if (!object(state.body) || typeof state.text !== 'string' || !Number.isSafeInteger(state.round) || state.round < 1 || state.round > 24 || !Number.isSafeInteger(state.callCount) || state.callCount < 0 || state.callCount > 96 || ![state.inputTokens, state.outputTokens].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error('保存的模型续接记录不完整，无法继续本次选择。');
+    if (!object(state.body) || typeof state.text !== 'string' || !Number.isSafeInteger(state.round) || state.round < 1 || state.round > MAX_TOOL_ROUNDS || !Number.isSafeInteger(state.callCount) || state.callCount < 0 || state.callCount > MAX_TOOL_ROUNDS * 4 || ![state.inputTokens, state.outputTokens].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error('保存的模型续接记录不完整，无法继续本次选择。');
     if (state.pending && (!object(state.pending.data) || !Array.isArray(state.pending.calls) || !Array.isArray(state.pending.results) || !Number.isSafeInteger(state.pending.nextIndex) || state.pending.nextIndex < 0 || state.pending.nextIndex > state.pending.calls.length || state.pending.results.length !== state.pending.nextIndex)) throw new Error('保存的工具续接记录不完整，无法继续本次选择。');
     wire.body = structuredClone(state.body) as typeof wire.body;
     if (!state.pending) appendToolResultReview(config.protocol, wire.body);
@@ -716,7 +717,7 @@ export async function generateText(config: ProviderConfig, request: ModelRequest
   const wire = continuationWire(config, request);
   const body = wire.body as JsonObject;
   const tools = request.tools ?? [];
-  const maxRounds = Number.isSafeInteger(request.maxToolRounds) && request.maxToolRounds! > 0 ? Math.min(24, request.maxToolRounds!) : 6;
+  const maxRounds = Number.isSafeInteger(request.maxToolRounds) && request.maxToolRounds! > 0 ? Math.min(MAX_TOOL_ROUNDS, request.maxToolRounds!) : 6;
   const saved = request.continuation;
   const tokens = { inputTokens: saved?.inputTokens ?? 0, outputTokens: saved?.outputTokens ?? 0 };
   let text = saved?.text ?? '';

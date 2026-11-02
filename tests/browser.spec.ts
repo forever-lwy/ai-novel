@@ -3597,6 +3597,7 @@ async function taskSettingsAuthentication(page: Page) {
 }
 
 const taskSettingsDefaults = {
+  writing: { recentChapterCount: 3 },
   extraction: { outputMode: 'prompt', autoRetry: false, maxRetries: 2, retryDelayMs: 5000 },
   planning: { enabled: true, mode: 'separate' },
 };
@@ -3693,7 +3694,7 @@ test('任务控制设置保留数字草稿，校验重试范围并保存秒到�
     await settings.getByRole('button', { name: '保存设置', exact: true }).click();
     await expect(settings.getByRole('status')).toContainText('设置已保存');
     const saved = await (await page.request.get('/api/settings')).json();
-    expect(saved.taskSettings).toEqual({ extraction: { outputMode: 'prompt', autoRetry: true, maxRetries: 3, retryDelayMs: 1250 } });
+    expect(saved.taskSettings).toEqual({ writing: { recentChapterCount: 3 }, extraction: { outputMode: 'prompt', autoRetry: true, maxRetries: 3, retryDelayMs: 1250 } });
     expect(saved.planningProviderId).toBe(providerId); expect(saved.planningModel).toBe('e2e-planning');
     await page.screenshot({ path: testInfo.outputPath('task-controls-desktop.png'), animations: 'disabled', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });

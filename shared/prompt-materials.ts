@@ -80,7 +80,7 @@ const structuredValue = (value: unknown): unknown => {
 export function formatRecentChapters(value: unknown): string {
   const chapters = structuredValue(value);
   if (!Array.isArray(chapters)) return formatPromptMaterial(chapters);
-  if (!chapters.length) return '尚无已保存章节。';
+  if (!chapters.length) return '本次未附带最近章节全文。';
   return chapters.map(chapter => {
     if (!object(chapter) || typeof chapter.text !== 'string') return formatPromptMaterial(chapter);
     const { chapterId, title, text, ...extra } = chapter;

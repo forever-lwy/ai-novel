@@ -56,10 +56,20 @@ function fieldError(field: HTMLInputElement | HTMLSelectElement | HTMLTextAreaEl
   return '请检查此项内容。';
 }
 
-function TaskNumber({ label, value, max, step = 1, disabled, onChange }: { label: string; value: number; max: number; step?: number; disabled: boolean; onChange: (value: number) => void }) {
-  const [text, setText] = useState(String(value));
-  useEffect(() => setText(String(value)), [value]);
-  return <label>{label}<input aria-label={label} type="number" required min={0} max={max} step={step} disabled={disabled} value={text} onChange={event => { setText(event.target.value); if (event.target.value !== '' && event.target.validity.valid) onChange(Number(event.target.value)); }} /></label>;
+type TaskNumberProps = { label: string; min?: number; max: number; step?: number; disabled?: boolean; placeholder?: string } & (
+  { optional: true; value?: number; onChange: (value: number | undefined) => void } |
+  { optional?: false; value: number; onChange: (value: number) => void }
+);
+
+function TaskNumber(props: TaskNumberProps) {
+  const { label, value, min = 0, max, step = 1, disabled, placeholder } = props;
+  const [text, setText] = useState(String(value ?? ''));
+  useEffect(() => setText(String(value ?? '')), [value]);
+  return <label>{label}<input aria-label={label} type="number" required={!props.optional} min={min} max={max} step={step} disabled={disabled} value={text} placeholder={placeholder} onChange={event => {
+    setText(event.target.value);
+    if (event.target.value === '') { if (props.optional) props.onChange(undefined); }
+    else if (event.target.validity.valid) props.onChange(Number(event.target.value));
+  }} /></label>;
 }
 
 function UpstreamModelSelect({ label, model, list, onChange }: { label: string; model: string; list?: ModelList; onChange: (model: string) => void }) {
@@ -317,6 +327,14 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
       {inheritance(role.role, role.label)}
       <fieldset key={`${role.role}-${!!overrides.tasks?.[role.role]}`} className="settings-section-fields form-stack" disabled={busy || !!projectId && !overrides.tasks?.[role.role]}>
         <h4>{role.label}</h4>
+        {role.role === 'writing' && <>
+          <div className="form-grid">
+            <TaskNumber label="检索轮数上限" optional value={tasks.writing.maxToolRounds} min={1} max={100} placeholder="留空使用默认轮数" onChange={maxToolRounds => updateTaskSettings('writing', { maxToolRounds })} />
+            <TaskNumber label="每次撰写保留原文章数" value={tasks.writing.recentChapterCount} max={100} onChange={recentChapterCount => updateTaskSettings('writing', { recentChapterCount })} />
+          </div>
+          <p className="hint">轮数可设为 1～100；留空时普通撰写为 6 轮，启用扩展工具为 16 轮，RPG 为 24 轮。包含首次生成和工具调用后的后续请求，同轮可调用多个工具；检索、插画与扩展工具共用额度，RPG 按整章累计。</p>
+          <p className="hint">自动附带最近 0～100 章的完整原文，默认 3 章，每章附有标题与章节标识。设为 0 时不自动附带整章全文，续写起点和摘要仍保留；其他正文可按需检索。章数越多，模型输入用量越大，仍受上下文上限约束。</p>
+        </>}
         {role.role === 'extraction' && <>
           <label>输出模式<select aria-label="资料提取输出模式" value={tasks.extraction.outputMode ?? 'prompt'} onChange={e => updateTaskSettings('extraction', { outputMode: e.target.value as NonNullable<TaskSettings['extraction']['outputMode']> })}>
             <option value="prompt">提示词 JSON（默认）</option><option value="structured">结构化输出（JSON Schema）</option><option value="tool">工具调用（填写参数）</option>

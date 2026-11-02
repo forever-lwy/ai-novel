@@ -25,7 +25,7 @@ describe('task settings compatibility and validation', () => {
     const old = JSON.stringify({ ...base, imageSettings: { ...defaultImageSettings(), stylePrompt: '保留原画风' } });
     ctx.settings.setMeta('settings', old);
     const read = (await ctx.app.inject({ url: '/api/settings', cookies: ctx.cookies })).json();
-    expect(read.taskSettings).toEqual({ extraction: { outputMode: 'prompt', autoRetry: false, maxRetries: 2, retryDelayMs: 5000 } });
+    expect(read.taskSettings).toEqual(defaultTaskSettings());
     expect(read.imageSettings.stylePrompt).toBe('保留原画风');
     expect(ctx.settings.meta('settings')).toBe(old);
     expect((await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: base })).statusCode).toBe(200);
@@ -35,7 +35,7 @@ describe('task settings compatibility and validation', () => {
   it('fills absent nested fields during stored-config migration and saves a complete value', async () => {
     const ctx = await context();
     const partial = { extraction: { autoRetry: true }, planning: { enabled: false } };
-    const expected = { extraction: { outputMode: 'prompt', autoRetry: true, maxRetries: 2, retryDelayMs: 5000 } };
+    const expected = { ...defaultTaskSettings(), extraction: { outputMode: 'prompt', autoRetry: true, maxRetries: 2, retryDelayMs: 5000 } };
     expect(normalizeTaskSettings(partial)).toEqual(expected);
     const raw = JSON.stringify({ ...base, taskSettings: partial }); ctx.settings.setMeta('settings', raw);
     expect(ctx.settings.get().taskSettings).toEqual(expected);
@@ -46,7 +46,7 @@ describe('task settings compatibility and validation', () => {
 
   it('roundtrips configured settings and preserves them with other settings when an older client omits them', async () => {
     const ctx = await context();
-    const taskSettings = { extraction: { outputMode: 'tool', autoRetry: true, maxRetries: 4, retryDelayMs: 1200 } };
+    const taskSettings = { writing: { maxToolRounds: 40, recentChapterCount: 8 }, extraction: { outputMode: 'tool', autoRetry: true, maxRetries: 4, retryDelayMs: 1200 } };
     const promptTemplates = defaultPromptTemplates(); promptTemplates.presets.writing[0].blocks[0].content = '保留作者提示词';
     const imageSettings = { ...defaultImageSettings(), stylePrompt: '保留作者画风' };
     const input = { ...base, providers: [{ id: 'text', name: '测试连接', protocol: 'openai-chat', baseUrl: 'https://fixture.invalid/v1', apiKey: 'task-fixture-secret' }], promptTemplates, imageSettings, taskSettings };
@@ -61,7 +61,7 @@ describe('task settings compatibility and validation', () => {
     expect(ctx.settings.get().providers[0].apiKey).toBe('task-fixture-secret');
     expect(ctx.settings.meta('settings')).not.toContain('task-fixture-secret');
     // Older clients may still send retry settings without knowing the output mode.
-    const oldClient = saved.json(); delete oldClient.taskSettings.extraction.outputMode;
+    const oldClient = saved.json(); delete oldClient.taskSettings.extraction.outputMode; delete oldClient.taskSettings.writing;
     const preserved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: oldClient });
     expect(preserved.statusCode).toBe(200); expect(preserved.json().taskSettings).toEqual(taskSettings);
     for (const outputMode of ['structured', 'prompt', 'tool']) {
@@ -79,6 +79,7 @@ describe('task settings compatibility and validation', () => {
       null, {}, { ...taskSettings, unexpected: true },
       ...[{ outputMode: 'auto' }, { outputMode: null }, { outputMode: 1 }, { autoRetry: 'yes' }, { maxRetries: -1 }, { maxRetries: 11 }, { maxRetries: 1.5 }, { maxRetries: '2' }, { retryDelayMs: -1 }, { retryDelayMs: 300001 }, { retryDelayMs: 0.5 }, { unexpected: true }].map(patch => ({ ...taskSettings, extraction: { ...taskSettings.extraction, ...patch } })),
       ...[{ enabled: 'yes' }, { mode: 'auto' }, { unexpected: true }].map(patch => ({ ...taskSettings, planning: { ...taskSettings.planning, ...patch } })),
+      ...[{ maxToolRounds: 0 }, { maxToolRounds: 101 }, { maxToolRounds: 1.5 }, { maxToolRounds: '6' }, { maxToolRounds: null }, { recentChapterCount: -1 }, { recentChapterCount: 101 }, { recentChapterCount: 1.5 }, { recentChapterCount: '3' }, { unexpected: true }].map(patch => ({ ...taskSettings, writing: { recentChapterCount: 3, ...patch } })),
     ];
     for (const value of invalid) {
       expect(() => parseTaskSettings(value)).toThrow();
@@ -90,6 +91,12 @@ describe('task settings compatibility and validation', () => {
       expect(parseTaskSettings(input)).toEqual(input);
       const saved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: { ...base, taskSettings: input } });
       expect(saved.statusCode).toBe(200); expect(saved.json().taskSettings).toEqual(input);
+    }
+    for (const writing of [{ maxToolRounds: 1, recentChapterCount: 0 }, { maxToolRounds: 100, recentChapterCount: 100 }, { recentChapterCount: 3 }]) {
+      const input = { ...taskSettings, writing };
+      const saved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: { ...base, taskSettings: input } });
+      expect(saved.statusCode).toBe(200); expect(saved.json().taskSettings).toEqual(input);
+      expect(new SettingsStore(ctx.store.db, ctx.dataDir).get().taskSettings).toEqual(input);
     }
   });
 });

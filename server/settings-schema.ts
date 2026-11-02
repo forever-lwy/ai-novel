@@ -1,13 +1,13 @@
 import { z } from 'zod';
 import { modelRoles } from '../shared/model-settings.js';
 import type { ProjectSettingsOverrides } from '../shared/types.js';
-import { parseTaskSettings } from '../shared/task-settings.js';
+import { parseTaskSettings, writingTaskSettingsSchema } from '../shared/task-settings.js';
 import { validatePromptTemplates } from '../shared/prompt-templates.js';
 
 export function parseProjectSettingsOverrides(value: unknown): ProjectSettingsOverrides {
   const task = z.object({ providerId: z.string().max(100), model: modelNameSchema, modelParameters: z.array(modelProfileSchema).max(3000) }).strict();
   const parsed = z.object({
-    tasks: z.object({ writing: task.optional(), planning: task.optional(), extraction: task.extend({ extraction: z.unknown().optional() }).optional() }).strict().optional(),
+    tasks: z.object({ writing: task.extend({ writing: writingTaskSettingsSchema.optional() }).optional(), planning: task.optional(), extraction: task.extend({ extraction: z.unknown().optional() }).optional() }).strict().optional(),
     promptTemplates: z.unknown().optional(), imageSettings: imageSettingsSchema.optional(),
   }).strict().parse(value);
   const result: ProjectSettingsOverrides = {};
@@ -26,6 +26,7 @@ export function parseProjectSettingsOverrides(value: unknown): ProjectSettingsOv
         if (profile.maxOutputTokens >= profile.contextTokens) throw new Error('输出上限必须小于上下文上限。');
       }
       result.tasks[role] = { providerId: selected.providerId, model: selected.model, modelParameters: selected.modelParameters };
+      if (role === 'writing' && parsed.tasks.writing?.writing) result.tasks[role]!.writing = parsed.tasks.writing.writing;
       if (role === 'extraction') {
         const extraction = parsed.tasks.extraction?.extraction;
         if (extraction === undefined) throw new Error('资料提取覆盖需包含输出模式和重试设置。');

@@ -68,6 +68,20 @@ describe('writing context and version-bound lookup', () => {
     expect(context.text).not.toContain('调查失踪船只'); expect(context.text).not.toContain('未来规划不应默认注入');
   });
 
+  it.each([0, 1, 5, 100])('includes the configured %s recent chapters with their titles and ids, retaining the continuation anchor', recentChapterCount => {
+    const { state, texts } = fixture();
+    const context = buildWritingContext({ state, chapterText: id => texts.get(id)!, recentChapterCount });
+    const expected = recentChapterCount ? state.chapters.slice(-recentChapterCount) : [];
+    expect(JSON.parse(context.variables.recentChapters)).toEqual(expected.map(chapter => ({ chapterId: chapter.id, title: chapter.title, text: texts.get(chapter.id) })));
+    for (const chapter of expected) expect(context.variables.recentChaptersText).toContain(`## ${chapter.title}\n\n章节标识：${chapter.id}\n\n${texts.get(chapter.id)}`);
+    expect(JSON.parse(context.variables.continuationAnchor)).toMatchObject({ chapterId: 'c6', title: '第6章', ending: texts.get('c6')!.slice(-1500) });
+    if (!recentChapterCount) {
+      for (const text of texts.values()) expect(context.text).not.toContain(text);
+      expect(context.variables.continuationAnchorText).toContain('章节标识：c6');
+      expect(context.tools.some(tool => tool.name === 'read_chapter')).toBe(true);
+    }
+  });
+
   it('reads older prose and full supporting-character dossiers only through tools pinned before later state changes', async () => {
     const { state, texts } = fixture(); const original = texts.get('c1');
     const context = buildWritingContext({ state, chapterText: id => texts.get(id)! });

@@ -919,8 +919,9 @@ export class StoryEngine {
         }
         const input = job.payload as unknown as GenerateInput;
         const state = this.store.state(job.branchId); const provider = { ...this.provider('writing', job.projectId), stream: true };
+        const writingSettings = normalizeTaskSettings(this.getSettings(job.projectId).taskSettings).writing;
         const aliases = job.payload.rpgLookupAliases as Record<string, string> | undefined;
-        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original: this.writingReference(job), lookupAliases: aliases });
+        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original: this.writingReference(job), lookupAliases: aliases, recentChapterCount: writingSettings.recentChapterCount });
         const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
         const selected = original ? input.selection ? String(original.text).slice(input.selection.start, input.selection.end) : String(original.text) : undefined;
         const continuation = input.mode === 'rpg' ? job.payload.rpgContinuation as ModelToolContinuation | undefined : undefined;
@@ -951,7 +952,8 @@ export class StoryEngine {
           if (continuation && previous && (previous.id !== provider.id || previous.protocol !== provider.protocol || previous.model !== provider.model || previous.baseUrl !== provider.baseUrl)) throw new HttpError('RPG 续接需要使用原供应商、协议、服务地址和模型，请恢复原配置后继续');
           job.payload.rpgProvider = { id: provider.id, protocol: provider.protocol, model: provider.model, baseUrl: provider.baseUrl }; this.save(job);
         }
-        const request = this.budget(job, provider, { ...prompt, signal: controller.signal, tools, ...(extensions?.tools.length ? { maxToolRounds: 16, extensionLoads: extensions.loaded } : {}), onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event), ...(input.mode === 'rpg' ? { continuation, chapterBudget: { targetWords: normalizeChapterWords(input.maxWords) }, maxToolRounds: 24, onContinuation: (value: ModelToolContinuation) => { const fresh = this.live(jobId); fresh.payload.rpgContinuation = JSON.parse(this.redact(JSON.stringify(value))) as ModelToolContinuation; this.save(fresh); } } : {}) });
+        const maxToolRounds = writingSettings.maxToolRounds ?? (input.mode === 'rpg' ? 24 : extensions?.tools.length ? 16 : 6);
+        const request = this.budget(job, provider, { ...prompt, signal: controller.signal, tools, maxToolRounds, ...(extensions?.tools.length ? { extensionLoads: extensions.loaded } : {}), onTextDelta: text => this.writingDelta(jobId, text), onActivity: event => this.writingActivity(jobId, event), ...(input.mode === 'rpg' ? { continuation, chapterBudget: { targetWords: normalizeChapterWords(input.maxWords) }, onContinuation: (value: ModelToolContinuation) => { const fresh = this.live(jobId); fresh.payload.rpgContinuation = JSON.parse(this.redact(JSON.stringify(value))) as ModelToolContinuation; this.save(fresh); } } : {}) });
         const { result, output } = await this.requestCaptured(jobId, 'writing', request, req => this.models.generateText(provider, req), result => result.text);
         this.applyWriting(this.live(jobId), output, result.text, false);
         return;

@@ -147,10 +147,10 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
   const covered = new Set(compressionApplies ? compression!.chapterIds : []);
   const summaries = state.chapters.filter(chapter => !covered.has(chapter.id)).map(chapter => ({ chapterId: chapter.id, title: chapter.title, summary: chapter.summary || '本章资料尚在整理，请以最近章节原文为准。' }));
   const recentCount = input.recentChapterCount ?? 3;
-  const recent = state.chapters.slice(-Math.max(1, recentCount)).map(chapter => ({ chapterId: chapter.id, title: chapter.title, text: chapterTexts.get(chapter.id) ?? '' }));
-  const latest = recent.at(-1);
+  const recent = (recentCount > 0 ? state.chapters.slice(-recentCount) : []).map(chapter => ({ chapterId: chapter.id, title: chapter.title, text: chapterTexts.get(chapter.id) ?? '' }));
+  const latest = state.chapters.at(-1);
   const context = {
-    continuationAnchor: latest ? { chapterId: latest.chapterId, title: latest.title, ending: latest.text.slice(-1500), instruction: '从这段已保存正文的结尾之后继续，不按章节编号寻找起点或重写旧情节。' } : null,
+    continuationAnchor: latest ? { chapterId: latest.id, title: latest.title, ending: (chapterTexts.get(latest.id) ?? '').slice(-1500), instruction: '从这段已保存正文的结尾之后继续，不按章节编号寻找起点或重写旧情节。' } : null,
     worldview: state.outline.worldview || input.premise || '',
     worldRules: activeEntities.filter(entity => entity.kind === 'rule').map(entity => ({ ...entity, facts: entity.facts.filter(fact => fact.temporal !== 'future') })),
     locked: state.outline.locked,

@@ -111,11 +111,36 @@ describe('persistent human decisions inside provider tool rounds', () => {
     expect(continuation).toMatchObject({ round: 7, callCount: 21 });
   });
 
-  it('caps an explicit round allowance at twenty-four billable requests', async () => {
+  it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s honors a configured allowance above the former twenty-four round ceiling', async protocol => {
+    const service = await upstream((_body, response, index) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(index < 25 ? toolTurn(protocol) : prose(protocol))); });
+    const read = vi.fn(() => ({})), ask = vi.fn(() => ({ answer: '渡河' }));
+    const result = await generateText({ ...config(protocol, service.baseUrl), contextTokens: 200000 }, { ...request(read, ask), maxToolRounds: 26 });
+    expect(result).toMatchObject({ text: '你来到河边。'.repeat(25) + '你决定渡河。', inputTokens: 261, outputTokens: 54 });
+    expect(service.bodies).toHaveLength(26); expect(read).toHaveBeenCalledTimes(50); expect(ask).toHaveBeenCalledTimes(25);
+  });
+
+  it.each<ProviderProtocol>(['openai-chat', 'openai-responses', 'gemini', 'claude'])('%s resumes a persisted decision after thirty-three rounds and ninety-nine tool calls', async protocol => {
+    let shouldPause = false;
+    const service = await upstream((_body, response, index) => {
+      shouldPause = index === 32;
+      response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(index < 33 ? toolTurn(protocol) : prose(protocol)));
+    });
+    let continuation!: ModelToolContinuation;
+    const read = vi.fn(() => ({})), ask = vi.fn(() => { if (shouldPause) { shouldPause = false; throw new ModelInteractionPause(); } return { answer: '渡河' }; });
+    const incoming = { ...request(read, ask), maxToolRounds: 34, onContinuation: (state: ModelToolContinuation) => { continuation = JSON.parse(JSON.stringify(state)); } };
+    const model = { ...config(protocol, service.baseUrl), contextTokens: 200000 };
+    await expect(generateText(model, incoming)).rejects.toBeInstanceOf(ModelInteractionPause);
+    expect(continuation).toMatchObject({ round: 33, callCount: 99, pending: { nextIndex: 1 } });
+    const result = await generateText(model, { ...incoming, continuation });
+    expect(result).toMatchObject({ text: '你来到河边。'.repeat(33) + '你决定渡河。', inputTokens: 341, outputTokens: 70 });
+    expect(service.bodies).toHaveLength(34); expect(read).toHaveBeenCalledTimes(66); expect(ask).toHaveBeenCalledTimes(34);
+  });
+
+  it('caps an explicit round allowance at one hundred billable requests', async () => {
     const service = await upstream((_body, response) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(toolTurn('openai-chat'))); });
     const read = vi.fn(() => ({})), ask = vi.fn(() => ({ answer: '渡河' }));
-    await expect(generateText(config('openai-chat', service.baseUrl), { ...request(read, ask), maxToolRounds: 999 })).rejects.toMatchObject({ name: 'ModelOutputError', message: expect.stringContaining('次数超过上限'), inputTokens: 240, outputTokens: 48 });
-    expect(service.bodies).toHaveLength(24); expect(read).toHaveBeenCalledTimes(46); expect(ask).toHaveBeenCalledTimes(23);
+    await expect(generateText({ ...config('openai-chat', service.baseUrl), contextTokens: 200000 }, { ...request(read, ask), maxToolRounds: 999 })).rejects.toMatchObject({ name: 'ModelOutputError', message: expect.stringContaining('次数超过上限'), inputTokens: 1000, outputTokens: 200 });
+    expect(service.bodies).toHaveLength(100); expect(read).toHaveBeenCalledTimes(198); expect(ask).toHaveBeenCalledTimes(99);
   });
 
   it.each(['missing', 'input-only', 'output-only'] as const)('estimates only missing RPG usage (%s) and preserves its cumulative flag after a decision', async usageMode => {

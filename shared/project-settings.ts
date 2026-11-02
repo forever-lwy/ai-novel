@@ -7,6 +7,7 @@ export function projectModelSettings(settings: Settings, role: ModelRole): Proje
   return structuredClone({
     providerId: normalized[`${role}ProviderId`], model: normalized[`${role}Model`] ?? '',
     modelParameters: normalized.modelParameters?.filter(profile => profile.role === role) ?? [],
+    ...(role === 'writing' ? { writing: normalizeTaskSettings(settings.taskSettings).writing } : {}),
     ...(role === 'extraction' ? { extraction: normalizeTaskSettings(settings.taskSettings).extraction } : {}),
   });
 }
@@ -20,7 +21,8 @@ export function resolveProjectSettings(global: Settings, overrides: ProjectSetti
     result[`${role}ProviderId`] = task.providerId;
     result[`${role}Model`] = task.model;
     result.modelParameters = [...(result.modelParameters ?? []).filter(profile => profile.role !== role), ...structuredClone(task.modelParameters)];
-    if (role === 'extraction') result.taskSettings = { extraction: normalizeTaskSettings({ extraction: task.extraction }).extraction };
+    if (role === 'writing' && task.writing) result.taskSettings = { ...normalizeTaskSettings(result.taskSettings), writing: structuredClone(task.writing) };
+    if (role === 'extraction') result.taskSettings = { ...normalizeTaskSettings(result.taskSettings), extraction: normalizeTaskSettings({ extraction: task.extraction }).extraction };
   }
   if (overrides.promptTemplates) result.promptTemplates = structuredClone(overrides.promptTemplates);
   if (overrides.imageSettings) result.imageSettings = structuredClone(overrides.imageSettings);

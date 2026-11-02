@@ -33,6 +33,7 @@ function localOverrides(settings: Settings): ProjectSettingsOverrides {
   for (const role of modelRoles) {
     tasks[role] = { ...projectModelSettings(settings, role), model: `project-${role}`, modelParameters: [{ ...defaultModelParameters(), role, providerId: 'mock', model: `project-${role}`, temperature: 0.4 }] };
   }
+  tasks.writing!.writing = { maxToolRounds: 35, recentChapterCount: 7 };
   tasks.extraction!.extraction = { outputMode: 'structured', autoRetry: false, maxRetries: 1, retryDelayMs: 0 };
   const promptTemplates = structuredClone(settings.promptTemplates!);
   for (const task of ['writing', 'extraction', 'compression', 'image'] as const) {
@@ -79,11 +80,37 @@ it('isolates each opted-in group, keeps connections global and restores inherita
   const effective = ctx.settings.get(ctx.project.id);
   expect(effective.writingModel).toBe('project-writing'); expect(effective.planningModel).toBe('planning-next');
   expect(effective.taskSettings!.extraction.outputMode).toBe('structured');
+  expect(effective.taskSettings!.writing).toEqual({ maxToolRounds: 35, recentChapterCount: 7 });
   expect(effective.providers[0]).toMatchObject({ baseUrl: changed.providers[0].baseUrl, apiKey: 'new-fixture-secret' });
   expect(effective.imageSettings!.stylePrompt).toBe('本作品水彩画风');
   expect(ctx.settings.get(other.id).writingModel).toBe('global-next');
   const reset = await ctx.save({}, saved.json().revision); expect(reset.statusCode).toBe(200);
   expect(reset.json().effective.writingModel).toBe('global-next'); expect(reset.json().overrides).toEqual({});
+});
+
+it('inherits writing controls for legacy model overrides and isolates new writing and extraction groups', async () => {
+  const ctx = await context();
+  const global = ctx.settings.get();
+  global.taskSettings!.writing = { maxToolRounds: 12, recentChapterCount: 5 };
+  ctx.settings.save(global);
+  const legacyWriting = { providerId: 'mock', model: 'legacy-writing', modelParameters: [] };
+  const saved = await ctx.save({ tasks: { writing: legacyWriting } });
+  expect(saved.statusCode).toBe(200);
+  expect(saved.json().overrides.tasks.writing).not.toHaveProperty('writing');
+  expect(saved.json().effective.taskSettings.writing).toEqual(global.taskSettings!.writing);
+  const extraction = projectModelSettings(global, 'extraction');
+  extraction.extraction = { outputMode: 'tool', autoRetry: true, maxRetries: 3, retryDelayMs: 10 };
+  const writing = { ...legacyWriting, writing: { recentChapterCount: 0 } };
+  const next = await ctx.save({ tasks: { writing, extraction } }, saved.json().revision);
+  expect(next.statusCode).toBe(200);
+  expect(next.json().effective.taskSettings).toMatchObject({ writing: { recentChapterCount: 0 }, extraction: extraction.extraction });
+  expect(next.json().effective.taskSettings.writing).not.toHaveProperty('maxToolRounds');
+  global.taskSettings!.writing = { maxToolRounds: 20, recentChapterCount: 9 }; ctx.settings.save(global);
+  expect(ctx.settings.get(ctx.project.id).taskSettings!.writing).toEqual({ recentChapterCount: 0 });
+  expect(collectProjectOverrides(ctx.settings.get(ctx.project.id), next.json().overrides).tasks!.writing!.writing).toEqual({ recentChapterCount: 0 });
+  const reset = await ctx.save({ tasks: { extraction } }, next.json().revision);
+  expect(reset.json().effective.taskSettings.writing).toEqual(global.taskSettings!.writing);
+  expect(reset.json().effective.taskSettings.extraction).toEqual(extraction.extraction);
 });
 
 it('preserves omitted optional parameters and explicit empty selections instead of filling from global', async () => {
@@ -112,6 +139,8 @@ it('rejects stale saves and malformed or provider-bearing overrides without chan
     { imageSettings: { ...overrides.imageSettings, promptProviderId: 'mock', promptModel: '' } },
     { promptTemplates: { ...overrides.promptTemplates, selected: {} } },
     { tasks: { writing: { ...overrides.tasks!.writing, modelParameters: overrides.tasks!.extraction!.modelParameters } } },
+    ...[{ maxToolRounds: 0, recentChapterCount: 3 }, { maxToolRounds: 101, recentChapterCount: 3 }, { recentChapterCount: -1 }, { recentChapterCount: 101 }, { recentChapterCount: 1.5 }].map(writing => ({ tasks: { writing: { ...overrides.tasks!.writing, writing } } })),
+    { tasks: { extraction: { ...overrides.tasks!.extraction, writing: { recentChapterCount: 3 } } } },
   ];
   for (const value of invalid) expect((await ctx.save(value, revision)).statusCode).toBe(400);
   expect((await ctx.read()).revision).toBe(revision);
@@ -185,11 +214,13 @@ it('routes writing, automatic naming, extraction and compression through the own
   expect(calls.every(call => call.provider.temperature === 0.4)).toBe(true);
   for (const [index, task] of [[0, 'writing'], [2, 'extraction'], [3, 'compression']] as const) expect(JSON.stringify(calls[index].request)).toContain(`PROJECT_${task} 作品甲`);
   expect(calls[0].request.tools!.some(tool => tool.name === 'generate_scene_cg')).toBe(false);
+  expect(calls[0].request.maxToolRounds).toBe(35);
   expect(calls[2].request.structuredOutput?.mode).toBe('json_schema');
   const inherited = engine.enqueue(other.mainBranchId, 'generate', { baseRevisionId: ctx.store.getBranch(other.mainBranchId).revisionId, mode: 'original', title: '已有题名' });
   expect((await terminal(engine, inherited.id)).status).toBe('completed');
   const otherExtraction = engine.listJobs(other.id).find(job => job.kind === 'extract')!; await terminal(engine, otherExtraction.id);
   expect(calls[4].provider.model).toBe('global-writing'); expect(JSON.stringify(calls[4].request)).not.toContain('PROJECT_writing');
+  expect(calls[4].request.maxToolRounds).toBe(6);
   expect(calls[4].request.tools!.some(tool => tool.name === 'generate_scene_cg')).toBe(true);
 });
 

@@ -12,6 +12,7 @@ import { buildApp } from '../server/app.js';
 import { defaultPromptTemplates, validatePromptTemplates } from '../shared/prompt-templates.js';
 import { withDramatronPresets } from './fixtures/prompt-presets.js';
 import { WRITING_RESPONSE_NAME } from '../shared/writing-output.js';
+import { defaultTaskSettings } from '../shared/task-settings.js';
 import type { Entity, ExtractionResult, Job, Settings } from '../shared/types.js';
 
 const stores: Store[] = [], engines: StoryEngine[] = [], servers: Server[] = [];
@@ -47,14 +48,14 @@ function engineFor(store: Store, config: Settings) {
   const models: TextModels = { generateText, generateStructured: vi.fn(async (_config, request, validate) => ({ value: validate(request.system.includes('# 章节自动命名') ? { title: '桥头之行' } : extraction()), inputTokens: 1, outputTokens: 1 })) as TextModels['generateStructured'] };
   const engine = new StoryEngine(store, () => config, models); engines.push(engine); engine.start(); return engine;
 }
-async function until<T>(read: () => T, accepts: (value: T) => boolean): Promise<T> {
-  const deadline = Date.now() + 5000;
+async function until<T>(read: () => T, accepts: (value: T) => boolean, timeoutMs = 5000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
   for (;;) { const value = read(); if (accepts(value)) return value; if (Date.now() > deadline) throw new Error(`等待 RPG 状态超时：${JSON.stringify(value)}`); await new Promise(resolve => setTimeout(resolve, 5)); }
 }
 const rawJob = (store: Store, jobId: string): Job => JSON.parse(String(store.db.prepare('SELECT data FROM jobs WHERE id=?').get(jobId)!.data));
 const job = (engine: StoryEngine, id: string) => engine.listJobs().find(job_ => job_.id === id)!;
-const paused = (engine: StoryEngine, id: string) => until(() => job(engine, id), job_ => job_.status === 'paused' && Boolean(job_.pendingChoice));
-const completed = (engine: StoryEngine, id: string) => until(() => job(engine, id), job_ => ['completed', 'failed', 'stale'].includes(job_.status));
+const paused = (engine: StoryEngine, id: string, timeoutMs = 5000) => until(() => job(engine, id), job_ => job_.status === 'paused' && Boolean(job_.pendingChoice), timeoutMs);
+const completed = (engine: StoryEngine, id: string, timeoutMs = 5000) => until(() => job(engine, id), job_ => ['completed', 'failed', 'stale'].includes(job_.status), timeoutMs);
 function append(store: Store, branchId: string, title: string) {
   const view = store.saveChapter(branchId, { baseRevisionId: store.getBranch(branchId).revisionId, title, text: title });
   return store.applyExtraction(branchId, view.branch.revisionId, view.state.chapters.at(-1)!.id, extraction(), true);
@@ -62,6 +63,39 @@ function append(store: Store, branchId: string, title: string) {
 function originalSetup() { return { character: { kind: 'original' as const, name: '顾舟', description: '用户确认的旅人' }, entryInstruction: '从客栈进入故事' }; }
 
 describe('durable RPG story choices', () => {
+  it('uses the configured round limit cumulatively across saved player choices', async () => {
+    const service = await upstream((_body, reply, index) => response(reply, '你站在岔路口。', [{ id: `decision-${index}`, name: 'ask_user', args: { question: '接下来去哪里？', options } }]));
+    const store = makeStore(), config = settings(service.url);
+    config.taskSettings = { ...defaultTaskSettings(), writing: { maxToolRounds: 2, recentChapterCount: 0 } };
+    const engine = engineFor(store, config), project = store.createProject({ title: '有限轮数体验' });
+    const queued = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'rpg', instruction: '体验', rpg: originalSetup() });
+    const waiting = await paused(engine, queued.id);
+    expect(rawJob(store, queued.id).payload.rpgContinuation).toMatchObject({ round: 1 });
+    engine.choose(queued.id, { choiceId: waiting.pendingChoice!.id, optionId: 'bridge' });
+    const failed = await completed(engine, queued.id);
+    expect(failed.status).toBe('failed');
+    expect(engine.listOutputs(queued.id).some(output => output.error?.includes('检索次数超过上限'))).toBe(true);
+    expect(service.bodies).toHaveLength(2); expect(store.state(queued.branchId).chapters).toHaveLength(0);
+  });
+
+  it('resumes an RPG decision saved beyond the former round and call-count ceilings', async () => {
+    const service = await upstream((_body, reply, index) => {
+      if (index < 25) response(reply, '你继续查阅资料。', Array.from({ length: 4 }, (_, offset) => ({ id: `read-${index}-${offset}`, name: 'list_text_files', args: {} })));
+      else if (index === 25) response(reply, '你站在岔路口。', [{ id: 'late-decision', name: 'ask_user', args: { question: '接下来去哪里？', options } }]);
+      else response(reply, '你沿着桥头继续前进。');
+    });
+    const store = makeStore(), config = settings(service.url);
+    config.taskSettings = { ...defaultTaskSettings(), writing: { maxToolRounds: 30, recentChapterCount: 0 } };
+    const engine = engineFor(store, config), project = store.createProject({ title: '长检索轮数体验' });
+    const queued = engine.enqueue(project.mainBranchId, 'generate', { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, mode: 'rpg', instruction: '体验', title: '旅途', maxWords: 20000, rpg: originalSetup() });
+    const waiting = await paused(engine, queued.id, 20000);
+    expect(rawJob(store, queued.id).payload.rpgContinuation).toMatchObject({ round: 26, callCount: 101 });
+    engine.choose(queued.id, { choiceId: waiting.pendingChoice!.id, optionId: 'bridge' });
+    expect((await completed(engine, queued.id, 20000)).status).toBe('completed');
+    expect(service.bodies).toHaveLength(27);
+    expect(store.chapter(queued.branchId, store.state(queued.branchId).chapters[0].id).text).toBe('你继续查阅资料。'.repeat(25) + '你站在岔路口。你沿着桥头继续前进。');
+  }, 30000);
+
   it('restores a layered-tool choice from backup and continues with original transport after preset changes', async () => {
     const service = await upstream((_body, reply, index) => response(reply, '', [{ id: `outer-${index}`, name: WRITING_RESPONSE_NAME, args: {
       prose: index === 0 ? '你站在岔路口。' : '你沿着桥头继续前进。',

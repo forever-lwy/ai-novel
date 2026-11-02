@@ -7,6 +7,7 @@ import { StoryEngine, type TextModels } from '../server/engine.js';
 import { buildApp } from '../server/app.js';
 import { buildWritingContext } from '../server/writing-context.js';
 import { ModelOutputError } from '../server/providers.js';
+import { defaultTaskSettings } from '../shared/task-settings.js';
 import type { ExtractionResult, Job, ModelRequestSnapshot, Settings, WritingEvent } from '../shared/types.js';
 
 const stores: Store[] = []; const engines: StoryEngine[] = [];
@@ -25,6 +26,28 @@ function readyChapter(store: Store, branchId: string, text: string) { let view =
 
 describe('streaming prose, detached extraction and regeneration', () => {
   const roundSnapshot = (): ModelRequestSnapshot => ({ protocol: 'openai-chat', model: 'writer', url: 'http://unused.invalid/chat/completions', method: 'POST', headers: {}, body: '{}', startedAt: new Date().toISOString(), timeoutMs: 1000, stream: true });
+
+  it.each([0, 1, 5])('uses configured tool rounds and %s recent complete chapters in the actual writing request', async recentChapterCount => {
+    const models = mockModels(); const config = settings();
+    config.taskSettings = { ...defaultTaskSettings(), writing: { maxToolRounds: 31, recentChapterCount } };
+    const ctx = harness(models, config);
+    const chapters = [];
+    for (let index = 1; index <= 6; index++) {
+      const text = `${index}全文开始。${'正文材料'.repeat(500)}${index}全文结尾。`;
+      const saved = ctx.store.saveChapter(ctx.project.mainBranchId, { baseRevisionId: ctx.store.getBranch(ctx.project.mainBranchId).revisionId, title: `已保存篇章${index}`, text });
+      const chapter = saved.state.chapters.at(-1)!; chapters.push({ ...chapter, text });
+      ctx.store.applyExtraction(ctx.project.mainBranchId, saved.branch.revisionId, chapter.id, { ...extraction(), summary: `篇章${index}的摘要。` }, true);
+    }
+    const writing = start(ctx); expect((await terminal(ctx.engine, writing.id)).status).toBe('completed');
+    const request = vi.mocked(models.generateText).mock.calls[0][1];
+    expect(request.maxToolRounds).toBe(31);
+    for (const [index, chapter] of chapters.entries()) {
+      if (recentChapterCount && index >= chapters.length - recentChapterCount) {
+        expect(request.prompt).toContain(chapter.text); expect(request.prompt).toContain(chapter.id); expect(request.prompt).toContain(chapter.title);
+      } else expect(request.prompt).not.toContain(`${index + 1}全文开始。`);
+    }
+    expect(request.prompt).toContain('6全文结尾。'); expect(request.prompt).toContain(chapters[5].id);
+  });
 
   it('keeps the accumulated multi-round prose beside its immutable final provider response', async () => {
     const models = mockModels();
