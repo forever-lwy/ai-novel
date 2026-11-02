@@ -152,6 +152,7 @@
 - `state.chapters[].summary` 为导入或整理正文时同时提取的已发生剧情摘要，片段摘要按处理顺序累积；与 `state.outline.fine` 的预期规划分开；不再生成或使用 coarse。回退和旧章节分支读取该边界的整份快照，摘要、伏笔状态与人物位置事实一起恢复。章节正文接口继续仅返回正文信息，完整摘要保留在 BranchView。
 - `state.foreshadows` 保留历史状态，界面默认只显示 `planned/planted`。`resolved/abandoned` 不进入后续待处理伏笔上下文，模型再次提及同名线索不会自动重新打开；作者仍可在历史入口手工查看与修正。
 - 地图使用两端均为 `location` 的地理关系，不将人物或任务关系画成地图节点。人物当前位置使用 `attribute=location` 的当前事实；同一状态按引用章节、段落的先后更新，旧记录转为过去，锁定或不确定的冲突保留供作者核对。
+- `PUT /branches/:id/premise {baseRevisionId,premise}` -> `BranchView`：保存当前故事线的小说设定，`premise` 最多 100000 字符，可为空字符串。新值写入 `StoryState.premise?`，缺省的旧快照回退到创建时的 `Project.premise`；空字符串明确清空。保存创建新故事版本，不修改已有章节、资料和其他故事线，回退、分支和备份按版本恢复。初始自动复制的 `outline.worldview/locked` 仅在与旧有效设定逐字符相等时同步，保留作者独立修改。版本冲突或存在 queued/running/paused 的文字任务返回 409，当前草稿由客户端保留。默认写作材料与 `{{premise}}` 均读取当前版本设定；改写／重新生成旧章沿用操作前的当前设定。`Project.premise` 仍保存创建时原值，作为旧版本兼容和书架简介。
 - PUT /branches/:id/outline {baseRevisionId,outline:{worldview?,locked,fine?}} -> BranchView。编辑世界观与作者约束；历史 fine 可省略，携带时必须与现有值相同，修改返回 410。此接口不能设置压缩摘要。
 - PUT /branches/:id/entities/:entityId {baseRevisionId,entity} -> BranchView；POST /branches/:id/entities/merge {baseRevisionId,fromId,toId} -> BranchView（回退撤销合并）。
 - PUT /branches/:id/foreshadows {baseRevisionId,foreshadows} -> BranchView。

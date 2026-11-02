@@ -477,7 +477,7 @@ export class StoryEngine {
   }
   private promptVariables(job: Job, state = this.store.state(job.branchId)): Record<string, string> {
     const project = this.store.getProject(job.projectId);
-    return { projectTitle: project.title, premise: project.premise || '', instruction: String(job.payload.instruction ?? '') };
+    return { projectTitle: project.title, premise: state.premise ?? project.premise, instruction: String(job.payload.instruction ?? '') };
   }
   private writingReference(job: Job) {
     let reference = job.payload.sourceReference as StoryReference | undefined;
@@ -921,7 +921,7 @@ export class StoryEngine {
         const state = this.store.state(job.branchId); const provider = { ...this.provider('writing', job.projectId), stream: true };
         const writingSettings = normalizeTaskSettings(this.getSettings(job.projectId).taskSettings).writing;
         const aliases = job.payload.rpgLookupAliases as Record<string, string> | undefined;
-        const context = buildWritingContext({ state, premise: this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original: this.writingReference(job), lookupAliases: aliases, recentChapterCount: writingSettings.recentChapterCount });
+        const context = buildWritingContext({ state, premise: state.premise ?? this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original: this.writingReference(job), lookupAliases: aliases, recentChapterCount: writingSettings.recentChapterCount });
         const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
         const selected = original ? input.selection ? String(original.text).slice(input.selection.start, input.selection.end) : String(original.text) : undefined;
         const continuation = input.mode === 'rpg' ? job.payload.rpgContinuation as ModelToolContinuation | undefined : undefined;

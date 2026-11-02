@@ -123,11 +123,11 @@ async function importNovel(page: Page) {
   await expect(page.locator('.chapter-list .chapter-item')).toHaveCount(2);
 }
 
-async function restoreToolbarStory(page: Page, title: string) {
+async function restoreToolbarStory(page: Page, title: string, premise = '') {
   const store = new Store(mkdtempSync(join(tmpdir(), 'novel-toolbar-browser-')));
   let backup: Buffer;
   try {
-    const project = store.createProject({ title });
+    const project = store.createProject({ title, premise });
     for (const name of ['起点', '长街']) {
       const text = Array.from({ length: 90 }, (_, index) => `林舟沿着白石城的长街向前走，仔细观察沿途的门窗和路灯。他在路口停下，记住第${index + 1}处石墙上的纹路。`).join('\n\n');
       const saved = store.saveChapter(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, title: name, text });
@@ -4073,4 +4073,70 @@ for (const width of [1440, 390]) test(`正文剧情插画与章节资料浮窗 $
   await page.getByRole('button', { name: '生成选段 CG', exact: true }).click();
   await expect(page.getByRole('dialog').locator('.image-source-text')).toHaveText(selectionText); await page.getByRole('dialog').getByRole('button', { name: '关闭对话框', exact: true }).click();
   const after = await stats(); expect(after.modelRequests).toBe(before.modelRequests); expect(after.imageRequests).toBe(before.imageRequests); expect(errors).toEqual([]);
+});
+
+
+for (const width of [1440, 390]) test(`小说设定在有章节后可查看修改并持久保存 ${width}px`, async ({ page }, testInfo) => {
+  const initial = '林舟在白石城调查旧灯，故事以他的调查展开。';
+  const updated = '林舟是一名失去记忆的旅人，白石城的旧灯能映出过去。\n故事以找回记忆展开。';
+  const project = await restoreToolbarStory(page, `E2E 小说设定 ${width}`, initial);
+  await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+  await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+  await expect(page.locator('.manuscript h1')).toHaveText('长街');
+  const branchId = await currentBranchId(page);
+  const before = await (await page.request.get(`/api/branches/${branchId}`)).json();
+  const chapterId = before.state.chapters.at(-1).id;
+  const prose = await (await page.request.get(`/api/branches/${branchId}/chapters/${chapterId}`)).json();
+  await tab(page, '小说设定');
+  const input = page.getByLabel('小说设定', { exact: true });
+  const save = page.getByRole('button', { name: '保存小说设定', exact: true });
+  await expect(input).toHaveValue(initial); await expect(save).toBeDisabled();
+  await input.fill(updated);
+  await page.getByRole('button', { name: '阅读视图', exact: true }).click();
+  await expect(input).toHaveValue(updated);
+  page.once('dialog', dialog => dialog.dismiss()); await tab(page, '正文');
+  await expect(input).toHaveValue(updated);
+  await save.click(); await expect(save).toBeDisabled();
+  await expect(page.locator('.workspace-notice').filter({ hasText: '小说设定已保存' })).toBeVisible();
+  const after = await (await page.request.get(`/api/branches/${branchId}`)).json();
+  expect(after.state.premise).toBe(updated); expect(after.state.outline.worldview).toBe(updated); expect(after.state.outline.locked).toBe(updated);
+  expect(after.state.chapters).toEqual(before.state.chapters);
+  expect((await (await page.request.get(`/api/branches/${branchId}/chapters/${chapterId}`)).json()).text).toBe(prose.text);
+  expect(await page.locator('body').evaluate(element => element.scrollWidth <= innerWidth)).toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath(`novel-premise-${width}.png`), animations: 'disabled' });
+  await page.reload(); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click(); await expect(page.locator('.manuscript h1')).toHaveText('长街');
+  await tab(page, '小说设定'); await expect(input).toHaveValue(updated);
+  await tab(page, '正文'); await expect(page.locator('.manuscript h1')).toHaveText('长街');
+});
+
+test('小说设定空作品可修改，保存失败与版本冲突保留草稿并保护离开', async ({ page }) => {
+  await createProject(page, 'E2E 小说设定草稿保护');
+  await tab(page, '小说设定');
+  const input = page.getByLabel('小说设定', { exact: true });
+  const draft = '尚未保存的新设定，保存失败和冲突后仍须保留。';
+  await input.fill(draft);
+  const branchId = await currentBranchId(page);
+  const before = await (await page.request.get(`/api/branches/${branchId}`)).json();
+  const path = `**/api/branches/${branchId}/premise`;
+  let releaseSave!: () => void; const saveGate = new Promise<void>(resolve => { releaseSave = resolve; });
+  await page.route(path, async route => { await saveGate; await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: '保存服务暂时不可用' }) }); });
+  const save = page.getByRole('button', { name: '保存小说设定', exact: true });
+  await save.click(); await expect(input).toBeDisabled();
+  await tab(page, '正文'); await expect(input).toBeVisible();
+  await page.getByRole('button', { name: '返回书架', exact: true }).click(); await expect(input).toBeVisible();
+  releaseSave(); await expect(page.getByRole('alert')).toContainText('保存服务暂时不可用');
+  await expect(input).toHaveValue(draft); await expect(save).toBeEnabled();
+  await page.unroute(path);
+  const remote = await page.request.put(`/api/branches/${branchId}/premise`, { data: { baseRevisionId: before.branch.revisionId, premise: '另一页面已保存的设定' } });
+  expect(remote.ok(), await remote.text()).toBeTruthy();
+  await save.click(); await expect(page.getByRole('alert')).toContainText('新版本');
+  await expect(input).toHaveValue(draft); await expect(save).toBeEnabled();
+  page.once('dialog', dialog => dialog.dismiss()); await page.getByRole('button', { name: '返回书架', exact: true }).click();
+  await expect(input).toHaveValue(draft);
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await page.getByRole('button', { name: '返回作品', exact: true }).click();
+  await expect(input).toHaveValue(draft);
+  page.once('dialog', dialog => dialog.accept()); await tab(page, '正文');
+  await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 小说设定草稿保护', exact: true }).click();
+  await tab(page, '小说设定'); await expect(input).toHaveValue('另一页面已保存的设定');
 });

@@ -1,6 +1,6 @@
 /** Human-readable prompt values. Keep authored text intact; only render structure. */
 const fieldNames: Record<string, string> = {
-  continuationAnchor: '续写起点', worldview: '世界设定', locked: '作者锁定', worldRules: '世界规则',
+  continuationAnchor: '续写起点', premise: '小说设定', worldview: '世界设定', locked: '作者锁定', worldRules: '世界规则',
   mainCharacters: '主要人物', mainCharacterRelations: '主要人物关系', unrevealedForeshadows: '尚未揭晓的伏笔',
   authorConfirmedSummary: '作者确认的压缩摘要', completePlotSummaries: '已保存章节摘要', recentCompleteChapters: '最近章节全文',
   originalReference: '固定原作参考', reference: '参考来源', entityDirectory: '原作资料目录',

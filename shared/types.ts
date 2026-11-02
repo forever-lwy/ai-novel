@@ -18,7 +18,7 @@ export interface Chapter { id: string; title: string; text: string; sourceId?: s
 export type ChapterRef = Omit<Chapter, 'text'>;
 export interface StoryReference { branchId: string; revisionId: string; sourceIds?: string[] }
 export interface ImagePlacement { chapterId: string; selection?: { start: number; end: number }; sourceText?: string }
-export interface StoryState { chapters: ChapterRef[]; entities: Entity[]; relations: Relation[]; foreshadows: Foreshadow[]; outline: Outline; imageIds?: string[]; activeImageIds?: string[]; imagePlacements?: Record<string, ImagePlacement>; rpg?: RpgSession; sourceReference?: StoryReference }
+export interface StoryState { /** Missing in older snapshots; use the project's initial premise. An empty string deliberately clears it. */ premise?: string; chapters: ChapterRef[]; entities: Entity[]; relations: Relation[]; foreshadows: Foreshadow[]; outline: Outline; imageIds?: string[]; activeImageIds?: string[]; imagePlacements?: Record<string, ImagePlacement>; rpg?: RpgSession; sourceReference?: StoryReference }
 /** Author reference material remains separate from events in the active story. */
 export interface OriginalReferenceData { reference: StoryReference; state: StoryState; chapters: Chapter[]; sources: { sourceId: string; filename: string; chapters: { title: string; text: string }[] }[] }
 export interface Project { id: string; title: string; premise: string; mode: Mode; createdAt: string; updatedAt: string; mainBranchId: string }

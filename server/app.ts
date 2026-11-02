@@ -254,6 +254,11 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   });
   app.post('/api/branches/:id/fork', async request => store.fork(param(request), z.object({ baseRevisionId: revision, chapterId: z.string().optional(), name: z.string().trim().min(1).max(200) }).parse(request.body)));
   app.post('/api/branches/:id/rollback', async request => store.rollback(param(request), z.object({ baseRevisionId: revision, revisionId: revision }).parse(request.body)));
+  app.put('/api/branches/:id/premise', async request => {
+    const body = z.object({ baseRevisionId: revision, premise: z.string().max(100000) }).parse(request.body);
+    const branchId = param(request); engine.assertIdle(branchId);
+    return store.updatePremise(branchId, body.baseRevisionId, body.premise);
+  });
   app.put('/api/branches/:id/outline', async request => { const body = z.object({ baseRevisionId: revision, outline: outlineSchema }).parse(request.body); const existing = store.state(param(request)).outline; if (body.outline.fine && JSON.stringify(body.outline.fine) !== JSON.stringify(existing.fine)) fail('剧情规划功能已移除，历史规划不能修改。', 410); return store.updateOutline(param(request), body.baseRevisionId, { ...body.outline, fine: existing.fine }); });
   app.put('/api/branches/:id/entities/:entityId', async request => { const body = z.object({ baseRevisionId: revision, entity: entitySchema }).parse(request.body); if (body.entity.id !== param(request, 'entityId')) fail('资料标识不匹配。'); return store.updateEntity(param(request), body.baseRevisionId, body.entity as Entity); });
   app.delete('/api/branches/:id/entities/:entityId', async request => {

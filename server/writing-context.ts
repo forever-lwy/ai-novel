@@ -151,7 +151,8 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
   const latest = state.chapters.at(-1);
   const context = {
     continuationAnchor: latest ? { chapterId: latest.id, title: latest.title, ending: (chapterTexts.get(latest.id) ?? '').slice(-1500), instruction: '从这段已保存正文的结尾之后继续，不按章节编号寻找起点或重写旧情节。' } : null,
-    worldview: state.outline.worldview || input.premise || '',
+    premise: state.premise ?? input.premise ?? '',
+    worldview: state.outline.worldview || (state.premise ?? input.premise ?? ''),
     worldRules: activeEntities.filter(entity => entity.kind === 'rule').map(entity => ({ ...entity, facts: entity.facts.filter(fact => fact.temporal !== 'future') })),
     locked: state.outline.locked,
     mainCharacters: requiredEntities,
