@@ -77,7 +77,7 @@ it('uses each selected model profile for connection tests and common defaults fo
     const response = await ctx.app.inject({ method: 'POST', url: '/api/settings/test', cookies: { session: ctx.session }, payload: { providerId: 'model', model } });
     expect(response.json().ok).toBe(true);
   }
-  expect(requests.map(body => [body.model, body.max_tokens, body.temperature])).toEqual([['test-model', 1024, 0.3], ['second-model', 8192, 0], ['new-model', 4096, 1]]);
+  expect(requests.map(body => [body.model, body.max_tokens, body.temperature])).toEqual([['test-model', 1024, 0.3], ['second-model', 8192, 0], ['new-model', 32000, 1]]);
   expect(ctx.settings.get().modelParameters).toHaveLength(4);
 });
 
@@ -104,7 +104,7 @@ it('connection tests use the saved output cap and expose sanitized diagnostics e
   expect(result.statusCode).toBe(200); expect(result.json().ok).toBe(false); expect(result.json().message).toContain('500');
   expect(requests).toHaveLength(1); expect(requests[0].generationConfig).toMatchObject({ maxOutputTokens: 8192, temperature: 1, thinkingConfig: { thinkingLevel: 'low' } });
   const capture = result.json().capture; expect(capture.httpStatus).toBe(500); expect(capture.rawResponse).toBe('');
-  expect(JSON.parse(capture.request.body)).toEqual(requests[0]); expect(capture.request.timeoutMs).toBe(180000); expect(capture.diagnostics.responseBytes).toBe(0);
+  expect(JSON.parse(capture.request.body)).toEqual(requests[0]); expect(capture.request.timeoutMs).toBe(360000); expect(capture.diagnostics.responseBytes).toBe(0);
   expect(result.body).not.toContain('test-secret-key'); expect(result.body).not.toContain('private-cookie');
 });
 

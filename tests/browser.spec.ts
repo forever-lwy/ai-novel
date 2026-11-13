@@ -591,6 +591,7 @@ test('独立设置页面切换分类保留草稿，保存检查隐藏字段，�
     await models.getByLabel('摘要压缩模型名称', { exact: true }).fill('e2e-draft-compression');
     const planning = models.getByRole('region', { name: '摘要压缩模型设置', exact: true });
     await planning.getByLabel('单次最大输出 tokens', { exact: true }).fill('64000');
+    await planning.getByLabel('上下文上限 tokens', { exact: true }).fill('64000');
     await selectModelTask(settings, '资料提取');
     await models.getByLabel('资料提取输出模式', { exact: true }).selectOption('tool');
     await expect(models.getByRole('tabpanel')).toHaveCount(1);

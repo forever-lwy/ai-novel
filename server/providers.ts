@@ -202,7 +202,7 @@ function requestBody(config: ProviderConfig, request: ModelRequest) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const key = config.apiKey?.trim();
   const options = providerWireOptions(config);
-  const stream = Boolean(request.onTextDelta) || (config.stream ?? false);
+  const stream = Boolean(request.onTextDelta) || (config.stream ?? true);
   const output = request.structuredOutput;
   const writingTool = request.writingOutputMode === 'tool';
   if (writingTool && output) throw new Error('正文工具通道不能与资料结构化输出同时使用。');

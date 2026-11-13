@@ -430,7 +430,7 @@ describe('text provider adapters against real local HTTP fixtures', () => {
     expect(await generateText(config('openai-chat', `${url}/custom/v7/?route=write`), request)).toEqual({ text: '古城醒了。', inputTokens: 41, outputTokens: 12 });
     expect(requests[0].url).toBe('/custom/v7/chat/completions?route=write');
     expect(requests[0].headers.authorization).toBe(`Bearer ${secret}`);
-    expect(requests[0].body).toEqual({ model: 'example-model', messages: [{ role: 'system', content: request.system }, { role: 'user', content: request.prompt }], max_tokens: 1234, stream: false });
+    expect(requests[0].body).toEqual({ model: 'example-model', messages: [{ role: 'system', content: request.system }, { role: 'user', content: request.prompt }], max_tokens: 1234, stream: true, stream_options: { include_usage: true } });
   });
 
   it('sends Responses fields without adding an implicit API prefix', async () => {
@@ -443,7 +443,7 @@ describe('text provider adapters against real local HTTP fixtures', () => {
   it('uses native Gemini authentication and excludes reasoning text', async () => {
     const url = await service((_req, res) => json(res, { candidates: [{ finishReason: 'STOP', content: { parts: [{ thought: true, text: 'hidden reasoning' }, { text: '风掠过城墙。' }] } }], usageMetadata: { promptTokenCount: 90, candidatesTokenCount: 20, thoughtsTokenCount: 5 } }));
     expect(await generateText({ ...config('gemini', `${url}/v1beta?route=read`), model: 'models/example-model' }, request)).toEqual({ text: '风掠过城墙。', inputTokens: 90, outputTokens: 25 });
-    expect(requests[0].url).toBe('/v1beta/models/example-model:generateContent?route=read');
+    expect(requests[0].url).toBe('/v1beta/models/example-model:streamGenerateContent?route=read&alt=sse');
     expect(requests[0].headers['x-goog-api-key']).toBe(secret);
     expect(requests[0].headers.authorization).toBeUndefined();
     expect(requests[0].body).toEqual({ systemInstruction: { parts: [{ text: request.system }] }, contents: [{ role: 'user', parts: [{ text: request.prompt }] }], generationConfig: { maxOutputTokens: 1234 } });

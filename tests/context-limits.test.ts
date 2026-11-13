@@ -173,7 +173,7 @@ describe('single-request context and output limits', () => {
     expect((await terminal(ctx.engine, job.id)).status).toBe('completed');
     expect((await terminal(ctx.engine, ctx.engine.listJobs().find(value => value.kind === 'extract')!.id)).status).toBe('completed');
     expect(fixture.calls.map(call => [call.path.split('/').at(-1), call.body.generationConfig.maxOutputTokens])).toEqual([
-      ['writer:streamGenerateContent?alt=sse', 2048], ['extractor:generateContent', 64000],
+      ['writer:streamGenerateContent?alt=sse', 2048], ['extractor:streamGenerateContent?alt=sse', 64000],
     ]);
   });
 
@@ -211,7 +211,7 @@ describe('single-request context and output limits', () => {
     expect((await terminal(ctx.engine, job.id)).status).toBe('completed');
     const background = ctx.engine.listJobs().find(value => value.kind === 'extract')!;
     expect((await terminal(ctx.engine, background.id)).status).toBe('completed');
-    expect(fixture.calls.map(call => call.path.split('/').at(-1))).toEqual(['shared-model:generateContent', 'shared-model:streamGenerateContent?alt=sse', 'shared-model:generateContent']);
+    expect(fixture.calls.map(call => call.path.split('/').at(-1))).toEqual(['shared-model:streamGenerateContent?alt=sse', 'shared-model:streamGenerateContent?alt=sse', 'shared-model:streamGenerateContent?alt=sse']);
     expect(fixture.calls.map(call => call.body.generationConfig.maxOutputTokens)).toEqual([8192, 2048, 64000]);
     const capturedLimits = Object.fromEntries([planJob.id, job.id, background.id].flatMap(id => ctx.engine.listOutputs(id)).map(output => [output.stage, JSON.parse(ctx.store.outputs.get(output.id)!.request!.body).generationConfig.maxOutputTokens]));
     expect(capturedLimits).toEqual({ compression: 8192, writing: 2048, extraction: 64000 });

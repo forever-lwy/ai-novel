@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 
 import { ArrowLeft, Plus, Trash2, KeyRound, CheckCircle2, Save, PlugZap, RefreshCw, SlidersHorizontal, ListOrdered, Image, ShieldCheck, Palette } from 'lucide-react';
 import type { CapturedModelResponse, ImageSettings, ModelParameters, ModelRole, Project, ProjectSettingsOverrides, ProjectSettingsView, ProviderConnection, ProviderModel, ProviderProtocol, Settings, TaskSettings } from '../shared/types';
 import { collectProjectOverrides, projectModelSettings, resolveProjectSettings } from '../shared/project-settings';
-import { defaultModelParameters, getModelParameters, upsertModelParameters } from '../shared/model-settings';
+import { defaultModelParameters, getModelParameters, selectTaskModel, upsertModelParameters } from '../shared/model-settings';
 import { api, post, put } from './api';
 import { Brand, Notice, Spinner } from './ui';
 import { ProviderParameters, parameterError } from './ProviderParameters';
@@ -31,6 +31,7 @@ const roles = [
 type Role = typeof roles[number];
 type ModelList = { signature: string; loading: boolean; models: ProviderModel[]; error?: string };
 type ModelRequest = { signature: string; controller: AbortController; timer?: ReturnType<typeof setTimeout> };
+type ModelInputDraft = { settings: Settings; parameters: ModelParameters };
 const connectionSignature = (provider: ProviderConnection) => JSON.stringify([provider.id, provider.protocol, provider.baseUrl, provider.apiKey || '', !!provider.clearApiKey, !!provider.hasKey]);
 const sections = [
   { id: 'providers', label: '供应商连接', icon: KeyRound, description: '管理服务地址、接口协议和 API 密钥。密钥保存在服务端，作品备份不包含密钥。' },
@@ -121,6 +122,8 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
   const signature = (value: Settings, local: ProjectSettingsOverrides = overrides) => JSON.stringify(projectId ? collectProjectOverrides(value, local) : value);
   const dirty = !!settings && (signature(settings) !== savedSignature || inputDraftInvalid);
   const [modelLists, setModelLists] = useState<Record<string, ModelList>>({});
+  const parameterDrafts = useRef<Partial<Record<ModelRole, ModelParameters>>>({});
+  const modelInputDrafts = useRef<Partial<Record<ModelRole, ModelInputDraft>>>({});
   const requests = useRef(new Map<string, ModelRequest>());
   const [lastTest, setLastTest] = useState<{ name: string; ok: boolean; message: string; capture?: CapturedModelResponse } | null>(null);
   useEffect(() => title.current?.focus(), []);
@@ -128,6 +131,8 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
     const controller = new AbortController(); setLoading(true); setError('');
     api<Settings | ProjectSettingsView>(projectId ? `/projects/${projectId}/settings` : '/settings', { signal: controller.signal }).then(value => {
       if (controller.signal.aborted) return;
+      parameterDrafts.current = {};
+      modelInputDrafts.current = {};
       if ('effective' in value) {
         setSettings(value.effective); setGlobalSettings(value.global); setOverrides(value.overrides); setRevision(value.revision); setSavedSignature(signature(value.effective, value.overrides));
       } else { setSettings(value); setSavedSignature(signature(value)); }
@@ -155,6 +160,7 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
       if (group === 'promptTemplates') { if (custom) delete next.promptTemplates; else next.promptTemplates = structuredClone(settings.promptTemplates); }
       else if (group === 'imageSettings') { if (custom) delete next.imageSettings; else next.imageSettings = normalizeImageSettings(settings.imageSettings); }
       else { next.tasks = { ...next.tasks }; if (custom) delete next.tasks[group]; else next.tasks[group] = projectModelSettings(settings, group); }
+      if (group !== 'promptTemplates' && group !== 'imageSettings') delete parameterDrafts.current[group];
       setOverrides(next); setSettings(resolveProjectSettings(globalSettings, next)); setError(''); setMessage('');
       requestAnimationFrame(() => setInputDraftInvalid(!!invalidField()));
     }}>{custom ? '恢复继承全局' : '单独设置'}</button></div>;
@@ -221,8 +227,28 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
   }, [settings]);
 
   function updateProvider(index: number, patch: Partial<ProviderConnection>) { setMessage(''); setSettings(value => value && ({ ...value, providers: value.providers.map((p, i) => i === index ? { ...p, ...patch } : p) })); }
-  function updateRole(role: Role, providerId: string) { setMessage(''); setSettings(value => value && ({ ...value, [role.providerKey]: providerId, [role.modelKey]: '' })); }
-  function updateModel(role: Role, model: string) { setMessage(''); setSettings(value => value && ({ ...value, [role.modelKey]: model })); }
+  function updateSelection(role: Role, providerId: string, model: string, inputDraft?: ModelInputDraft) {
+    setMessage(''); setSettings(value => {
+      if (!value) return value;
+      // Keep the starting parameters and history while typing, without saving intermediate model names.
+      const source = inputDraft?.settings ?? value;
+      const previousProviderId = source[role.providerKey]; const previousModel = source[role.modelKey] ?? '';
+      const previous = previousProviderId && previousModel.trim() ? getModelParameters(source, role.role, previousProviderId, previousModel) : inputDraft?.parameters ?? parameterDrafts.current[role.role];
+      if (previous) parameterDrafts.current[role.role] = previous;
+      const base = inputDraft ? { ...value, modelParameters: source.modelParameters, [role.providerKey]: previousProviderId, [role.modelKey]: previousModel } : value;
+      const next = selectTaskModel(base, role.role, providerId, model, parameterDrafts.current[role.role]);
+      if (providerId && model.trim()) parameterDrafts.current[role.role] = getModelParameters(next, role.role, providerId, model);
+      return next;
+    });
+  }
+  function updateRole(role: Role, providerId: string) { updateSelection(role, providerId, ''); }
+  function updateModel(role: Role, model: string, input = false) { if (settings) updateSelection(role, settings[role.providerKey], model, input ? modelInputDrafts.current[role.role] : undefined); }
+  function startModelInput(role: Role) {
+    if (!settings) return;
+    const providerId = settings[role.providerKey]; const model = settings[role.modelKey] ?? '';
+    const parameters = providerId && model.trim() ? getModelParameters(settings, role.role, providerId, model) : parameterDrafts.current[role.role] ?? defaultModelParameters();
+    modelInputDrafts.current[role.role] = { settings, parameters };
+  }
   function updateParameters(role: ModelRole, providerId: string, model: string, patch: Partial<ModelParameters>) {
     setMessage(''); setSettings(value => value && upsertModelParameters(value, role, providerId, model, { ...getModelParameters(value, role, providerId, model), ...patch }));
   }
@@ -351,11 +377,11 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
         <label>供应商<select aria-label={`${role.label}供应商`} value={settings[role.providerKey]} onChange={e => updateRole(role, e.target.value)}><option value="">暂不设置</option>{settings[role.providerKey] && !provider && <option value={settings[role.providerKey]}>连接已删除，请重新选择</option>}{settings.providers.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
         {provider && <>
           <UpstreamModelSelect key={connectionSignature(provider)} label={role.label} model={model} list={list} onChange={value => updateModel(role, value)} />
-          <label>模型名称（可自定义）<input aria-label={`${role.label}模型名称`} value={model} onChange={e => updateModel(role, e.target.value)} placeholder="选择上方模型，或输入服务商提供的模型 ID" /></label>
+          <label>模型名称（可自定义）<input aria-label={`${role.label}模型名称`} value={model} onFocus={() => startModelInput(role)} onChange={e => updateModel(role, e.target.value, true)} onBlur={() => { delete modelInputDrafts.current[role.role]; }} placeholder="选择上方模型，或输入服务商提供的模型 ID" /></label>
           <div className="model-list-feedback"><span className="hint">{list?.loading ? '正在从供应商获取模型列表…' : list?.models.length ? `已获取 ${list.models.length} 个模型；也可以直接填写自定义模型名称。` : '可直接填写自定义模型名称。'}</span><button type="button" className="text-button" aria-label={`${role.label}刷新模型列表`} disabled={busy || list?.loading} onClick={() => loadModels(provider, true)}><RefreshCw size={13} />刷新列表</button></div>
           {list?.error && <p className="notice error model-list-error">获取模型列表失败：{list.error}</p>}
           {!list?.loading && !list?.error && list && !list.models.length && <p className="hint">供应商未返回可用模型，请填写自定义模型名称。</p>}
-          {modelName ? <ProviderParameters writing={role.role === 'writing'} key={JSON.stringify([role.role, provider.id, modelName])} protocol={provider.protocol} parameters={getModelParameters(settings, role.role, provider.id, modelName)} onChange={patch => updateParameters(role.role, provider.id, modelName, patch)} onReset={() => resetParameters(role.role, provider.id, modelName)} /> : <p className="hint">选择或填写模型名称后，可设置此任务的模型参数；新模型自动使用通用默认值。</p>}
+          {modelName ? <ProviderParameters writing={role.role === 'writing'} key={JSON.stringify([role.role, provider.id, modelName])} protocol={provider.protocol} parameters={getModelParameters(settings, role.role, provider.id, modelName)} onChange={patch => updateParameters(role.role, provider.id, modelName, patch)} onReset={() => resetParameters(role.role, provider.id, modelName)} /> : <p className="hint">选择或填写模型名称后可设置参数。新模型沿用当前任务的设置，已有模型恢复各自保存的参数；首次配置使用通用默认值。</p>}
           <button type="button" className="button secondary small" aria-label={`${role.label}保存并测试连接`} disabled={busy || !model.trim() || !provider.baseUrl} onClick={() => void save(role)}><PlugZap size={15} />保存并测试连接</button>
         </>}
       </fieldset></section></div>;

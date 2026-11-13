@@ -31,6 +31,92 @@ async function openProjectSettings(page: Page, title: string) {
   return { project, settings };
 }
 
+for (const scope of ['global', 'project'] as const) test(`任务模型切换保留参数与新默认值（${scope}）`, async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: scope === 'global' ? 1440 : 390, height: 1000 });
+  await page.route('**/api/settings/models', route => route.fulfill({ json: { models: [{ id: 'selected-new' }] } }));
+  let projectId: string | undefined;
+  if (scope === 'project') projectId = (await openProjectSettings(page, '模型参数保留验收')).project.id;
+  else {
+    await page.goto('/'); await page.getByRole('button', { name: '设置', exact: true }).click();
+    await page.getByTestId('settings-page').getByRole('button', { name: '任务模型', exact: true }).click();
+  }
+  const settings = page.getByTestId('settings-page');
+  const labels = { writing: '正文写作', planning: '摘要压缩', extraction: '资料提取' };
+  for (const [index, role] of modelRoles.entries()) {
+    const label = labels[role];
+    await settings.getByRole('tab', { name: label, exact: true }).click();
+    if (projectId) await settings.getByRole('button', { name: `${label}单独设置`, exact: true }).click();
+    const card = settings.getByRole('region', { name: `${label}模型设置`, exact: true });
+    const expand = async () => { if (await card.locator('details.provider-parameters').getAttribute('open') === null) await card.locator('details.provider-parameters > summary').click(); };
+    await expect(card.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('32000');
+    await expect(card.getByLabel('上下文上限 tokens', { exact: true })).toHaveValue('512000');
+    await expand();
+    await expect(card.getByLabel('返回方式', { exact: true })).toHaveValue('true');
+    await expect(card.getByLabel('请求超时（秒）', { exact: true })).toHaveValue('360');
+    await expect(card.getByLabel('思考等级（OpenAI）', { exact: true })).toHaveValue('high');
+    await card.getByLabel('单次最大输出 tokens', { exact: true }).fill(String(8192 + index));
+    await card.getByLabel('上下文上限 tokens', { exact: true }).fill('256000');
+    await card.getByLabel('温度（temperature）', { exact: true }).fill('0');
+    await card.getByLabel('Top P', { exact: true }).fill('');
+    await card.getByLabel('思考等级（OpenAI）', { exact: true }).selectOption('');
+    await card.getByLabel('返回方式', { exact: true }).selectOption('false');
+    await card.getByLabel('请求超时（秒）', { exact: true }).fill('90');
+    const model = card.getByLabel(`${label}模型名称`, { exact: true });
+    await model.fill(''); await model.pressSequentially(`typed-${role}`);
+    await expand();
+    await expect(card.getByLabel('温度（temperature）', { exact: true })).toHaveValue('0');
+    await expect(card.getByLabel('Top P', { exact: true })).toHaveValue('');
+    await expect(card.getByLabel('返回方式', { exact: true })).toHaveValue('false');
+    await card.getByLabel('温度（temperature）', { exact: true }).fill('0.4');
+    await model.fill(''); await model.pressSequentially(`global-${role}-suffix`); await expand();
+    await expect(card.getByLabel('温度（temperature）', { exact: true })).toHaveValue('0.4');
+    await model.fill(`global-${role}`); await expand();
+    await expect(card.getByLabel('温度（temperature）', { exact: true })).toHaveValue('0');
+    if (role === 'writing') {
+      await card.getByLabel(`${label}供应商`, { exact: true }).selectOption('');
+      await card.getByLabel(`${label}供应商`, { exact: true }).selectOption('project-e2e');
+    }
+    await card.getByLabel(`${label}上游模型`, { exact: true }).selectOption('selected-new'); await expand();
+    await expect(card.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue(String(8192 + index));
+    await expect(card.getByLabel('上下文上限 tokens', { exact: true })).toHaveValue('256000');
+    await expect(card.getByLabel('温度（temperature）', { exact: true })).toHaveValue('0');
+    await expect(card.getByLabel('Top P', { exact: true })).toHaveValue('');
+    await expect(card.getByLabel('思考等级（OpenAI）', { exact: true })).toHaveValue('');
+    await expect(card.getByLabel('返回方式', { exact: true })).toHaveValue('false');
+    await expect(card.getByLabel('请求超时（秒）', { exact: true })).toHaveValue('90');
+  }
+  await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(settings.getByRole('status')).toContainText(projectId ? '作品设置已保存' : '设置已保存');
+  const saved = await (await page.request.get(projectId ? `/api/projects/${projectId}/settings` : '/api/settings')).json();
+  const effective: Settings = projectId ? saved.effective : saved;
+  for (const [index, role] of modelRoles.entries()) {
+    expect(effective[`${role}Model`]).toBe('selected-new');
+    const parameters = effective.modelParameters!.find(profile => profile.role === role && profile.model === 'selected-new')!;
+    expect(parameters).toMatchObject({ maxOutputTokens: 8192 + index, contextTokens: 256000, temperature: 0, timeoutMs: 90000, stream: false });
+    expect(parameters).not.toHaveProperty('topP'); expect(parameters).not.toHaveProperty('reasoningEffort');
+    expect(effective.modelParameters!.some(profile => profile.role === role && profile.model === 't')).toBe(false);
+  }
+  if (projectId) expect((await (await page.request.get('/api/settings')).json()).writingModel).toBe('global-writing');
+  await settings.getByRole('button', { name: '返回作品', exact: true }).click();
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  if (projectId) await settings.getByRole('button', { name: '作品设置', exact: true }).click();
+  else await settings.getByRole('button', { name: '任务模型', exact: true }).click();
+  const writing = settings.getByRole('region', { name: '正文写作模型设置', exact: true });
+  await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('8192');
+  await writing.getByRole('button', { name: '恢复通用默认值', exact: true }).click();
+  await expect(writing.getByLabel('单次最大输出 tokens', { exact: true })).toHaveValue('32000');
+  await expect(writing.getByLabel('上下文上限 tokens', { exact: true })).toHaveValue('512000');
+  await writing.locator('details.provider-parameters > summary').click();
+  await expect(writing.getByLabel('思考等级（OpenAI）', { exact: true })).toHaveValue('high');
+  await expect(writing.getByLabel('返回方式', { exact: true })).toHaveValue('true');
+  await expect(writing.getByLabel('请求超时（秒）', { exact: true })).toHaveValue('360');
+  await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(settings.getByRole('status')).toContainText('已保存');
+  expect(await settings.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+  await page.screenshot({ path: testInfo.outputPath(`model-parameters-${scope}.png`), animations: 'disabled' });
+});
+
 for (const width of [1440, 390]) test(`作品设置在 ${width}px 按项覆盖、保存、重开和恢复继承`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
   const { project, settings } = await openProjectSettings(page, `作品设置 ${width}`);

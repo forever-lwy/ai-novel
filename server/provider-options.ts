@@ -1,6 +1,6 @@
 import type { ProviderConfig } from '../shared/types.js';
 
-export const DEFAULT_MODEL_TIMEOUT_MS = 180_000;
+export const DEFAULT_MODEL_TIMEOUT_MS = 360_000;
 
 /** Validate before saving and again against the effective per-request token limit. */
 export function validateProviderOptions(config: ProviderConfig, effectiveTokens = config.maxOutputTokens): void {

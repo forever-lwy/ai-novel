@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultModelParameters, getModelParameters, normalizeModelSettings, resolveModelConfig, upsertModelParameters } from '../shared/model-settings.js';
+import { defaultModelParameters, getModelParameters, normalizeModelSettings, resolveModelConfig, selectTaskModel, upsertModelParameters } from '../shared/model-settings.js';
 import type { ModelParameterProfile, ModelParameters, Settings } from '../shared/types.js';
 
 const roles = ['writing', 'planning', 'extraction'] as const;
@@ -26,19 +26,70 @@ describe('parameters for each task, connection and model', () => {
     normalized = upsertModelParameters(normalized, 'writing', 'second', 'writer', { ...defaultModelParameters(), geminiStreamFunctionCallArguments: true });
     expect(resolveModelConfig(normalized, normalized.providers[0], 'writer', 'writing').geminiStreamFunctionCallArguments).toBe(false);
     expect(resolveModelConfig(normalized, normalized.providers[1], 'writer', 'writing').geminiStreamFunctionCallArguments).toBe(true);
-    expect(getModelParameters(normalized, 'writing', 'first', 'new-model')).not.toHaveProperty('geminiStreamFunctionCallArguments');
+    expect(getModelParameters(normalized, 'writing', 'first', 'new-model').geminiStreamFunctionCallArguments).toBe(true);
     expect(normalizeModelSettings(normalized)).toEqual(normalized);
   });
   it('gives unconfigured models useful fresh defaults without sharing a mutable object', () => {
-    const defaults = { maxOutputTokens: 4096, contextTokens: 64000, temperature: 1, topP: 1, presencePenalty: 0, frequencyPenalty: 0, timeoutMs: 180000, stream: false };
+    const defaults = {
+      maxOutputTokens: 32000, contextTokens: 512000, temperature: 1, topP: 1, presencePenalty: 0, frequencyPenalty: 0,
+      timeoutMs: 360000, stream: true, reasoningEffort: 'high', geminiThinking: { mode: 'level', level: 'high' },
+      geminiStreamFunctionCallArguments: true, claudeThinking: { type: 'adaptive' }, claudeEffort: 'high',
+    };
     const first = defaultModelParameters();
     first.maxOutputTokens = 999;
     first.temperature = 0;
+    if (first.geminiThinking?.mode === 'level') first.geminiThinking.level = 'low';
+    if (first.claudeThinking) first.claudeThinking.type = 'disabled';
     expect(defaultModelParameters()).toEqual(defaults);
     const missing = getModelParameters(settings(), 'writing', 'first', 'new-model');
     missing.contextTokens = 1000;
     for (const role of roles) expect(getModelParameters(settings(), role, 'first', 'new-model')).toEqual(defaults);
     expect(getModelParameters(settings(), 'writing', 'second', 'new-model')).toEqual(defaults);
+  });
+
+  it.each(roles)('carries all %s parameters to a new model while preserving explicit omissions, zero and false', role => {
+    const parameters: ModelParameters = {
+      maxOutputTokens: 8192, contextTokens: 128000, temperature: 0, topP: 0, seed: 0, timeoutMs: 240000,
+      stream: false, geminiIncludeThoughts: false, geminiStreamFunctionCallArguments: false,
+      stopSequences: ['终章'], geminiThinking: { mode: 'budget', budget: 0 }, claudeThinking: { type: 'disabled' },
+    };
+    const original = upsertModelParameters(settings(), role, 'first', settings()[`${role}Model`]!, parameters);
+    const switched = selectTaskModel(original, role, 'first', ' new-model ');
+    expect(getModelParameters(switched, role, 'first', 'new-model')).toEqual(parameters);
+    expect(switched[`${role}Model`]).toBe(' new-model ');
+    expect(original.modelParameters).toHaveLength(1);
+    const persisted = normalizeModelSettings(JSON.parse(JSON.stringify(switched)));
+    expect(getModelParameters(persisted, role, 'first', 'new-model')).toEqual(parameters);
+    expect(getModelParameters(persisted, role, 'first', 'new-model')).not.toHaveProperty('reasoningEffort');
+    const other = roles.find(value => value !== role)!;
+    expect(getModelParameters(persisted, other, 'first', 'new-model')).toEqual(defaultModelParameters());
+    const changed = getModelParameters(switched, role, 'first', 'new-model'); changed.stopSequences!.push('后记');
+    if (changed.geminiThinking?.mode === 'budget') changed.geminiThinking.budget = 1024;
+    expect(getModelParameters(original, role, 'first', settings()[`${role}Model`]!)).toEqual(parameters);
+  });
+
+  it('restores historical target parameters rather than overwriting them with the departing model', () => {
+    const first = { maxOutputTokens: 2048, contextTokens: 32000, temperature: 0 };
+    const second = { maxOutputTokens: 8192, contextTokens: 128000, stream: false };
+    let value = upsertModelParameters(settings(), 'writing', 'first', 'writer', first);
+    value = upsertModelParameters(value, 'writing', 'second', 'historical', second);
+    value = selectTaskModel(value, 'writing', 'second', ' historical ');
+    expect(getModelParameters(value, 'writing', 'second', 'historical')).toEqual(second);
+    value = selectTaskModel(value, 'writing', 'first', 'writer');
+    expect(getModelParameters(value, 'writing', 'first', 'writer')).toEqual(first);
+  });
+
+  it('retains task parameters across a cleared model or provider without saving empty model profiles', () => {
+    const parameters: ModelParameters = { maxOutputTokens: 8192, contextTokens: 128000, stream: false, stopSequences: ['结束'] };
+    const original = upsertModelParameters(settings(), 'writing', 'first', 'writer', parameters);
+    for (const providerId of ['', 'first', 'second']) {
+      const cleared = selectTaskModel(original, 'writing', providerId, '');
+      expect(cleared.modelParameters).toEqual(original.modelParameters);
+      const selected = selectTaskModel(cleared, 'writing', 'second', 'new', parameters);
+      expect(getModelParameters(selected, 'writing', 'second', 'new')).toEqual(parameters);
+      expect(selected.modelParameters!.every(profile => profile.model.trim())).toBe(true);
+    }
+    expect(getModelParameters(selectTaskModel(settings(), 'writing', 'second', 'first-choice'), 'writing', 'second', 'first-choice')).toEqual(defaultModelParameters());
   });
 
   it('restores a task profile when switching models or connections without reading another task profile', () => {

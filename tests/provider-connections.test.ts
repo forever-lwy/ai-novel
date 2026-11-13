@@ -97,7 +97,7 @@ describe('provider connections and task model assignments', () => {
     expect(ctx.settings.get().providers[0].apiKey).toBe('legacy-private-key');
     const extra = { ...read.json(), writingModel: 'new-model' };
     expect((await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: extra })).statusCode).toBe(200);
-    expect(ctx.settings.get().modelParameters?.find(profile => profile.model === 'new-model')).toMatchObject({ maxOutputTokens: 4096, contextTokens: 64000, temperature: 1, topP: 1 });
+    expect(ctx.settings.get().modelParameters?.find(profile => profile.model === 'new-model')).toMatchObject({ maxOutputTokens: 32000, contextTokens: 512000, temperature: 1, topP: 1, stream: true, timeoutMs: 360000 });
   });
 
   it('accepts legacy requests and gives explicit task models precedence while saving unassigned connections without a model', async () => {

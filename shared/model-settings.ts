@@ -8,14 +8,18 @@ export const modelParameterKeys = [
 ] as const satisfies readonly (keyof ModelParameters)[];
 
 export function defaultModelParameters(): ModelParameters {
-  return { maxOutputTokens: 4096, contextTokens: 64000, temperature: 1, topP: 1, presencePenalty: 0, frequencyPenalty: 0, timeoutMs: 180000, stream: false };
+  return {
+    maxOutputTokens: 32000, contextTokens: 512000, temperature: 1, topP: 1, presencePenalty: 0, frequencyPenalty: 0,
+    timeoutMs: 360000, stream: true, reasoningEffort: 'high', geminiThinking: { mode: 'level', level: 'high' },
+    geminiStreamFunctionCallArguments: true, claudeThinking: { type: 'adaptive' }, claudeEffort: 'high',
+  };
 }
 
-export function getModelParameters(settings: Settings, role: ModelRole, providerId: string, model: string): ModelParameters {
+export function getModelParameters(settings: Settings, role: ModelRole, providerId: string, model: string, fallback?: ModelParameters): ModelParameters {
   const matchesModel = (value: NonNullable<Settings['modelParameters']>[number]) => value.providerId === providerId && value.model.trim() === model.trim();
   const profile = settings.modelParameters?.find(value => value.role === role && matchesModel(value))
     ?? settings.modelParameters?.find(value => value.role === undefined && matchesModel(value));
-  if (!profile) return defaultModelParameters();
+  if (!profile) return fallback ? structuredClone(fallback) : defaultModelParameters();
   const { role: _role, providerId: _providerId, model: _model, ...parameters } = profile;
   // A missing optional field in an existing profile means the user chose the upstream default.
   return structuredClone(parameters);
@@ -27,6 +31,18 @@ export function upsertModelParameters(settings: Settings, role: ModelRole, provi
   const profiles = settings.modelParameters ?? [];
   const index = profiles.findIndex(value => value.role === role && value.providerId === providerId && value.model.trim() === name);
   return { ...settings, modelParameters: index < 0 ? [...profiles, profile] : profiles.map((value, offset) => offset === index ? profile : value) };
+}
+
+/** New selections inherit this task's current parameters; historical profiles keep their own values. */
+export function selectTaskModel(settings: Settings, role: ModelRole, providerId: string, model: string, fallback?: ModelParameters): Settings {
+  const previousProviderId = settings[`${role}ProviderId`];
+  const previousModel = settings[`${role}Model`] ?? '';
+  const previous = previousProviderId && previousModel.trim()
+    ? getModelParameters(settings, role, previousProviderId, previousModel)
+    : fallback;
+  const next = { ...settings, [`${role}ProviderId`]: providerId, [`${role}Model`]: model };
+  if (!providerId || !model.trim()) return next;
+  return upsertModelParameters(next, role, providerId, model, getModelParameters(next, role, providerId, model, previous));
 }
 
 export function connectionOnly(provider: ProviderConnection): ProviderConnection {

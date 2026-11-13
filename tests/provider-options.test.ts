@@ -10,7 +10,7 @@ function body(protocol: ProviderProtocol, extra: Partial<ProviderConfig> = {}) {
 describe('optional provider parameters', () => {
   it('does not invent optional defaults and keeps zero-valued sampling settings', () => {
     const empty = body('openai-chat');
-    expect(empty).not.toHaveProperty('temperature'); expect(empty).not.toHaveProperty('reasoning_effort'); expect(empty.stream).toBe(false);
+    expect(empty).not.toHaveProperty('temperature'); expect(empty).not.toHaveProperty('reasoning_effort'); expect(empty.stream).toBe(true);
     const mapped = body('openai-chat', { temperature: 0, topP: 0, presencePenalty: 0, frequencyPenalty: 0, seed: 0, stopSequences: ['终章'], reasoningEffort: 'none', openaiMaxTokensField: 'max_completion_tokens' });
     expect(mapped).toMatchObject({ temperature: 0, top_p: 0, presence_penalty: 0, frequency_penalty: 0, seed: 0, stop: ['终章'], reasoning_effort: 'none', max_completion_tokens: 4096 });
     expect(mapped).not.toHaveProperty('max_tokens');
