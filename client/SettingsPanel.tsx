@@ -481,7 +481,8 @@ export function ImageSettingsEditor({ settings, onChange }: { settings: Settings
     <label>生图超时（毫秒）<input aria-label="生图超时" type="number" min={1000} max={3600000} step={1000} value={image.timeoutMs} onChange={event => patch({ timeoutMs: Number(event.target.value) })} /></label>
     <label className="checkbox"><input type="checkbox" checked={image.useCharacterReferences !== false} onChange={event => patch({ useCharacterReferences: event.target.checked })} />CG 自动参考出场人物的已有立绘</label>
     <p className="hint image-reference-capability">{!capabilities.knownModel ? '自定义型号按所选图片协议发送请求，请使用支持对应生图与参考图能力的图片模型。' : capabilities.referenceMode === 'multiple' ? `当前型号支持多张参考图；本工作台最多使用 ${capabilities.maxReferences} 张，其中人物参考最多 ${capabilities.maxCharacterReferences} 人。` : capabilities.referenceMode === 'single' ? '当前型号支持一张参考图；修改已有 CG 时，这个位置用于原图。' : '当前型号不提供人物参考图，CG 根据人物资料绘制。'}AI 从对应场景选择人物，尚未完成的立绘不会作为参考图。</p>
-    <label className="checkbox"><input type="checkbox" checked={image.autoPortrait} onChange={event => patch({ autoPortrait: event.target.checked })} />新人物自动生成立绘</label>
+    <label className="checkbox"><input type="checkbox" checked={image.autoPortrait} onChange={event => patch({ autoPortrait: event.target.checked })} />自动生成人物立绘并更新形象</label>
+    <p className="hint">AI 根据剧情决定是否更新服装、发型或其他形象；新立绘成功并关联资料后启用，旧图保留。已有合适版本时可直接切换。参考图中的服装是否沿用，由 AI 结合当前场景决定。</p>
     <label className="checkbox"><input type="checkbox" checked={image.autoCG} onChange={event => patch({ autoCG: event.target.checked })} />场景变化或大场面时自动生成 CG</label>
     <p className="hint">插画与正文同时生成，仅等待实际需要的参考图。CG 附带场景描述，先关联本章，正文保存后由资料提取模型单独匹配正文位置，与资料整理分别进行；人物立绘在资料确认后关联人物。写作页面和图册可查看进度，失败和中断由作者手动重试。</p>
   </>;

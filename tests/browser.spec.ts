@@ -2789,6 +2789,48 @@ test('正文尚未写完时插画已生成，保存后继续使用原图片', as
   } finally { await release(); await page.request.put('/api/settings', { data: previous }); }
 });
 
+test('人物形象更新后自动切换立绘并复用已有版本，保留旧图与 CG 参考', async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  const previous = await (await page.request.get('/api/settings')).json(); const providerId = 'e2e-portrait-editions';
+  const settings = { providers: [{ id: providerId, name: '本地形象测试', protocol: 'openai-chat', baseUrl: mockUrl, apiKey: '' }], writingProviderId: providerId, writingModel: 'e2e-images', planningProviderId: providerId, planningModel: 'e2e-planning', extractionProviderId: providerId, extractionModel: 'e2e-fixture', promptTemplates: defaultPromptTemplates(), imageSettings: { providerId, model: 'e2e-image', protocol: 'openai-images', size: '1024x1024', quality: 'auto', stylePrompt: '', autoPortrait: true, autoCG: true, timeoutMs: 120000 } };
+  expect((await page.request.put('/api/settings', { data: settings })).ok()).toBeTruthy();
+  try {
+    await createProject(page, 'E2E 人物形象版本'); const branchId = await currentBranchId(page);
+    const list = async (): Promise<StoryImage[]> => (await page.request.get(`/api/branches/${branchId}/images?view=author`)).json();
+    const generate = async (model: string, chapter: number, instruction = '继续描写林舟当前的形象。') => {
+      expect((await page.request.put('/api/settings', { data: { ...settings, writingModel: model } })).ok()).toBeTruthy();
+      const view = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+      expect((await page.request.post(`/api/branches/${branchId}/generate?view=author`, { data: { baseRevisionId: view.branch.revisionId, title: `形象测试 ${chapter}`, mode: 'original', instruction } })).ok()).toBeTruthy();
+      await expect.poll(async () => {
+        const jobs = await (await page.request.get(`/api/jobs?projectId=${view.branch.projectId}&view=author`)).json();
+        const assets = await list();
+        return jobs.length > 0 && jobs.every((job: any) => job.status === 'completed') && assets.length === (chapter === 3 ? 5 : chapter * 2) && assets.every(image => image.status === 'completed');
+      }, { timeout: 30_000 }).toBe(true);
+    };
+    await generate('e2e-images', 1); const original = (await list()).find(image => image.kind === 'portrait')!;
+    await generate('e2e-images-update', 2); const updated = (await list()).find(image => image.portraitUpdate)!;
+    expect(updated).toMatchObject({ active: true, entityId: original.entityId, referenceImageIds: [original.id] });
+    expect((await list()).find(image => image.id === original.id)?.active).toBe(false);
+    expect((await list()).find(image => image.kind === 'cg' && image.chapterId === updated.chapterId)?.referenceImageIds).toEqual([updated.id]);
+    await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 人物形象版本', exact: true }).click(); await tab(page, '故事图册'); await openImageGroup(page, updated);
+    await expect(page.locator(`[data-image-id="${updated.id}"]`).getByRole('button', { name: '停用图片', exact: true })).toBeVisible();
+    await expect(page.locator(`[data-image-id="${original.id}"]`).getByRole('button', { name: '启用图片', exact: true })).toBeVisible();
+    await expectImagePixels(page.locator('.image-group-versions img'));
+    await page.screenshot({ path: testInfo.outputPath('portrait-update-desktop.png'), animations: 'disabled' });
+    await generate('e2e-images-reuse', 3, `林舟重新穿上旅行斗篷。PORTRAIT_REUSE:${original.id}`);
+    const assets = await list(); expect(assets.filter(image => image.kind === 'portrait')).toHaveLength(2);
+    expect(assets.find(image => image.id === original.id)?.active).toBe(true); expect(assets.find(image => image.id === updated.id)?.active).toBe(false);
+    const latestView = await (await page.request.get(`/api/branches/${branchId}?view=author`)).json();
+    const cg = assets.find(image => image.kind === 'cg' && image.chapterId === latestView.state.chapters.at(-1).id)!;
+    expect(cg.referenceImageIds).toEqual([original.id]); expect(cg.prompt).toContain('是否保留服装'); expect(cg.prompt).not.toContain('保持该人物外貌与服装特征');
+    await page.setViewportSize({ width: 390, height: 844 }); await page.reload(); await page.getByRole('button', { name: '打开作品 E2E 人物形象版本', exact: true }).click(); await tab(page, '故事图册'); await openImageGroup(page, original);
+    await expect(page.locator(`[data-image-id="${original.id}"]`).getByRole('button', { name: '停用图片', exact: true })).toBeVisible();
+    await expectImagePixels(page.locator('.image-group-versions img'));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('portrait-reuse-mobile.png'), animations: 'disabled' });
+  } finally { await page.request.put('/api/settings', { data: previous }); }
+});
+
 test('生图设置、自动人物与场景工具、全文选段 CG、重绘参考图修改及资料地图图册', async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const auth = await (await page.request.get('/api/auth/status')).json();
@@ -2799,7 +2841,7 @@ test('生图设置、自动人物与场景工具、全文选段 CG、重绘参�
     await createProject(page, 'E2E 故事插画');
     await page.getByRole('button', { name: '设置', exact: true }).click(); const settings = page.getByTestId('settings-page');
     await settings.getByRole('button', { name: '生图与自动插画', exact: true }).click();
-    await expect(settings.getByLabel('新人物自动生成立绘', { exact: true })).toBeChecked();
+    await expect(settings.getByLabel('自动生成人物立绘并更新形象', { exact: true })).toBeChecked();
     await expect(settings.getByLabel('场景变化或大场面时自动生成 CG', { exact: true })).not.toBeChecked();
     await settings.getByLabel('生图供应商', { exact: true }).selectOption(providerId); await settings.getByLabel('图片模型名称', { exact: true }).fill('e2e-image');
     await settings.getByLabel('场景变化或大场面时自动生成 CG', { exact: true }).check();

@@ -13,8 +13,11 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 const prose = '林舟身穿青色长袍走进城门。\n城外千军万马正在迎战。';
 const scene = '城外千军万马正在迎战。';
 const fixtures: { store: Store; engines: StoryEngine[]; images: ImageService }[] = [];
+const releases: (() => void)[] = [];
+function gate() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); releases.push(resolve); return { promise, resolve }; }
 
 afterEach(async () => {
+  releases.splice(0).forEach(release => release());
   for (const ctx of fixtures.splice(0)) {
     await Promise.all(ctx.engines.map(engine => engine.close()));
     await ctx.images.close(); ctx.store.close();
@@ -54,16 +57,16 @@ function harness(turns: Turn[], options: { autoCG?: boolean; autoPortrait?: bool
       const turn = turns[++currentTurn]; requests.push(request);
       request.onTextDelta?.(turn.text);
       for (const image of turn.images) {
-        const name = image.kind === 'portrait' ? 'generate_character_portrait' : 'generate_scene_cg';
+        const name = image.reuseImageId ? 'select_character_portrait' : image.kind === 'portrait' ? 'generate_character_portrait' : 'generate_scene_cg';
         const tool = request.tools?.find(tool => tool.name === name);
-        if (tool) await tool.execute(image.kind === 'portrait' ? { name: image.name, description: image.description } : image.prompt ? { sceneDescription: image.sceneDescription, prompt: image.prompt, referenceNames: image.referenceNames, parameters: image.parameters } : { sourceText: image.sourceText, description: image.description });
+        if (tool) await tool.execute(image.reuseImageId ? { name: image.name, imageId: image.reuseImageId } : image.kind === 'portrait' ? { name: image.name, description: image.description, ...(image.updateExisting === undefined ? {} : { updateExisting: image.updateExisting }) } : image.prompt ? { sceneDescription: image.sceneDescription, prompt: image.prompt, referenceNames: image.referenceNames, parameters: image.parameters } : { sourceText: image.sourceText, description: image.description });
       }
       return { text: turn.text, inputTokens: 10, outputTokens: 20 };
     }),
     generateStructured: vi.fn(async (_provider, request, validate) => {
       if (request.system.includes('独立的插画定位任务')) {
         const scenes = JSON.parse(request.prompt.split('\n')[1]) as { id: string; sceneDescription: string }[];
-        return { value: validate({ placements: scenes.map(image => ({ imageId: image.id, paragraph: image.sceneDescription.includes('不存在') ? null : 2 })) }), inputTokens: 2, outputTokens: 3 };
+        return { value: validate({ placements: scenes.map(image => ({ imageId: image.id, paragraph: image.sceneDescription.includes('不存在') ? null : turns[currentTurn].text.includes('\n') ? 2 : 1 })) }), inputTokens: 2, outputTokens: 3 };
       }
       if (options.failExtractionOnce && !failedExtraction) { failedExtraction = true; throw new Error('模拟资料整理失败'); }
       return { value: validate(turns[Math.max(0, currentTurn)].extraction), inputTokens: 4, outputTokens: 8 };
@@ -78,6 +81,12 @@ async function finish(ctx: ReturnType<typeof harness>, imageCount: number, proje
   await until(() => ctx.engine.listJobs(projectId).filter(job => job.kind === 'extract').some(job => job.status === 'completed') && ctx.engine.listJobs(projectId).every(job => job.status === 'completed') && ctx.store.images.all(projectId).length === imageCount && ctx.store.images.all(projectId).every(image => ['completed', 'failed'].includes(image.status)));
 }
 const requested = (cgText = '城外两支军队交战，千军万马的远景'): WritingImageRequest[] => [{ kind: 'portrait', name: '林舟', description: '青色长袍，站立在城门边' }, { kind: 'cg', sceneDescription: cgText, description: '千军万马交战的远景', prompt: '千军万马交战的远景' }];
+function appearanceTurn(description = '银色盔甲'): Turn {
+  const text = `林舟换上${description}走出城门。`;
+  const extraction = extracted(); extraction.entities[0].description = description;
+  extraction.entities[0].facts[0] = { ...extraction.entities[0].facts[0], text: `身穿${description}`, quote: text };
+  return { text, extraction, images: [{ kind: 'portrait', name: '林舟', description: `保留人物身份，服装改为${description}`, updateExisting: true }] };
+}
 
 describe('automatic images across writing, extraction and image persistence', () => {
   it('uses the writing model final prompt and parameter suggestions directly, with explicit character references', async () => {
@@ -173,6 +182,93 @@ describe('automatic images across writing, extraction and image persistence', ()
     expect(ctx.images.list(ctx.project.mainBranchId, true).filter(image => image.kind === 'portrait')).toHaveLength(1);
     expect(ctx.generator).toHaveBeenCalledTimes(2);
     expect(ctx.models.generateText).toHaveBeenCalledTimes(2);
+  });
+
+  it('updates an existing portrait, enables it after binding, and uses its pixels for the new CG', async () => {
+    const later = appearanceTurn();
+    later.images.push({ kind: 'cg', description: later.text, prompt: later.text, sceneDescription: '林舟穿盔甲走出城门', referenceNames: ['林舟'] });
+    const ctx = harness([{ text: prose, extraction: extracted(), images: [requested()[0]] }, later]);
+    ctx.start(); await finish(ctx, 1);
+    const branchId = ctx.project.mainBranchId; const old = ctx.images.list(branchId, true)[0];
+    const fork = ctx.store.fork(branchId, { baseRevisionId: ctx.store.getBranch(branchId).revisionId, name: '旧形象旁支' });
+    ctx.start(); await finish(ctx, 3);
+    const assets = ctx.images.list(branchId, true); const updated = assets.find(image => image.portraitUpdate)!; const cg = assets.find(image => image.kind === 'cg')!;
+    expect(updated).toMatchObject({ status: 'completed', bindingStatus: 'bound', entityId: old.entityId, active: true, selectedReferenceImageIds: [old.id] });
+    expect(assets.find(image => image.id === old.id)?.active).toBe(false);
+    expect(cg.referenceImageIds).toEqual([updated.id]); expect(cg.prompt).toContain('银色盔甲');
+    expect(cg.prompt).toContain('是否保留服装'); expect(cg.prompt).not.toContain('保持该人物外貌与服装特征');
+    expect(ctx.optimizer.mock.calls[1][1].references).toMatchObject([{ imageId: old.id, label: expect.stringContaining('由 AI') }]);
+    const firstBoundary = ctx.store.readingState(branchId, ctx.store.state(branchId).chapters[0].id, false);
+    expect(ctx.store.images.activeIds(firstBoundary)).toContain(old.id); expect(firstBoundary.imageIds).not.toContain(updated.id);
+    expect(ctx.images.list(fork.branch.id, true)).toMatchObject([{ id: old.id, active: true }]);
+    const catalog = ctx.requests[1].messages!.map(message => message.content).join('\n');
+    expect(catalog).toContain(old.id); expect(catalog).toContain('人物立绘版本'); expect(catalog).toContain('updateExisting=true');
+    const restored = ctx.store.restoreProject(ctx.store.exportProject(ctx.project.id));
+    expect(ctx.images.list(restored.mainBranchId, true).find(image => image.portraitUpdate)).toMatchObject({ active: true, status: 'completed' });
+  });
+
+  it('retains the old portrait on failed updates and enables an explicitly retried successful version', async () => {
+    const ctx = harness([{ text: prose, extraction: extracted(), images: [requested()[0]] }, appearanceTurn()]);
+    ctx.start(); await finish(ctx, 1); const branchId = ctx.project.mainBranchId; const old = ctx.images.list(branchId, true)[0];
+    ctx.generator.mockRejectedValueOnce(new Error('更新图片失败'));
+    ctx.start(); await finish(ctx, 2);
+    const failed = ctx.images.list(branchId, true).find(image => image.portraitUpdate)!;
+    expect(failed).toMatchObject({ status: 'failed', active: false });
+    expect(ctx.images.list(branchId, true).find(image => image.id === old.id)?.active).toBe(true);
+    expect(ctx.generator).toHaveBeenCalledTimes(2);
+    const retry = ctx.images.retry(branchId, failed.id, ctx.store.getBranch(branchId).revisionId);
+    await until(() => ctx.store.images.get(retry.image.id)?.status === 'completed');
+    expect(ctx.images.list(branchId, true).find(image => image.id === retry.image.id)).toMatchObject({ active: true, portraitUpdate: true });
+    expect(ctx.images.list(branchId, true).find(image => image.id === old.id)?.active).toBe(false);
+    expect(ctx.generator).toHaveBeenCalledTimes(3); expect(ctx.models.generateText).toHaveBeenCalledTimes(2);
+  });
+
+  it('selects a previous appearance without redrawing and scopes its CG references, history and restored IDs', async () => {
+    const reuse = appearanceTurn('青色长袍'); reuse.images = [];
+    const ctx = harness([{ text: prose, extraction: extracted(), images: [requested()[0]] }, appearanceTurn(), reuse]);
+    ctx.start(); await finish(ctx, 1); const branchId = ctx.project.mainBranchId; const old = ctx.images.list(branchId, true)[0];
+    ctx.start(); await finish(ctx, 2); const updated = ctx.images.list(branchId, true).find(image => image.portraitUpdate)!;
+    const beforeReuse = ctx.store.getBranch(branchId).revisionId;
+    reuse.images.push({ kind: 'portrait', name: '林舟', description: '', reuseImageId: old.id }, { kind: 'cg', description: reuse.text, prompt: reuse.text, sceneDescription: '林舟再次身穿青袍', referenceNames: ['林舟'] });
+    ctx.start(); await finish(ctx, 3);
+    expect(ctx.images.list(branchId, true).find(image => image.id === old.id)?.active).toBe(true);
+    expect(ctx.images.list(branchId, true).find(image => image.id === updated.id)?.active).toBe(false);
+    expect(ctx.images.list(branchId, true).find(image => image.kind === 'cg')?.referenceImageIds).toEqual([old.id]);
+    expect(ctx.optimizer).toHaveBeenCalledTimes(2); expect(ctx.generator).toHaveBeenCalledTimes(3);
+    const secondBoundary = ctx.store.readingState(branchId, ctx.store.state(branchId).chapters[1].id, false);
+    expect(ctx.store.images.activeIds(secondBoundary)).toEqual([updated.id]);
+    const restored = ctx.store.restoreProject(ctx.store.exportProject(ctx.project.id));
+    const restoredOld = ctx.images.list(restored.mainBranchId, true).find(image => image.kind === 'portrait' && !image.portraitUpdate)!;
+    const row = ctx.store.db.prepare("SELECT data FROM jobs WHERE project_id=? AND json_extract(data,'$.payload.imageRequests[0].reuseImageId') IS NOT NULL").get(restored.id)!;
+    expect((JSON.parse(String(row.data)) as Job).payload.imageRequests).toMatchObject([{ reuseImageId: restoredOld.id }, { kind: 'cg' }]);
+    expect(restoredOld.active).toBe(true);
+    ctx.store.rollback(branchId, { baseRevisionId: ctx.store.getBranch(branchId).revisionId, revisionId: beforeReuse });
+    expect(ctx.images.list(branchId, true).find(image => image.id === updated.id)?.active).toBe(true);
+  });
+
+  it.each(['complete', 'manual', 'cancel', 'rollback'] as const)('preserves a pending update and respects %s at completion', async action => {
+    const ctx = harness([{ text: prose, extraction: extracted(), images: [requested()[0]] }, appearanceTurn()]);
+    ctx.start(); await finish(ctx, 1); const branchId = ctx.project.mainBranchId; const old = ctx.images.list(branchId, true)[0];
+    const beforeUpdate = ctx.store.getBranch(branchId).revisionId; const pixels = gate();
+    ctx.generator.mockImplementationOnce(async () => { await pixels.promise; return { bytes: png, mimeType: 'image/png' }; });
+    ctx.start();
+    await until(() => ctx.engine.listJobs().every(job => job.status === 'completed') && ctx.images.list(branchId, true).some(image => image.portraitUpdate && image.bindingStatus === 'bound' && image.status === 'running'));
+    const update = ctx.images.list(branchId, true).find(image => image.portraitUpdate)!;
+    expect(update.active).toBe(false); expect(ctx.images.list(branchId, true).find(image => image.id === old.id)?.active).toBe(true);
+    // Another registration hydrates selections while pixels are still pending.
+    const extra = ctx.images.generate(branchId, { baseRevisionId: ctx.store.getBranch(branchId).revisionId, kind: 'entity', entityId: old.entityId });
+    await until(() => ctx.store.images.get(extra.image.id)?.status === 'completed');
+    if (action === 'manual') ctx.images.setActive(branchId, old.id, ctx.store.getBranch(branchId).revisionId, true);
+    if (action === 'cancel') ctx.images.cancel(branchId, update.id);
+    if (action === 'rollback') ctx.store.rollback(branchId, { baseRevisionId: ctx.store.getBranch(branchId).revisionId, revisionId: beforeUpdate });
+    const revision = ctx.store.getBranch(branchId).revisionId;
+    pixels.resolve();
+    await until(() => ['completed', 'stale', 'cancelled'].includes(ctx.store.images.get(update.id)!.status));
+    expect(ctx.store.getBranch(branchId).revisionId).toBe(revision);
+    const active = ctx.store.images.activeIds(ctx.store.state(branchId));
+    expect(active).toContain(action === 'complete' ? update.id : old.id);
+    expect(active).not.toContain(action === 'complete' ? old.id : update.id);
+    if (action === 'rollback') expect(ctx.store.images.get(update.id)?.status).toBe('stale');
   });
 
   it('keeps an unmatched scene bound to its chapter without inventing a source position or character identity', async () => {

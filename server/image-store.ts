@@ -27,6 +27,7 @@ export const imageSchema = z.object({
   writingPrompt: z.string().max(20000).optional(), writingReferenceNames: z.array(z.string().max(300)).max(16).optional(), writingParameters: imageParametersSchema.optional(), promptSource: z.enum(['writing', 'optimizer']).optional(),
   writingJobId: z.string().min(1).optional(), bindingStatus: z.enum(['pending', 'bound', 'discarded']).optional(), pendingEntityName: z.string().max(300).optional(), dependencyImageIds: z.array(z.string().min(1)).max(16).optional(),
   selectedReferenceImageIds: z.array(z.string().min(1)).max(16).optional(),
+  portraitUpdate: z.boolean().optional(),
   referenceImageIds: z.array(z.string().min(1)).max(16).optional(), referenceEntityIds: z.array(z.string().min(1)).max(16).optional(),
   materialEntityIds: z.array(z.string().min(1)).max(10000).optional(),
   materialFactIds: z.array(z.string().min(1)).max(100000).optional(), materialRelationIds: z.array(z.string().min(1)).max(100000).optional(),
@@ -115,6 +116,8 @@ export class ImageStore {
     for (const imageId of explicit ? state.activeImageIds! : state.imageIds ?? []) {
       const image = this.get(imageId);
       if (!image || !imageVisible(image, state, true) || !explicit && image.status !== 'completed') continue;
+      // Keep the old selection visible until its automatic replacement succeeds.
+      if (image.portraitUpdate && image.status !== 'completed') continue;
       const group = this.groupKey(image, state); const previousId = selected.get(group); const previous = previousId ? this.get(previousId) : undefined;
       if (!explicit && previous && previous.createdAt.localeCompare(image.createdAt) > 0) continue;
       selected.set(group, imageId);
@@ -122,7 +125,13 @@ export class ImageStore {
     return [...selected.values()];
   }
   active(image: StoryImage, state: StoryState, completedOnly = true): boolean { return (!completedOnly || image.status === 'completed') && this.activeIds(state).includes(image.id); }
-  hydrate(state: StoryState): void { state.activeImageIds = this.activeIds(state); }
+  hydrate(state: StoryState): void {
+    const waiting = (state.activeImageIds ?? []).filter(id => {
+      const image = this.get(id);
+      return image?.portraitUpdate && ['queued', 'running', 'paused'].includes(image.status) && imageVisible(image, state, true);
+    });
+    state.activeImageIds = [...this.activeIds(state), ...waiting];
+  }
   visible(image: StoryImage, state: StoryState, author: boolean, seen = new Set<string>(), historicalSource = false): boolean {
     if (seen.has(image.id) || !imageVisible(image, state, author, historicalSource) || !author && !historicalSource && !this.active(image, state)) return false;
     if (author) return true;

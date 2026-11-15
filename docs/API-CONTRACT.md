@@ -77,18 +77,20 @@
 ## 图片接口
 
 - 写作工具完整参数校验后同步登记图片并立即返回，图片队列与正文模型异步运行；不等正文或提取完成。`WritingImageRequest.imageId?` 关联原资产，`StoryImage.writingJobId?`、`bindingStatus?:pending|bound|discarded`、`pendingEntityName?` 和 `dependencyImageIds?:string[]` 保存归属与参考图等待关系。未保存的图片仅在所属故事线的图册／内容接口可读，尚未进入 `StoryState.imageIds`，不改变正文起始版本，不进入其他分支或历史快照。
+- 人物参考说明不再要求保持服装，写作及提示词优化规则要求 AI 根据目标场景、上下文和作者要求决定保留或改变的服装、发型等外观特征。作者明确选择的参考图顺序保持原样。
+- `generate_character_portrait {name,description,updateExisting?:boolean}`：省略或 false 时只补充缺失立绘；true 时允许更新已有角色，保存 `WritingImageRequest.updateExisting` 与图片 `portraitUpdate:true`，有可用参考能力时参考原启用立绘。`select_character_portrait {name,imageId}`：选择当前线中该人物已完成的立绘版本，允许明确复用未启用旧图，保存 `WritingImageRequest.reuseImageId`，不请求新像素。写作上下文提供版本目录、绘制时形象资料与启用状态；选择在登记及章末关联时重新核对作品、人物、图片引用、完成像素及本章出场依据。每个人物每章只接受一个立绘决定，沿用 12 项自动插画上限，关闭 autoPortrait 时两个工具均停用。
 - 自动 CG 按实际参考人物和型号数量上限选定立绘，只有这些图片处于 queued/running 时等待；等待不占图片运行位置，队列仍最多并行 2 项。所需立绘失败／暂停／取消／删除后明确失败，不隐式换图、忽略或重试；无可用立绘请求时仅按文字绘制，关闭人物参考或明确空名单不等待。
 - 正文保存后自动 CG 即关联章节并转为 bound，无须等待资料提取；人物立绘仍在提取成功后核对姓名和出场依据，在图片引用和提取进度的同一事务中关联；保留像素、任务状态及作者取消，不重复生图。写作中的图片可预览、取消或删除（标为 discarded，不修改故事版本），关联前不支持启用、重试或修改。下一章写作不使已关联的旧章图片自动过期；关联章及所用资料、实际参考选择仍须有效。普通暂停／取消写作停止未关联任务，RPG 选择等待可继续；重启及备份恢复不自动重试。备份保留未关联的图片和依赖，恢复时重新映射任务与图片 ID 并校验归属。
 
 - 公开插画按关联章节筛选公开素材，保留 `StoryImage.publicMaterial`、`materialFactIds/materialRelationIds` 等依据标记及备份兼容；工作台不再按这些标记隐藏图片，已有私密图可直接查看，无需修改历史素材标记或重绘。
 - 绑定 `chapterId` 的图片登记、启用、停用和删除会新增该章及后续的章末快照，与当前图册原子保存。更早章节、已有分支与旧快照保留；缺少匹配正文的章末记录时拒绝操作，不拼入最新世界资料。
 
-- `StoryState.activeImageIds?:string[]` 为当前版本的图片选择，必须是 `imageIds` 的无重复子集；缺省为旧作品兼容选择，按明确关联对象取最新成功图，显式空数组表示全部停用。`StoryImage.active` 为当前故事线投影，不修改历史图片资产。人物／实体按合并后的明确实体 ID 分组，地图一组，CG 按章节及准确选段范围分组；含场景描述的 CG 按章节与描述分组，定位完成也保持同一场景组，同组最多启用一张。新变体保留旧选择；首次对象的待生成图成功后启用。
+- `StoryState.activeImageIds?:string[]` 为当前版本的图片选择，必须是 `imageIds` 的无重复子集；缺省为旧作品兼容选择，按明确关联对象取最新成功图，显式空数组表示全部停用。`StoryImage.active` 为当前故事线投影，不修改历史图片资产。人物／实体按合并后的明确实体 ID 分组，地图一组，CG 按章节及准确选段范围分组；含场景描述的 CG 按章节与描述分组，定位完成也保持同一场景组，同组最多启用一张。手动新变体保留旧选择；首次对象的待生成图成功后启用。自动更新立绘在 activeImageIds 中同时保留原选择和待启用新图的意图，投影在新图 completed 前仍使用原图，成功后同组只启用新图；hydrate 保留未完成意图，失败／取消不切换。作者手动启用同组版本或停用当前图会清除待切换意图，防止迟到覆盖。意图与图片引用随章末、分支、回退和备份保留，像素完成不新增故事版本或改变进行中文字任务的起始版本。
 - `PUT /branches/:id/images/:imageId/placement {baseRevisionId,chapterId,selection?:{start,end}} -> {view:BranchView,images:StoryImage[]}`：手动修改当前故事线 CG 在关联章节内的位置；不传 selection 表示仅关联章节。必须使用当前版本和该图片投影后的当前章节 ID，范围为合法、非空的 UTF-16 选区；不接受跨作品／不可见图片、非 CG、未关联章节的暂存图片或其他章节。正文／资料等任务未结束时返回 409，独立 image-placement 不阻塞。服务端从当前正文保存真实 sourceText，不接受客户端伪造引文；不调用任何模型或复制像素。
 - `StoryState.imagePlacements?:Record<imageId,{chapterId,selection?,sourceText?}>` 保存版本化的手动位置覆盖。保存通过章节图片引用版本同步章末快照，当前分支、回退及完整备份分别保留；图片资产的原章节、原选区、提示词、像素和启用选择保留。图册按当前版本投影 `placementSource:'manual'|'automatic'`，手动选区失效时保留旧依据并省略当前位置；仅关联章节也是明确手动决定。自动定位跳过已手动绑定的图片，迟到成功／失败和像素回包不能覆盖手动位置。分组身份保持原组，不因挪动位置合并旧图片组；备份核验覆盖项的图片、章节和引文并映射键中的图片 ID。
 - `PUT /branches/:id/images/:imageId/active?view=author {baseRevisionId,active:boolean} -> {view:BranchView,images:StoryImage[]}`：启用／停用当前故事线图片，启用一张会停用同组其他图片；调用方替换整份图片列表并更新版本。新图片须生成完成才能手动启用；不调用任何模型。
 - `DELETE /branches/:id/images/:imageId?view=author {baseRevisionId} -> {view:BranchView,images:StoryImage[]}`：从当前版本的图册及启用列表移除；历史及其他故事线引用保留像素，不跨版本破坏资料。删除当前图片不自动换用其他图片。排队／运行任务按所属故事线处理取消与迟到输出，删除后不能通过当前线内容 URL 读取。
-- 图册包含未启用的暂存图，支持预览、重绘和删除；未启用或已删除的图仍不会进入提示词优化候选、实际图片请求及 CG 参考，显式编辑原图也须启用。参考选择在任务期间变化时仍拒绝后续图片请求，显式重试按当前选择重新优化。
+- 图册包含未启用的暂存图，支持预览、重绘和删除；未启用图默认不进入提示词优化候选、实际图片请求及 CG 参考；写作 AI 明确选择复用的同一人物旧立绘可用于本章 CG，正文与资料确认后再切换启用，已删除图始终不可选择。显式编辑原图也须启用。参考选择在任务期间变化时仍拒绝后续图片请求，显式重试按当前选择重新优化。
 
 - `GET /branches/:id/images -> StoryImage[]`：返回当前故事线完整图册，含私密图片、未启用图片、生成中的记录与该线写作中尚未关联的图片。完成图带同源原图 `url` 和缩略图 `previewUrl`，URL 的 v 参数随图片记录变化；图片内容接口仍校验当前故事线引用及登录。阅读开关不改变结果。
 - `POST /branches/:id/images?view=author`，请求为 `ImageGenerateInput={baseRevisionId,kind:'portrait'|'entity'|'map'|'cg',entityId?,chapterId?,selection?:{start,end},sceneDescription?,instruction?,referenceImageId?,selectedReferenceImageIds?:string[]}`，返回 `{view:BranchView,image:StoryImage}`。登记引用创建一个新版本，独立图片任务随后运行；调用方更新 `view.branch.revisionId`。资料图必须指定当前实体，地图依据地点与地理关系，CG 必须指定当前章，选段为正文 UTF-16 起止索引，结束位置不包含在选段内。图片修改需同一关联对象的已完成参考图与修改要求，使用实际原图输入，不覆盖旧图。
@@ -99,7 +101,7 @@
 - `POST /branches/:id/images/:imageId/cancel?view=author -> StoryImage`：停止排队或正在生成的图片，拒绝迟到结果。
 - 图片状态为 `queued/running/completed/failed/paused/stale/cancelled`。服务重启或关闭后排队与运行任务转为 `paused`，不自动重复调用；正文或资料版本变化后迟到结果转为 `stale`。图片二进制持久化在 SQLite，单图上限 20 MiB，作品删除和完整备份／恢复包括图片及历史引用，旧版无图片备份继续可用。
 - 手动登记、修改与重试沿用 session、同源、起始版本校验；正文／资料等文字任务处于等待、运行或暂停时返回 `409`，防止改变写作起始版本；独立 CG 定位不阻止这些操作。图片失败不重试文字生成。图片提示词、请求与结果不参与正文保存或 TXT 导出。
-- 设置可保存 `imageSettings={providerId,model,protocol:'openai-images'|'gemini',size,quality,stylePrompt,autoPortrait,autoCG,timeoutMs}`，复用加密供应商密钥。默认新人物自动立绘开启、自动 CG 关闭，未配置图片模型时不暴露写作生图工具。旧设置缺失该字段时采用默认；旧客户端省略字段保存时保留已存在配置。
+- 设置可保存 `imageSettings={providerId,model,protocol:'openai-images'|'gemini',size,quality,stylePrompt,autoPortrait,autoCG,timeoutMs}`，复用加密供应商密钥。默认人物自动立绘及形象更新开启、自动 CG 关闭，未配置图片模型时不暴露写作生图工具。旧设置缺失该字段时采用默认；旧客户端省略字段保存时保留已存在配置。
 - 写作工具 `generate_character_portrait {name,description}` 与 `generate_scene_cg {prompt,sceneDescription,referenceNames?,parameters?}` 登记自动插画意图，有效请求返回 `requested`，可带 `imageId`。CG 的 `sceneDescription` 描述人物、地点、动作及事件，无须提供原文或提前输出正文；工具调用不改变正文版本。`prompt` 直接用于生图，`referenceNames` 空数组表示不用人物参考，`parameters` 只建议自动尺寸／画幅／分辨率，固定设置优先。旧会话的 `sourceText/description` 继续接受，作为兼容场景信息，不再在生图前要求精确引用；只有 description 时沿用提示词优化。本章最多 12 个自动插画请求。工具预览与实际发送共用契约；作者保存的预设不自动改写。
 - 正文保存后，在章节图片引用版本中关联原 CG，保留同一 ID、像素及失败／取消状态，同时创建独立 `Job.kind='image-placement'`，不与资料提取合并，也不占同线正文／资料任务锁。定位使用作品当前的资料提取模型及其参数，以独立 JSON 请求发送场景描述和带段号的本章全文；完整输入与输出预留计入预算，不隐式自动重试。结果只允许原图片 ID 和有效段号（或 null），按保存正文的 UTF-16 索引填入 `selection/sourceText`；段号对应一个非空正文段，场景无法确认时返回 null，保留章节关联。
 - `StoryImage.sceneDescription?` 保存场景描述；`placementStatus?:pending|matched|unmatched|failed` 与 `placementError?` 独立于像素状态。定位只更新图片元数据，不创建故事版本，不改正文、资料或作者启用选择，因此资料整理、命名及后续章节可继续推进；目标章节必须仍是原不可变章节 ID，编辑、删除、回退移除章节或删除图片后拒绝迟到写入。失败保留已生成图片，任务页可单独暂停、继续、重试或取消定位；重试不发图片请求。重启及备份恢复把中断定位转为暂停，手动继续后才请求模型。`OutputStage='image-placement'` 保存独立诊断，只读展示，不走资料提取修正表单。人物立绘的身份绑定和旧版 pending 图片诊断兼容保留。

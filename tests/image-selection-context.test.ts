@@ -68,6 +68,15 @@ const cgInput = (ctx: ReturnType<typeof harness>) => ctx.optimizer.mock.calls.fi
 const references = (ctx: ReturnType<typeof harness>) => ctx.imageModel.mock.calls.at(-1)![4] as GeneratedImage[] | undefined;
 
 describe('enabled images at the model context boundary', () => {
+  it.each([false, true])('lets the AI decide reference clothing for manual selection=%s', async manual => {
+    const ctx = harness(); const { old } = await variants(ctx);
+    const cg = ctx.images.generate(ctx.branchId, { baseRevisionId: ctx.base(), kind: 'cg', chapterId: ctx.chapter.id, instruction: '林月已经换上红色外套，请按当前剧情绘制。', ...(manual ? { selectedReferenceImageIds: [old.id] } : {}) }).image;
+    await until(() => ctx.store.images.get(cg.id)?.status === 'completed');
+    const prompt = ctx.imageModel.mock.calls.at(-1)![2];
+    expect(prompt).toContain('是否保留服装'); expect(prompt).not.toContain('保持该人物外貌与服装特征');
+    if (manual) expect(cgInput(ctx).references[0].label).toContain('由 AI');
+    expect(ctx.store.images.get(cg.id)?.referenceImageIds).toEqual([old.id]);
+  });
   it('keeps a later variant inactive and uses the selected old portrait for CG candidates and bytes', async () => {
     const ctx = harness(); const { old, newer } = await variants(ctx);
     expect(ctx.images.list(ctx.branchId, true).find(image => image.id === old.id)?.active).toBe(true);

@@ -18,7 +18,8 @@ import type { ImageService } from './images.js';
 import type { ExtensionService } from './extensions.js';
 import { normalizeImageSettings } from '../shared/image-settings.js';
 import { imageModelCapabilities } from '../shared/image-capabilities.js';
-import { imageParametersSchema } from './image-store.js';
+import { imageEntity, imageParametersSchema } from './image-store.js';
+import { findEntitiesByName } from './entity-resolution.js';
 import { sceneParagraphs, scenePlacementRequest, parseScenePlacements } from './image-placement.js';
 import type { ModelTool, WritingImageRequest, RpgChoice, ModelToolContinuation, StoryReference } from '../shared/types.js';
 export { extractionSchema } from './extraction.js';
@@ -705,18 +706,30 @@ export class StoryEngine {
     const register = (request: WritingImageRequest) => {
       const live = this.live(jobId);
       const requests = (live.payload.imageRequests ?? []) as WritingImageRequest[];
-      if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? previous.name === request.name : previous.sceneDescription === request.sceneDescription && previous.prompt === request.prompt))) return { status: 'requested', message: '同一人物或场景已登记，未重复创建生图任务。' };
+      const state = this.store.state(live.branchId);
+      if (request.reuseImageId) {
+        const found = findEntitiesByName(state, request.name!, 'character');
+        const selected = this.store.images.get(request.reuseImageId);
+        if (found.length !== 1 || selected?.kind !== 'portrait' || selected.status !== 'completed' || !selected.entityId || imageEntity(state, selected.entityId)?.id !== found[0].id || !this.store.images.visible(selected, state, true) || !this.store.images.content(selected.id)) throw new HttpError('所选立绘必须是当前故事线中该人物已完成的版本');
+      }
+      const portraitKey = (name = '') => { const found = findEntitiesByName(state, name, 'character'); return found.length === 1 ? found[0].id : name; };
+      if (requests.some(previous => previous.kind === request.kind && (request.kind === 'portrait' ? portraitKey(previous.name) === portraitKey(request.name) : previous.sceneDescription === request.sceneDescription && previous.prompt === request.prompt))) return { status: 'requested', message: '同一人物或场景已登记，未重复创建生图任务。' };
       if (requests.length >= 12) throw new HttpError('本章最多接受 12 个自动生图请求，请完成正文后由作者补充。');
       // Persist the owner link before the deferred image pump runs; never await pixels here.
       let imageId: string | undefined;
-      try { imageId = this.images?.generateDuringWriting?.(live, request)?.id; }
+      try { if (!request.reuseImageId) imageId = this.images?.generateDuringWriting?.(live, request)?.id; }
       catch (error) { live.payload.imageError = this.redact(error instanceof Error ? error.message : '自动插画启动失败'); }
       live.payload.imageRequests = [...requests, { ...request, ...(imageId ? { imageId } : {}) }]; this.save(live);
+      if (request.reuseImageId) return { status: 'requested', imageId: request.reuseImageId, message: '立绘版本选择已登记，正文和资料确认后启用；本章 CG 可使用此版本作为参考，不生成新立绘。' };
       return { status: 'requested', ...(imageId ? { imageId } : {}), message: '生图请求已登记，图片尚未关联正文；requested 不表示图片已完成。' };
     };
-    if (config.autoPortrait) tools.push({ name: 'generate_character_portrait', description: '登记一张人物立绘生成请求。name 为人物姓名或别名，description 为外观与衣着描述。返回 requested 和可用的 imageId；requested 表示请求已登记，不表示图片已完成。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物姓名或已有别名' }, description: { type: 'string', description: '人物外观与衣着描述' } }, required: ['name', 'description'], additionalProperties: false }, execute: args => {
-      const value = z.object({ name: z.string().trim().min(1).max(300), description: z.string().trim().min(1).max(6000) }).strict().parse(args);
+    if (config.autoPortrait) tools.push({ name: 'generate_character_portrait', description: '登记一张人物立绘生成请求。name 为人物姓名或别名，description 为当前外观、衣着及变化描述，updateExisting=true 表示更新已有立绘并在成功关联后启用。返回 requested 和可用的 imageId；requested 表示请求已登记，不表示图片已完成。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物姓名或已有别名' }, description: { type: 'string', description: '人物当前外观、衣着及变化描述' }, updateExisting: { type: 'boolean', description: '更新已有立绘，成功后自动启用新版本；省略或 false 时只补充缺失立绘。' } }, required: ['name', 'description'], additionalProperties: false }, execute: args => {
+      const value = z.object({ name: z.string().trim().min(1).max(300), description: z.string().trim().min(1).max(6000), updateExisting: z.boolean().optional() }).strict().parse(args);
       return register({ kind: 'portrait', ...value });
+    } });
+    if (config.autoPortrait) tools.push({ name: 'select_character_portrait', description: '登记本章要启用的已有立绘版本。name 为人物姓名或别名，imageId 来自本次绘图设置的人物立绘版本目录。返回 requested，正文和资料确认后应用，不生成新图片。', parameters: { type: 'object', properties: { name: { type: 'string', description: '人物姓名或已有别名' }, imageId: { type: 'string', description: '该人物在当前故事线中已完成的立绘图片标识' } }, required: ['name', 'imageId'], additionalProperties: false }, execute: args => {
+      const value = z.object({ name: z.string().trim().min(1).max(300), imageId: z.string().trim().min(1).max(300) }).strict().parse(args);
+      return register({ kind: 'portrait', name: value.name, description: '', reuseImageId: value.imageId });
     } });
     if (config.autoCG) {
       tools.push({ name: 'generate_scene_cg', description: '登记一张绑定本章的场景插画请求。prompt 为画面提示词，sceneDescription 为用于正文完成后匹配位置的场景描述。返回 requested 和可用的 imageId；rejected/error 表示请求未被接受，requested 不表示图片已完成。', parameters: { type: 'object', properties: {
@@ -737,10 +750,16 @@ export class StoryEngine {
     const inheritedRatio = !config.aspectRatio && config.size !== 'auto' ? ({ '1024x1024': '1:1', '1024x1536': '2:3', '1536x1024': '3:2' } as Record<string, string>)[config.size] : undefined;
     const ratio = config.aspectRatio || inheritedRatio || 'auto';
     const resolution = config.imageSize || (caps.imageSizes.includes('1K') ? '1K' : caps.imageSizes[0]);
+    const state = !preview && config.autoPortrait ? this.store.state(this.get(jobId).branchId) : undefined;
+    const portraits = state ? (state.imageIds ?? []).flatMap(id => {
+      const image = this.store.images.get(id); const entity = image?.entityId ? imageEntity(state, image.entityId) : undefined;
+      return image?.kind === 'portrait' && image.status === 'completed' && entity && this.store.images.content(image.id) ? [{ name: entity.name, imageId: image.id, active: this.store.images.active(image, state), appearance: image.material ?? image.prompt }] : [];
+    }) : [];
     const settingsText = [
       `画风：${config.stylePrompt.trim() || '未额外指定'}`,
       ...(config.promptSystemPrompt?.trim() ? [`作者绘图要求：\n${config.promptSystemPrompt.trim()}`] : []),
       `人物参考图：${config.useCharacterReferences === false ? '关闭' : caps.referenceMode === 'none' ? '当前模型不支持' : '启用'}`,
+      ...(portraits.length ? [`人物立绘版本（active 为当前启用状态；appearance 是绘制时的形象资料，可选择已有版本或请求更新）：\n${JSON.stringify(portraits)}`] : []),
       `画布参数形式：${{ size: '尺寸', 'aspect-ratio': '画幅比例', 'width-height': '宽度和高度' }[caps.dimensionMode]}`,
       ...(caps.dimensionMode === 'size' ? [`尺寸 size：${configured(config.size)}`, ...(caps.sizes.length ? [`可选尺寸：${caps.sizes.filter(size => size !== 'auto').join('、')}`] : [])] : []),
       ...(caps.dimensionMode === 'aspect-ratio' ? [`画幅比例 aspectRatio：${configured(ratio)}${inheritedRatio ? `（由已保存尺寸 ${config.size} 换算）` : ''}`] : []),
@@ -985,7 +1004,7 @@ export class StoryEngine {
         if (continuation) {
           const declared = (continuation.body.tools ?? []) as Record<string, any>[];
           const names = declared.flatMap(tool => tool.functionDeclarations ?? [tool.function ?? tool]).flatMap(tool => [tool.name ?? '', ...((tool.parameters ?? tool.parametersJsonSchema ?? tool.input_schema)?.properties?.toolCalls?.items?.properties?.name?.enum ?? [])]);
-          for (const name of names.filter(name => ['update_plot_plan', 'generate_character_portrait', 'generate_scene_cg'].includes(name) && !tools.some(tool => tool.name === name))) tools.push({ name, description: '原会话工具已经停用。', parameters: { type: 'object' }, execute: () => ({ error: name === 'update_plot_plan' ? '剧情规划功能已移除，此工具不会执行。' : '此工具已由用户停用，本次请求未执行；请继续剧情，不得假设图片已经生效。' }) });
+          for (const name of names.filter(name => ['update_plot_plan', 'generate_character_portrait', 'select_character_portrait', 'generate_scene_cg'].includes(name) && !tools.some(tool => tool.name === name))) tools.push({ name, description: '原会话工具已经停用。', parameters: { type: 'object' }, execute: () => ({ error: name === 'update_plot_plan' ? '剧情规划功能已移除，此工具不会执行。' : '此工具已由用户停用，本次请求未执行；请继续剧情，不得假设图片已经生效。' }) });
         }
         if (input.mode === 'rpg') {
           const previous = job.payload.rpgProvider as { id: string; protocol: string; model: string; baseUrl: string } | undefined;

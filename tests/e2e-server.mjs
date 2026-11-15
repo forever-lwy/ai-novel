@@ -306,14 +306,15 @@ const modelServer = createServer(async (req, res) => {
       }
       res.end(frames.join('') + 'data: [DONE]\n\n'); return;
     }
-    if (['e2e-images', 'e2e-images-parallel'].includes(body.model) && !body.messages?.some(message => message.role === 'tool')) {
+    if (['e2e-images', 'e2e-images-parallel', 'e2e-images-update', 'e2e-images-reuse'].includes(body.model) && !body.messages?.some(message => message.role === 'tool')) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
-      const sourceText = '林舟来到白石城，发现城门下藏着一把旧钥匙。';
+      const updating = body.model === 'e2e-images-update'; const reusing = body.model === 'e2e-images-reuse';
+      const sourceText = updating ? '林舟换上银色盔甲，走出白石城的城门。' : reusing ? '林舟重新披上旅行斗篷，走回白石城。' : '林舟来到白石城，发现城门下藏着一把旧钥匙。';
       // Scene descriptions do not need to quote prose or specify an insertion position.
       res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: sourceText + '\n\n' }, finish_reason: null }] })}\n\n`);
       const calls = [
-        { index: 0, id: 'image-portrait', type: 'function', function: { name: 'generate_character_portrait', arguments: JSON.stringify({ name: '林舟', description: '一位穿着旅行斗篷的年轻旅人。' }) } },
-        ...(body.tools?.some(tool => tool.function?.name === 'generate_scene_cg') ? [{ index: 1, id: 'image-scene', type: 'function', function: { name: 'generate_scene_cg', arguments: JSON.stringify({ prompt: 'WRITER_DIRECT_CG：古城门下，林舟穿着旅行斗篷拾起石阶边的钥匙，侧面中景，晨光照亮石阶。', referenceNames: ['林舟'], sceneDescription: '清晨的古城门前，林舟弯身拾起石阶旁的旧钥匙。' }) } }] : []),
+        { index: 0, id: 'image-portrait', type: 'function', function: reusing ? { name: 'select_character_portrait', arguments: JSON.stringify({ name: '林舟', imageId: prompt.match(/PORTRAIT_REUSE:([^\s]+)/)?.[1] || '' }) } : { name: 'generate_character_portrait', arguments: JSON.stringify({ name: '林舟', description: updating ? '保留人物身份，换上银色盔甲。' : '一位穿着旅行斗篷的年轻旅人。', ...(updating ? { updateExisting: true } : {}) }) } },
+        ...(body.tools?.some(tool => tool.function?.name === 'generate_scene_cg') ? [{ index: 1, id: 'image-scene', type: 'function', function: { name: 'generate_scene_cg', arguments: JSON.stringify({ prompt: updating || reusing ? `WRITER_DIRECT_CG：${sourceText}` : 'WRITER_DIRECT_CG：古城门下，林舟穿着旅行斗篷拾起石阶边的钥匙，侧面中景，晨光照亮石阶。', referenceNames: ['林舟'], sceneDescription: updating || reusing ? sourceText : '清晨的古城门前，林舟弯身拾起石阶旁的旧钥匙。' }) } }] : []),
       ];
       res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: calls }, finish_reason: 'tool_calls' }] })}\n\n`);
       res.end('data: [DONE]\n\n'); return;
@@ -348,6 +349,7 @@ const modelServer = createServer(async (req, res) => {
       return;
     }
     let text = body.model === 'e2e-noncompact-summary' ? JSON.stringify({ text: prompt }) : body.model === 'e2e-compact-extraction' ? JSON.stringify({ summary: '林舟来到白石城。', entities: [{ kind: 'character', name: '林舟', visibility: 'public', facts: [{ text: '林舟走进白石城', paragraph: 1, temporal: 'current', certainty: 'fact', visibility: 'public', attribute: 'location' }] }] }) : body.model === 'e2e-quote-mismatch' ? JSON.stringify({ summary: '旅人进入古城。', entities: [{ kind: 'character', name: '林舟', aliases: [], description: '旅人', visibility: 'public', facts: [{ text: '林舟来到白石城', attribute: 'location', temporal: 'current', certainty: 'fact', visibility: 'public', paragraph: 1, quote: '回来了。林舟走进山谷。' }] }], relations: [], foreshadows: [] }) : fixtureReply(system, prompt);
+    if (['e2e-images-update', 'e2e-images-reuse'].includes(body.model)) text = '他沿着石阶继续前行。';
     if (['e2e-images', 'e2e-images-parallel'].includes(body.model) && body.messages?.some(message => message.role === 'tool')) {
       const delivered = '林舟来到白石城，发现城门下藏着一把旧钥匙。\n\n';
       if (text.startsWith(delivered)) text = text.slice(delivered.length);

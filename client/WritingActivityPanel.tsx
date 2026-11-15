@@ -2,7 +2,7 @@ import { Brain, CheckCircle2, CircleAlert, LoaderCircle, Search } from 'lucide-r
 import type { JobStatus, WritingActivity } from '../shared/types';
 import { Notice } from './ui';
 
-const toolNames: Record<string, string> = { search_story: '搜索故事资料', read_entity: '读取完整资料', read_chapter: '读取章节原文', list_text_files: '查看章节文件目录', search_text: '搜索原文与行号', read_text_file: '按行读取原文', ask_user: '剧情选择', generate_character_portrait: '请求人物立绘', generate_scene_cg: '请求场景插画', update_plot_plan: '更新剧情规划' };
+const toolNames: Record<string, string> = { search_story: '搜索故事资料', read_entity: '读取完整资料', read_chapter: '读取章节原文', list_text_files: '查看章节文件目录', search_text: '搜索原文与行号', read_text_file: '按行读取原文', ask_user: '剧情选择', generate_character_portrait: '请求人物立绘', select_character_portrait: '选择人物立绘版本', generate_scene_cg: '请求场景插画', update_plot_plan: '更新剧情规划' };
 const activityStatus = { running: '进行中', completed: '已完成', failed: '失败' };
 function readable(value: unknown) { return typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
 

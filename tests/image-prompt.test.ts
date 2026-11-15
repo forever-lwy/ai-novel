@@ -27,6 +27,13 @@ const servers: Server[] = [];
 afterEach(async () => { for (const server of servers.splice(0)) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); } });
 
 describe('image prompt model and parameter selection', () => {
+  it('asks the optimizer to determine clothing from the target scene and author requirements', async () => {
+    await optimizeImagePrompt(settings(), input({ instruction: '人物已换上红衣' }));
+    const request = textModel.generateStructured.mock.calls[0][1];
+    expect(request.system).toContain('自行决定是否沿用其中的服装');
+    expect(request.system).toContain('明确写出需要保留与改变的部分');
+    expect(userMaterial(request)).toContain('人物已换上红衣');
+  });
   it('uses the selected image edition and original carrier while preserving independent optimizer requirements', async () => {
     const saved = settings(); saved.promptTemplates = withTavernPresets(); saved.promptTemplates.general!.selected = 'tavern-reborn-v23';
     saved.promptTemplates.selected.image = TASK_V3_PRESET_IDS.image;
