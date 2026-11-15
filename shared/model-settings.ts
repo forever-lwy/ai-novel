@@ -1,6 +1,6 @@
 import type { ModelParameters, ModelRole, ProviderConfig, ProviderConnection, Settings } from './types.js';
 
-export const modelRoles = ['writing', 'planning', 'extraction'] as const satisfies readonly ModelRole[];
+export const modelRoles = ['writing', 'planning', 'extraction', 'recall'] as const satisfies readonly ModelRole[];
 
 export const modelParameterKeys = [
   'maxOutputTokens', 'contextTokens', 'temperature', 'topP', 'topK', 'presencePenalty', 'frequencyPenalty', 'seed', 'stopSequences',
@@ -61,7 +61,7 @@ export function normalizeModelSettings(settings: Settings): Settings {
       .map(role => ({ ...structuredClone(profile), role, model: profile.model.trim() }));
   }) };
   for (const role of modelRoles) {
-    const providerId = settings[`${role}ProviderId`];
+    const providerId = settings[`${role}ProviderId`] ?? '';
     const provider = settings.providers.find(value => value.id === providerId);
     const model = providerId ? (settings[`${role}Model`] ?? provider?.model ?? '').trim() : '';
     result[`${role}Model`] = model;

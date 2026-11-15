@@ -413,7 +413,7 @@ export function compileTaskPrompt(config: PromptTemplateSettings | undefined, ta
   variables = prepareReadablePromptVariables(task, variables);
   const compiled = compilePrompt(config, task, variables, runtime);
   const writingOutputMode = compiled.writingOutputMode;
-  const runtimeBlocks = runtimePromptBlocks(task, variables, { ...runtime, writingOutputMode, responseCarrier: compiled.responseCarrier, continuationAnchorIncluded: Boolean(variables.continuationAnchorText && compiled.messages.some(message => message.content.includes(String(variables.continuationAnchorText)))) });
+  const runtimeBlocks = runtimePromptBlocks(task, variables, { ...runtime, writingOutputMode, responseCarrier: compiled.responseCarrier, rewriteSourceIncluded: Boolean(runtime.rewriteSourceContent && compiled.messages.some(message => message.content.includes(runtime.rewriteSourceContent!))), continuationAnchorIncluded: Boolean(variables.continuationAnchorText && compiled.messages.some(message => message.content.includes(String(variables.continuationAnchorText)))) });
   const messages: PromptMessage[] = [];
   for (const message of [...compiled.messages, ...runtimeBlocks.filter(block => block.role === 'system'), ...runtimeBlocks.filter(block => block.role !== 'system')]) {
     const previous = message.role === 'system' ? undefined : [...messages].reverse().find(value => value.role !== 'system');

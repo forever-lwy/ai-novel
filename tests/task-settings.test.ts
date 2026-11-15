@@ -46,7 +46,7 @@ describe('task settings compatibility and validation', () => {
 
   it('roundtrips configured settings and preserves them with other settings when an older client omits them', async () => {
     const ctx = await context();
-    const taskSettings = { writing: { maxToolRounds: 40, recentChapterCount: 8 }, extraction: { outputMode: 'tool', autoRetry: true, maxRetries: 4, retryDelayMs: 1200 } };
+    const taskSettings = { writing: { maxToolRounds: 40, recentChapterCount: 8 }, recall: { maxChapters: 7 }, extraction: { outputMode: 'tool', autoRetry: true, maxRetries: 4, retryDelayMs: 1200 } };
     const promptTemplates = defaultPromptTemplates(); promptTemplates.presets.writing[0].blocks[0].content = '保留作者提示词';
     const imageSettings = { ...defaultImageSettings(), stylePrompt: '保留作者画风' };
     const input = { ...base, providers: [{ id: 'text', name: '测试连接', protocol: 'openai-chat', baseUrl: 'https://fixture.invalid/v1', apiKey: 'task-fixture-secret' }], promptTemplates, imageSettings, taskSettings };
@@ -61,7 +61,7 @@ describe('task settings compatibility and validation', () => {
     expect(ctx.settings.get().providers[0].apiKey).toBe('task-fixture-secret');
     expect(ctx.settings.meta('settings')).not.toContain('task-fixture-secret');
     // Older clients may still send retry settings without knowing the output mode.
-    const oldClient = saved.json(); delete oldClient.taskSettings.extraction.outputMode; delete oldClient.taskSettings.writing;
+    const oldClient = saved.json(); delete oldClient.taskSettings.extraction.outputMode; delete oldClient.taskSettings.writing; delete oldClient.taskSettings.recall;
     const preserved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: oldClient });
     expect(preserved.statusCode).toBe(200); expect(preserved.json().taskSettings).toEqual(taskSettings);
     for (const outputMode of ['structured', 'prompt', 'tool']) {
@@ -80,6 +80,7 @@ describe('task settings compatibility and validation', () => {
       ...[{ outputMode: 'auto' }, { outputMode: null }, { outputMode: 1 }, { autoRetry: 'yes' }, { maxRetries: -1 }, { maxRetries: 11 }, { maxRetries: 1.5 }, { maxRetries: '2' }, { retryDelayMs: -1 }, { retryDelayMs: 300001 }, { retryDelayMs: 0.5 }, { unexpected: true }].map(patch => ({ ...taskSettings, extraction: { ...taskSettings.extraction, ...patch } })),
       ...[{ enabled: 'yes' }, { mode: 'auto' }, { unexpected: true }].map(patch => ({ ...taskSettings, planning: { ...taskSettings.planning, ...patch } })),
       ...[{ maxToolRounds: 0 }, { maxToolRounds: 101 }, { maxToolRounds: 1.5 }, { maxToolRounds: '6' }, { maxToolRounds: null }, { recentChapterCount: -1 }, { recentChapterCount: 101 }, { recentChapterCount: 1.5 }, { recentChapterCount: '3' }, { unexpected: true }].map(patch => ({ ...taskSettings, writing: { recentChapterCount: 3, ...patch } })),
+      ...[{ maxChapters: -1 }, { maxChapters: 101 }, { maxChapters: 1.5 }, { maxChapters: '5' }, { maxChapters: null }, { maxChapters: 5, unexpected: true }].map(recall => ({ ...taskSettings, recall })),
     ];
     for (const value of invalid) {
       expect(() => parseTaskSettings(value)).toThrow();
@@ -98,5 +99,22 @@ describe('task settings compatibility and validation', () => {
       expect(saved.statusCode).toBe(200); expect(saved.json().taskSettings).toEqual(input);
       expect(new SettingsStore(ctx.store.db, ctx.dataDir).get().taskSettings).toEqual(input);
     }
+    for (const maxChapters of [0, 100]) {
+      const input = { ...taskSettings, recall: { maxChapters } };
+      const saved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: { ...base, taskSettings: input } });
+      expect(saved.statusCode).toBe(200); expect(saved.json().taskSettings.recall).toEqual({ maxChapters });
+    }
+  });
+
+  it('preserves a separately configured recall model and parameters when an older client omits recall fields', async () => {
+    const ctx = await context();
+    const input = { ...base, providers: [{ id: 'recall', name: '召回连接', protocol: 'openai-chat', baseUrl: 'https://fixture.invalid/v1' }], recallProviderId: 'recall', recallModel: 'recall-only', modelParameters: [{ role: 'recall', providerId: 'recall', model: 'recall-only', contextTokens: 128000, maxOutputTokens: 2048, temperature: 0 }], taskSettings: { ...defaultTaskSettings(), recall: { maxChapters: 9 } } };
+    const saved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: input });
+    expect(saved.statusCode).toBe(200);
+    const legacy = saved.json(); delete legacy.recallProviderId; delete legacy.recallModel; delete legacy.taskSettings.recall;
+    legacy.modelParameters = legacy.modelParameters.filter((profile: { role?: string }) => profile.role !== 'recall');
+    const updated = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: legacy });
+    expect(updated.statusCode).toBe(200); expect(updated.json()).toMatchObject({ recallProviderId: 'recall', recallModel: 'recall-only', taskSettings: { recall: { maxChapters: 9 } } });
+    expect(updated.json().modelParameters).toContainEqual(input.modelParameters[0]);
   });
 });

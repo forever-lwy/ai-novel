@@ -12,6 +12,7 @@ import { normalizeChapterWords, chapterBudgetReached } from '../shared/rpg-chapt
 import { HttpError, OutputValidationError, Store, rpgSetupSchema, rpgChoiceSchema } from './store.js';
 import { extractionContext, normalizeExtraction, splitExtractionBlocks as splitBlocks } from './extraction.js';
 import { buildWritingContext } from './writing-context.js';
+import { parseRecallSelection, recallCandidates, writingRecallRequest, writingRecallSchema, writingReferences, type RewriteSource, type WritingRecall } from './writing-recall.js';
 import { chapterNamingRequest, parseGeneratedChapterTitle } from './chapter-naming.js';
 import type { ImageService } from './images.js';
 import type { ExtensionService } from './extensions.js';
@@ -151,6 +152,7 @@ export class StoryEngine {
   listOutputs(jobId: string): ModelOutputSummary[] { this.get(jobId); return this.store.outputs.list(jobId); }
   private output(jobId: string, outputId: string): ModelOutputRecord { this.get(jobId); const output = this.store.outputs.get(outputId); if (!output || output.jobId !== jobId) throw new HttpError('模型输出不存在', 404); return output; }
   private outputBlocker(job: Job, output: ModelOutputRecord): string | undefined {
+    if (output.stage === 'recall') return '原文召回记录供查看；需要重新选择时请重试写作任务';
     if (output.stage === 'image-placement') return '插画定位记录供查看；需要重新匹配时请重试独立定位任务';
     if (output.status === 'applied') return '此输出已经应用，不能重复应用';
     if (job.payload.rpgChoice && !job.payload.rpgChoiceAnswer && !job.payload.generatedChapterId && !job.payload.rpgNextChoice) return '剧情正在等待用户选择，请先回答当前剧情节点';
@@ -190,6 +192,7 @@ export class StoryEngine {
   private redact(text: string): string { return redactModelPayload(text, [...this.getSettings().providers.flatMap(config => config.apiKey ? [config.apiKey] : []), ...(this.extensions?.secrets() ?? [])]); }
   importOutput(jobId: string, text: string): ModelOutputRecord {
     if (this.get(jobId).kind === 'image-placement') throw new HttpError('插画定位输出仅供查看，请重试独立定位任务', 409);
+    if (this.get(jobId).payload.pendingStage === 'recall') throw new HttpError('原文召回输出仅供查看，请重试写作任务', 409);
     const job = this.get(jobId); if (job.payload.purpose !== 'compress-summary' && (job.kind === 'plan' || job.payload.generatedChapterId && job.payload.pendingStage === 'planning')) throw new HttpError('剧情规划功能已移除，历史输出仅供查看', 410); if (!['failed', 'paused'].includes(job.status) || this.controllers.has(job.id)) throw new HttpError('仅可为已暂停或失败且请求已结束的任务导入输出', 409);
     this.store.assertVersion(job.branchId, job.baseRevisionId);
     let stage = job.payload.pendingStage as OutputStage | undefined;
@@ -342,6 +345,7 @@ export class StoryEngine {
         const original = this.store.chapter(branchId, String(payload.chapterId));
         const fork = this.store.forkForGeneration(branchId, branch.revisionId, original.id, payload.branchName as string | undefined); branch = fork.branch;
         smallPayload.sourceBranchId = branchId; smallPayload.sourceChapterId = original.id;
+        smallPayload.sourceChapterTitle = original.title;
         smallPayload.chapterId = undefined; smallPayload.title = smallPayload.title || original.title;
         if (payload.discardBackground) for (const background of backgroundJobs) { background.status = 'cancelled'; background.message = '作者放弃后台整理，已创建重新生成分支'; this.save(background); }
       }
@@ -447,9 +451,10 @@ export class StoryEngine {
     }
   }
   private live(jobId: string): Job { const job = this.get(jobId); if (this.closed || job.status !== 'running') throw new DOMException('任务已停止', 'AbortError'); if (job.kind === 'image-placement') this.assertPlacementCurrent(job); else this.store.assertVersion(job.branchId, job.baseRevisionId); return job; }
-  private provider(role: 'writing' | 'planning' | 'extraction', projectId: string): ProviderConfig {
+  private provider(role: 'writing' | 'planning' | 'extraction' | 'recall', projectId: string): ProviderConfig {
     const settings = normalizeModelSettings(this.getSettings(projectId)); const providerId = settings[`${role}ProviderId`]; const config = settings.providers.find(p => p.id === providerId);
-    const task = role === 'writing' ? '写作' : role === 'planning' ? '摘要压缩' : '资料提取';
+    if (role === 'recall' && !providerId) return this.provider('writing', projectId);
+    const task = role === 'writing' ? '写作' : role === 'planning' ? '摘要压缩' : role === 'recall' ? '原文召回' : '资料提取';
     if (!config) throw new HttpError(`请先在供应商配置中选择${task}供应商`);
     const model = (settings[`${role}Model`] ?? config.model ?? '').trim();
     if (!model) throw new HttpError(`请先为${task}任务选择或填写模型名称`);
@@ -489,6 +494,38 @@ export class StoryEngine {
       job.payload.sourceReferenceCaptured = true; this.save(job);
     }
     return reference && !(job.kind === 'generate' && job.payload.mode === 'original' && !reference.sourceIds?.length) ? this.store.originalReference(job.branchId, reference) : undefined;
+  }
+  private async recallWriting(jobId: string, context: ReturnType<typeof buildWritingContext>, source: RewriteSource | undefined, signal: AbortSignal): Promise<PromptRuntime> {
+    let job = this.live(jobId);
+    let saved: WritingRecall;
+    if (job.payload.writingRecall) {
+      saved = writingRecallSchema.parse(job.payload.writingRecall);
+      if (saved.baseRevisionId !== job.baseRevisionId) throw new HttpError('原文召回所属的故事版本已经变化', 409);
+      parseRecallSelection({ chapterKeys: saved.chapterKeys }, context.recallChapters, saved.maxChapters);
+    } else {
+      const maxChapters = normalizeTaskSettings(this.getSettings(job.projectId).taskSettings).recall.maxChapters;
+      const candidates = recallCandidates(context.recallChapters, source);
+      let chapterKeys: string[] = [];
+      let recallOutput: ModelOutputRecord | undefined;
+      if (maxChapters > 0 && candidates.length) {
+        job.message = '正在召回写作需要的原文章节'; job.payload.pendingStage = 'recall'; this.save(job);
+        const provider = this.provider('recall', job.projectId);
+        const request = this.budget(job, provider, { ...writingRecallRequest({ instruction: String(job.payload.instruction ?? ''), mode: String(job.payload.mode), maxWords: Number(job.payload.maxWords) || 2000, context: context.variables.contextText, source, candidates, maxChapters, rpg: this.store.state(job.branchId).rpg, chapterAnswer: job.payload.rpgChapterAnswer }), signal });
+        const captured = await this.requestCaptured(jobId, 'recall', request, req => this.models.generateStructured(provider, req, value => parseRecallSelection(value, candidates, maxChapters)), result => JSON.stringify(result.value));
+        chapterKeys = captured.result.value.chapterKeys; recallOutput = captured.output;
+      }
+      job = this.live(jobId);
+      saved = { baseRevisionId: job.baseRevisionId, maxChapters, chapterKeys };
+      this.store.db.exec('BEGIN IMMEDIATE');
+      try {
+        job.payload.writingRecall = saved; delete job.payload.pendingStage; this.save(job);
+        if (recallOutput) this.store.outputs.update(recallOutput.id, { status: 'applied' });
+        this.store.db.exec('COMMIT');
+      } catch (error) { this.store.db.exec('ROLLBACK'); throw error; }
+    }
+    const chaptersByKey = new Map(context.recallChapters.map(chapter => [chapter.key, chapter]));
+    const selected = saved.chapterKeys.map(key => chaptersByKey.get(key)!).filter(chapter => !chapter.included && chapter.text !== source?.text);
+    return { writingReferences: writingReferences(undefined, selected), rewriteSourceText: writingReferences(source, []), rewriteSourceContent: source?.text };
   }
   private taskPrompt(projectId: string, task: PromptTask, variables: Record<string, string>, runtime: PromptRuntime = {}): ModelRequest {
     return compileTaskPrompt(this.getSettings(projectId).promptTemplates, task, variables, runtime);
@@ -922,14 +959,17 @@ export class StoryEngine {
         const writingSettings = normalizeTaskSettings(this.getSettings(job.projectId).taskSettings).writing;
         const aliases = job.payload.rpgLookupAliases as Record<string, string> | undefined;
         const context = buildWritingContext({ state, premise: state.premise ?? this.store.getProject(job.projectId).premise, chapterText: id => this.store.chapter(job.branchId, id).text, original: this.writingReference(job), lookupAliases: aliases, recentChapterCount: writingSettings.recentChapterCount });
-        const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
+        const original = job.payload.sourceChapterId && !input.regenerate ? this.store.db.prepare('SELECT data,text FROM chapter_texts WHERE id=?').get(String(job.payload.sourceChapterId)) : undefined;
         const selected = original ? input.selection ? String(original.text).slice(input.selection.start, input.selection.end) : String(original.text) : undefined;
+        const rewriteSource: RewriteSource | undefined = original ? { chapterId: String(job.payload.sourceChapterId), title: String(job.payload.sourceChapterTitle ?? JSON.parse(String(original.data)).title), text: String(original.text), selection: input.selection } : undefined;
         const continuation = input.mode === 'rpg' ? job.payload.rpgContinuation as ModelToolContinuation | undefined : undefined;
         const extensions = this.extensions?.session(controller.signal, continuation?.extensionLoads);
         if (!continuation) {
           this.store.clearWritingActivities(job.id);
           this.store.db.prepare('INSERT INTO job_writing_drafts VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET text=excluded.text').run(job.id, '');
         }
+        const references = continuation ? undefined : await this.recallWriting(jobId, context, rewriteSource, controller.signal);
+        job = this.live(jobId);
         this.emitWriting(job.id, this.writingSnapshot(job.id));
         job.message = '正在流式生成正文'; this.save(job);
         if (!continuation) { job.payload.imageStartingEntityIds = state.entities.map(entity => entity.id); job.payload.imageRequests = []; delete job.payload.pendingPlotPlan; this.save(job); }
@@ -939,7 +979,7 @@ export class StoryEngine {
           ...this.promptVariables(job, state), ...context.variables, context: context.text, mode: input.mode,
           maxWords: String(Math.min(20000, Math.max(100, Number(input.maxWords) || 2000))), sourceText: selected ?? '',
           writingTarget: selected ? `需要改写的${input.selection ? '片段（只输出替换片段）' : '章节'}：\n${selected}` : state.chapters.length ? '从 continuationAnchor 指定的最新正文结尾接着写下一章，直接推进结尾之后的事件，不按标题编号寻找或重写旧章节。' : '从作者设定开始写新的正文。',
-        }, { extensionsCatalog: extensions?.catalog, rpg: state.rpg, illustrations: { portrait: illustrations.tools.some(tool => tool.name === 'generate_character_portrait'), cg: illustrations.tools.some(tool => tool.name === 'generate_scene_cg') }, illustrationSettings: illustrations.settingsText, chapterAnswer: job.payload.rpgChapterAnswer ? JSON.stringify(job.payload.rpgChapterAnswer) : undefined });
+        }, { ...references, extensionsCatalog: extensions?.catalog, rpg: state.rpg, illustrations: { portrait: illustrations.tools.some(tool => tool.name === 'generate_character_portrait'), cg: illustrations.tools.some(tool => tool.name === 'generate_scene_cg') }, illustrationSettings: illustrations.settingsText, chapterAnswer: job.payload.rpgChapterAnswer ? JSON.stringify(job.payload.rpgChapterAnswer) : undefined });
         const retrievalTools = aliases ? context.tools.map(tool => ({ ...tool, execute: (args: Record<string, unknown>) => tool.execute({ ...args, ...(typeof args.id === 'string' ? { id: aliases[args.id] ?? args.id } : {}), ...(typeof args.chapterId === 'string' ? { chapterId: aliases[args.chapterId] ?? args.chapterId } : {}) }) })) : context.tools;
         const tools = [...retrievalTools, ...illustrations.tools, ...rpg.tools, ...(extensions?.tools ?? [])];
         if (continuation) {

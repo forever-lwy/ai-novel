@@ -24,6 +24,10 @@ export interface PromptRuntime {
   illustrations?: { portrait: boolean; cg: boolean };
   illustrationSettings?: string;
   continuationAnchorIncluded?: boolean;
+  writingReferences?: string;
+  rewriteSourceText?: string;
+  rewriteSourceContent?: string;
+  rewriteSourceIncluded?: boolean;
   rpg?: RpgSession;
   chapterAnswer?: string;
 }
@@ -55,6 +59,8 @@ export function runtimePromptBlocks(task: PromptTask, variables: Record<string, 
 - 已有事实不足时先查询资料，再继续写作；使用工具返回的标识和范围定位原文。
 - 通过本次定义的接口提交工具调用，采用真实返回结果。故事中不写工具流程；历史材料中的旧工具旁白和乱码不作为文风模仿。`);
   if (task === 'writing') {
+    if (runtime.rewriteSourceText && !runtime.rewriteSourceIncluded) blocks.push({ name: '改写目标章节完整原文', role: 'user', content: runtime.rewriteSourceText });
+    if (runtime.writingReferences) blocks.push({ name: '写作原文参考', role: 'user', content: runtime.writingReferences });
     system('续写起点与章节标题', `# 续写起点
 - 从最新已保存正文的结尾之后推进新事件；摘要用于回顾，不替代正文起点。
 - 章节编号和资料标识仅用于定位，不要按编号推算进度或复述旧情节。

@@ -43,7 +43,7 @@ export interface ModelParameters {
   claudeThinking?: { type: 'disabled' } | { type: 'enabled'; budgetTokens: number } | { type: 'adaptive' };
   claudeEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
-export type ModelRole = 'writing' | 'planning' | 'extraction';
+export type ModelRole = 'writing' | 'planning' | 'extraction' | 'recall';
 /** Missing role is accepted only when upgrading parameters shared by older settings. */
 export interface ModelParameterProfile extends ModelParameters { role?: ModelRole; providerId: string; model: string }
 export interface ProviderConfig extends ModelParameters {
@@ -86,16 +86,18 @@ export interface ImageGenerateInput { baseRevisionId: string; kind: StoryImageKi
 export interface WritingImageRequest { kind: 'portrait' | 'cg'; name?: string; description: string; imageId?: string; sourceText?: string; sceneDescription?: string; prompt?: string; referenceNames?: string[]; parameters?: ImageResolvedParameters }
 export type ExtractionOutputMode = 'prompt' | 'structured' | 'tool';
 export interface WritingTaskSettings { maxToolRounds?: number; recentChapterCount: number }
+export interface RecallTaskSettings { maxChapters: number }
 export interface TaskSettings {
   /** Older settings omit this group; normalizeTaskSettings supplies its defaults. */
   writing?: WritingTaskSettings;
+  recall?: RecallTaskSettings;
   extraction: { outputMode?: ExtractionOutputMode; autoRetry: boolean; maxRetries: number; retryDelayMs: number };
   /** Accepted only for older settings; never used by current tasks. */
   planning?: { enabled: boolean; mode: 'separate' | 'tool' };
 }
-export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; writingModel?: string; planningModel?: string; extractionModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings; taskSettings?: TaskSettings }
+export interface Settings { providers: ProviderConnection[]; writingProviderId: string; planningProviderId: string; extractionProviderId: string; recallProviderId?: string; writingModel?: string; planningModel?: string; extractionModel?: string; recallModel?: string; modelParameters?: ModelParameterProfile[]; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings; taskSettings?: TaskSettings }
 /** Missing groups inherit the current global settings; provider connections are always global. */
-export interface ProjectModelSettings { providerId: string; model: string; modelParameters: ModelParameterProfile[]; writing?: WritingTaskSettings; extraction?: TaskSettings['extraction'] }
+export interface ProjectModelSettings { providerId: string; model: string; modelParameters: ModelParameterProfile[]; writing?: WritingTaskSettings; recall?: RecallTaskSettings; extraction?: TaskSettings['extraction'] }
 export interface ProjectSettingsOverrides { tasks?: Partial<Record<ModelRole, ProjectModelSettings>>; promptTemplates?: PromptTemplateSettings; imageSettings?: ImageSettings }
 export interface ProjectSettingsRecord { revision: string; overrides: ProjectSettingsOverrides }
 export interface ProjectSettingsView extends ProjectSettingsRecord { global: Settings; effective: Settings }
@@ -134,7 +136,7 @@ export interface ModelToolContinuation {
 /** A submission tool only returns data; it is never executed or continued. */
 export interface ModelStructuredOutput { mode: 'json_schema' | 'tool'; name: string; description: string; schema: Record<string, unknown> }
 export interface ModelRequest { extensionLoads?: Record<string, string>; system: string; prompt: string; messages?: PromptMessage[]; writingOutputMode?: WritingOutputMode; responseCarrier?: ResponseCarrier; messageTransform?: 'reborn'; presetMessageCount?: number; textFilter?: PromptTextFilter; structuredOutput?: ModelStructuredOutput; signal?: AbortSignal; maxOutputTokens?: number; maxToolRounds?: number; chapterBudget?: { targetWords: number }; onRequest?: (request: ModelRequestSnapshot) => void; onResponse?: (response: CapturedModelResponse) => void; onTextDelta?: (text: string) => void; onActivity?: (event: ModelActivityEvent) => void; tools?: ModelTool[]; continuation?: ModelToolContinuation; onContinuation?: (state: ModelToolContinuation) => void | Promise<void> }
-export type OutputStage = 'planning' | 'compression' | 'writing' | 'chapter-title' | 'extraction' | 'image-placement';
+export type OutputStage = 'planning' | 'compression' | 'writing' | 'chapter-title' | 'extraction' | 'image-placement' | 'recall';
 export interface OutputIssue { path: string; message: string; paragraph?: number; quote?: string; sourceText?: string }
 export interface ModelOutputRecord extends CapturedModelResponse {
   id: string; jobId: string; projectId: string; branchId: string; baseRevisionId: string;

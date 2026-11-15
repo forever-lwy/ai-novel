@@ -377,6 +377,12 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
   });
   app.put('/api/settings', async request => {
     const input = settingsSchema.parse(request.body) as Settings;
+    if (input.recallProviderId === undefined) {
+      const current = settings.get();
+      input.recallProviderId = current.recallProviderId; input.recallModel = current.recallModel;
+      const profiles = input.modelParameters ?? [];
+      input.modelParameters = [...profiles, ...(current.modelParameters ?? []).filter(profile => profile.role === 'recall' && !profiles.some(value => value.role === 'recall' && value.providerId === profile.providerId && value.model.trim() === profile.model.trim()))];
+    }
     if (input.providers.some(provider => hasUrlCredentials(provider.baseUrl))) fail('服务地址不能包含密钥或 Token 查询参数，请移到独立密钥字段。');
     if (input.promptTemplates !== undefined) {
       try { input.promptTemplates = validatePromptTemplates(input.promptTemplates); }
@@ -401,10 +407,10 @@ export async function buildApp(options: { dataDir?: string; startEngine?: boolea
     if (b.imageSettings?.providerId && b.imageSettings.model) {
       try { validateImageParameters(b.imageSettings); } catch (error) { fail(error instanceof Error ? error.message : '图片模型参数无效。'); }
     }
-    for (const role of ['writing', 'planning', 'extraction'] as const) {
+    for (const role of modelRoles) {
       const id = b[`${role}ProviderId`];
       if (id && !ids.has(id)) fail('所选任务对应的供应商连接不存在。');
-      if (id && !b[`${role}Model`]) fail(`${role === 'writing' ? '写作' : role === 'planning' ? '摘要压缩' : '资料提取'}任务需要选择或填写模型名称。`);
+      if (id && !b[`${role}Model`]) fail(`${role === 'writing' ? '写作' : role === 'planning' ? '摘要压缩' : role === 'recall' ? '原文召回' : '资料提取'}任务需要选择或填写模型名称。`);
     }
     const profiles = new Set<string>();
     for (const profile of b.modelParameters ?? []) {

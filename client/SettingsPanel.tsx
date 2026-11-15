@@ -27,6 +27,7 @@ const roles = [
   { role: 'writing', providerKey: 'writingProviderId', modelKey: 'writingModel', label: '正文写作' },
   { role: 'planning', providerKey: 'planningProviderId', modelKey: 'planningModel', label: '摘要压缩' },
   { role: 'extraction', providerKey: 'extractionProviderId', modelKey: 'extractionModel', label: '资料提取' },
+  { role: 'recall', providerKey: 'recallProviderId', modelKey: 'recallModel', label: '原文召回' },
 ] as const;
 type Role = typeof roles[number];
 type ModelList = { signature: string; loading: boolean; models: ProviderModel[]; error?: string };
@@ -242,7 +243,7 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
     });
   }
   function updateRole(role: Role, providerId: string) { updateSelection(role, providerId, ''); }
-  function updateModel(role: Role, model: string, input = false) { if (settings) updateSelection(role, settings[role.providerKey], model, input ? modelInputDrafts.current[role.role] : undefined); }
+  function updateModel(role: Role, model: string, input = false) { if (settings) updateSelection(role, settings[role.providerKey] ?? '', model, input ? modelInputDrafts.current[role.role] : undefined); }
   function startModelInput(role: Role) {
     if (!settings) return;
     const providerId = settings[role.providerKey]; const model = settings[role.modelKey] ?? '';
@@ -374,7 +375,12 @@ function SettingsForm({ onBack, project, scope, onScopeChange }: { onBack: () =>
           <p className="hint">只重试资料提取，不重新生成正文。每次重试会再次调用模型，可能产生用量；0 次表示不重试。</p>
         </>}
         {role.role === 'planning' && <p className="hint">生成已发生剧情的压缩摘要候选，也用于未单独配置模型时的生图提示词优化。</p>}
-        <label>供应商<select aria-label={`${role.label}供应商`} value={settings[role.providerKey]} onChange={e => updateRole(role, e.target.value)}><option value="">暂不设置</option>{settings[role.providerKey] && !provider && <option value={settings[role.providerKey]}>连接已删除，请重新选择</option>}{settings.providers.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
+        {role.role === 'recall' && <>
+          <TaskNumber label="最多召回章节数" value={tasks.recall.maxChapters} max={100} onChange={maxChapters => updateTaskSettings('recall', { maxChapters })} />
+          <p className="hint">每次新章写作前，AI 根据你的要求、已有上下文和章节目录，选择需要额外阅读的原文，再把完整章节交给写作模型。包含改写、续写和 RPG 新章，同章继续选择不重复召回。默认最多 5 章，可设 0～100；0 表示关闭。改写目标章始终附带全文，不占召回名额，最近已附带的全文也不重复召回。</p>
+          <p className="hint">未单独选择模型时使用正文写作模型及其参数。召回会额外调用一次文字模型；失败时停止，可手动重试。召回和正式写作分别检查上下文上限，超限时提示调整，不截短原文。</p>
+        </>}
+        <label>供应商<select aria-label={`${role.label}供应商`} value={settings[role.providerKey] ?? ''} onChange={e => updateRole(role, e.target.value)}><option value="">{role.role === 'recall' ? '使用正文写作模型' : '暂不设置'}</option>{settings[role.providerKey] && !provider && <option value={settings[role.providerKey]}>连接已删除，请重新选择</option>}{settings.providers.map(value => <option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
         {provider && <>
           <UpstreamModelSelect key={connectionSignature(provider)} label={role.label} model={model} list={list} onChange={value => updateModel(role, value)} />
           <label>模型名称（可自定义）<input aria-label={`${role.label}模型名称`} value={model} onFocus={() => startModelInput(role)} onChange={e => updateModel(role, e.target.value, true)} onBlur={() => { delete modelInputDrafts.current[role.role]; }} placeholder="选择上方模型，或输入服务商提供的模型 ID" /></label>

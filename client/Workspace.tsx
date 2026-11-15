@@ -162,7 +162,7 @@ export function Workspace({ projectId, resources, onBack, onSettings, active = t
         const directory = value.branchTree.find(item => item.id === initial.id)?.chapters ?? [];
         const target = directory.find(item => item.id === previousChapter) || directory.at(-1);
         current.current = { branchId: initial.id, chapterId: target?.id ?? null };
-        setBranchId(initial.id); setGenerationMode(value.project.mode);
+        setBranchId(initial.id);
         // Fresh directory permits prose to load independently of the larger material snapshot.
         const viewRequest = refreshView(initial.id, value.cacheVersion);
         const bodyRequest = target ? fetchChapter(target.id, initial.id, initial.revisionId, target.title) : Promise.resolve();
@@ -433,11 +433,18 @@ export function Workspace({ projectId, resources, onBack, onSettings, active = t
     else { setTab('text'); setSidebar(false); }
     requestAnimationFrame(() => scrollToChoice(true));
   }
-  function openGeneration(asRpg = false) { if (dirty || planningDirty || premiseDirty || outputDirty) { setError('请先保存当前修改，再开始生成。'); return; } if (!asRpg && view?.state.rpg?.nextChoice) { void openChapterChoice(); return; } setRegenerating(false); setGenerationBranchName(null); setDiscardBackground(false); setGenerationMode(asRpg || view?.state.rpg ? 'rpg' : detail?.project.mode || 'original'); setNewRpg(asRpg); setInstruction(''); setGenerationTitle(''); setError(''); setDialog('generate'); }
+  function defaultGenerationMode(asRpg = false): Mode {
+    if (asRpg || view?.state.rpg) return 'rpg';
+    const mode = detail?.project.mode || 'original';
+    if (mode !== 'rewrite') return mode;
+    if (!view?.state.chapters.length) return 'original';
+    return view.branch.id === detail?.project.mainBranchId ? 'rewrite' : 'continuation';
+  }
+  function openGeneration(asRpg = false) { if (dirty || planningDirty || premiseDirty || outputDirty) { setError('请先保存当前修改，再开始生成。'); return; } if (!asRpg && view?.state.rpg?.nextChoice) { void openChapterChoice(); return; } setRegenerating(false); setGenerationBranchName(null); setDiscardBackground(false); setGenerationMode(defaultGenerationMode(asRpg)); setNewRpg(asRpg); setInstruction(''); setGenerationTitle(''); setError(''); setDialog('generate'); }
   function openRegeneration() {
     if (!view || !chapterId || dirty || planningDirty || premiseDirty || outputDirty) return;
     const previous = jobs.find(job => job.kind === 'generate' && selectedRef && includesChapterVersion(selectedRef, job.generatedChapterId));
-    setRegenerating(true); setGenerationBranchName(null); setDiscardBackground(false); setGenerationMode(previous?.generationInput?.mode || detail?.project.mode || 'original'); setInstruction(previous?.generationInput?.instruction || ''); setMaxWords(previous?.generationInput?.maxWords || 2000); setGenerationTitle(chapter?.title || '');
+    setRegenerating(true); setGenerationBranchName(null); setDiscardBackground(false); setGenerationMode(previous?.generationInput?.mode || defaultGenerationMode()); setInstruction(previous?.generationInput?.instruction || ''); setMaxWords(previous?.generationInput?.maxWords || 2000); setGenerationTitle(chapter?.title || '');
     setDialog(view.state.chapters.some(item => item.status !== 'ready') || jobs.some(job => job.branchId === branchId && ['import', 'extract'].includes(job.kind) && ['queued', 'running', 'paused'].includes(job.status)) ? 'regenerate-background' : 'generate');
   }
   async function resumeGeneration(job: Job, prompt?: string) {
@@ -652,6 +659,7 @@ export function Workspace({ projectId, resources, onBack, onSettings, active = t
       {generationMode === 'rpg' && !newRpg && view.state.rpg && <p className="notice">继续以「{view.state.rpg.character.name}」的身份体验小说。关键剧情会等待你的选择。要回到常规创作，可以切回原故事线。</p>}
       {regenerating && <p className="notice">将从「{chapter?.title}」之前建立新故事线并重新创作这一章，当前正文会保留在原线。</p>}
       {!regenerating && generationMode === 'rewrite' && <p className="notice">改写「{chapter?.title}」{selection ? `中选定的 ${selection.end - selection.start} 个字符` : '整章'}。将建立独立修订线，当前正文会保留。</p>}
+      <p className="hint">写作前会按“原文召回”设置挑选并读入相关章节全文，模型和章数可在“设置 → 任务模型 → 原文召回”调整。改写时目标章全文始终提供，选段改写也会附带整章前后文。</p>
       {createsGenerationBranch && <label>新故事线名称<input aria-label="新故事线名称" required maxLength={200} value={newBranchName} onChange={event => setGenerationBranchName(event.target.value)} /><span className="hint">开始生成时使用这个名字，之后也可以重命名。</span></label>}
       <label>章节标题（可选）<input value={generationTitle} onChange={e => setGenerationTitle(e.target.value)} placeholder="留空时根据本章正文自动起名" /></label><p className="hint">留空时，正文保存后会调用一次写作模型为本章起名；手动填写时直接使用。</p><label>这一次，你想写什么？<textarea aria-label="这一次，你想写什么？" rows={5} value={instruction} onChange={e => setInstruction(e.target.value)} placeholder={generationMode === 'rpg' ? '你想探索哪里，或希望从怎样的场景开始？' : '推进哪段情节、采用谁的视角，或者有什么需要特别保留的设定？'} /></label><label>目标字数<input type="number" min={200} max={20000} step={100} value={maxWords} onChange={e => setMaxWords(Number(e.target.value))} /></label><p className="hint">开始后会打开这一章并逐步显示正文。写作上下文包含世界观、主要角色、未揭晓伏笔、最近几章全文和剧情摘要；更早正文、原作后续剧情与其他资料由模型按关键词和章节行号按需查询。正文保存后在后台整理人物、剧情摘要与伏笔。</p>{error && <Notice error={error} />}<button className="button primary" type="submit" disabled={busy || (createsGenerationBranch && !newBranchName.trim()) || (generationMode === 'rewrite' && !chapterId) || (generationMode === 'rpg' && (newRpg || !view.state.rpg) && (!rpgSetup.character.name.trim() || (rpgSetup.character.kind === 'existing' && !worldState.entities.some(entity => entity.id === rpgSetup.character.entityId))))}><Sparkles size={16} />{busy ? '正在提交…' : generationMode === 'rpg' ? newRpg || !view.state.rpg ? '开始体验' : '继续体验' : '开始生成'}</button>
     </form></Modal>}

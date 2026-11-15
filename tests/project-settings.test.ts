@@ -34,6 +34,7 @@ function localOverrides(settings: Settings): ProjectSettingsOverrides {
     tasks[role] = { ...projectModelSettings(settings, role), model: `project-${role}`, modelParameters: [{ ...defaultModelParameters(), role, providerId: 'mock', model: `project-${role}`, temperature: 0.4 }] };
   }
   tasks.writing!.writing = { maxToolRounds: 35, recentChapterCount: 7 };
+  tasks.recall!.recall = { maxChapters: 8 };
   tasks.extraction!.extraction = { outputMode: 'structured', autoRetry: false, maxRetries: 1, retryDelayMs: 0 };
   const promptTemplates = structuredClone(settings.promptTemplates!);
   for (const task of ['writing', 'extraction', 'compression', 'image'] as const) {
@@ -81,11 +82,13 @@ it('isolates each opted-in group, keeps connections global and restores inherita
   expect(effective.writingModel).toBe('project-writing'); expect(effective.planningModel).toBe('planning-next');
   expect(effective.taskSettings!.extraction.outputMode).toBe('structured');
   expect(effective.taskSettings!.writing).toEqual({ maxToolRounds: 35, recentChapterCount: 7 });
+  expect(effective.recallModel).toBe('project-recall'); expect(effective.taskSettings!.recall).toEqual({ maxChapters: 8 });
   expect(effective.providers[0]).toMatchObject({ baseUrl: changed.providers[0].baseUrl, apiKey: 'new-fixture-secret' });
   expect(effective.imageSettings!.stylePrompt).toBe('本作品水彩画风');
   expect(ctx.settings.get(other.id).writingModel).toBe('global-next');
   const reset = await ctx.save({}, saved.json().revision); expect(reset.statusCode).toBe(200);
   expect(reset.json().effective.writingModel).toBe('global-next'); expect(reset.json().overrides).toEqual({});
+  expect(reset.json().effective.recallModel).toBe('global-recall'); expect(reset.json().effective.taskSettings.recall).toEqual({ maxChapters: 5 });
 });
 
 it('inherits writing controls for legacy model overrides and isolates new writing and extraction groups', async () => {

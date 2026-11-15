@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { defaultModelParameters, getModelParameters, normalizeModelSettings, resolveModelConfig, selectTaskModel, upsertModelParameters } from '../shared/model-settings.js';
+import { defaultModelParameters, getModelParameters, modelRoles, normalizeModelSettings, resolveModelConfig, selectTaskModel, upsertModelParameters } from '../shared/model-settings.js';
 import type { ModelParameterProfile, ModelParameters, Settings } from '../shared/types.js';
 
 const roles = ['writing', 'planning', 'extraction'] as const;
@@ -170,8 +170,8 @@ describe('parameters for each task, connection and model', () => {
     const normalized = normalizeModelSettings(original);
     expect(getModelParameters(normalized, 'writing', 'first', 'writer')).toEqual({ maxOutputTokens: 2048, contextTokens: 32000 });
     for (const role of ['planning', 'extraction'] as const) expect(getModelParameters(normalized, role, 'first', 'writer')).toMatchObject({ maxOutputTokens: 8192, contextTokens: 128000, temperature: 0.2, stopSequences: ['旧停止'], geminiThinking: { mode: 'budget', budget: 1024 } });
-    expect(normalized.modelParameters).toHaveLength(3);
-    expect(normalized.modelParameters!.every(profile => roles.includes(profile.role!))).toBe(true);
+    expect(normalized.modelParameters).toHaveLength(modelRoles.length);
+    expect(normalized.modelParameters!.every(profile => modelRoles.includes(profile.role!))).toBe(true);
     const planning = normalized.modelParameters!.find(profile => profile.role === 'planning')!;
     planning.stopSequences!.push('新停止');
     if (planning.geminiThinking?.mode === 'budget') planning.geminiThinking.budget = 2048;

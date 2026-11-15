@@ -42,7 +42,7 @@ for (const scope of ['global', 'project'] as const) test(`任务模型切换保�
     await page.getByTestId('settings-page').getByRole('button', { name: '任务模型', exact: true }).click();
   }
   const settings = page.getByTestId('settings-page');
-  const labels = { writing: '正文写作', planning: '摘要压缩', extraction: '资料提取' };
+  const labels = { writing: '正文写作', planning: '摘要压缩', extraction: '资料提取', recall: '原文召回' };
   for (const [index, role] of modelRoles.entries()) {
     const label = labels[role];
     await settings.getByRole('tab', { name: label, exact: true }).click();
@@ -220,6 +220,46 @@ for (const width of [1440, 390]) test(`写作检索与原文章数在 ${width}px
   await settings.getByRole('button', { name: '保存设置', exact: true }).click();
   await expect(settings.getByRole('status')).toContainText('设置已保存');
   expect((await (await page.request.get('/api/settings')).json()).taskSettings.writing).toEqual({ recentChapterCount: 3 });
+});
+
+for (const width of [1440, 390]) test(`原文召回在 ${width}px 独立配置模型、章节数量和作品继承`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+  const { project, settings } = await openProjectSettings(page, `原文召回设置 ${width}`);
+  await settings.getByRole('tab', { name: '原文召回', exact: true }).click();
+  const count = settings.getByLabel('最多召回章节数', { exact: true });
+  const model = settings.getByLabel('原文召回模型名称', { exact: true });
+  await expect(count).toHaveValue('5'); await expect(count).toBeDisabled();
+  await settings.getByRole('button', { name: '原文召回单独设置', exact: true }).click();
+  await count.fill('101');
+  await settings.getByRole('tab', { name: '正文写作', exact: true }).click();
+  await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(settings.getByRole('tab', { name: '原文召回', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(count).toBeFocused();
+  await count.fill('0'); await model.fill(`recall-${width}`);
+  await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(settings.getByRole('status')).toContainText('作品设置已保存');
+  let stored = await (await page.request.get(`/api/projects/${project.id}/settings`)).json();
+  expect(stored.overrides.tasks.recall).toMatchObject({ providerId: 'project-e2e', model: `recall-${width}`, recall: { maxChapters: 0 } });
+  expect((await (await page.request.get('/api/settings')).json()).taskSettings.recall.maxChapters).toBe(5);
+  await settings.getByRole('button', { name: '返回作品', exact: true }).click();
+  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await settings.getByRole('button', { name: '作品设置', exact: true }).click();
+  await settings.getByRole('tab', { name: '原文召回', exact: true }).click();
+  await expect(count).toHaveValue('0'); await expect(model).toHaveValue(`recall-${width}`);
+  await count.fill('7'); await settings.getByLabel('原文召回供应商', { exact: true }).selectOption('');
+  await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(settings.getByRole('status')).toContainText('作品设置已保存');
+  stored = await (await page.request.get(`/api/projects/${project.id}/settings`)).json();
+  expect(stored.overrides.tasks.recall).toMatchObject({ providerId: '', model: '', recall: { maxChapters: 7 } });
+  expect(await settings.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBeTruthy();
+  await count.evaluate(element => element.scrollIntoView({ block: 'center' }));
+  await page.screenshot({ path: testInfo.outputPath(`writing-recall-settings-${width}.png`), animations: 'disabled' });
+  await settings.getByRole('button', { name: '原文召回恢复继承全局', exact: true }).click();
+  await expect(count).toHaveValue('5'); await expect(model).toHaveValue('global-recall');
+  await expect(count).toBeDisabled();
+  await settings.getByRole('button', { name: '保存设置', exact: true }).click();
+  await expect(settings.getByRole('status')).toContainText('作品设置已保存');
+  expect((await (await page.request.get(`/api/projects/${project.id}/settings`)).json()).overrides.tasks).toBeUndefined();
 });
 
 test('作品提示词覆盖参与完整预览，切换范围保护草稿且不修改全局预设', async ({ page }) => {

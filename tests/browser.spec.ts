@@ -156,6 +156,80 @@ async function readingGeometry(page: Page) {
   });
 }
 
+for (const width of [1440, 390]) test(`改写在正式写作前召回远处原文，分支在 ${width}px 默认续写并保留目标章全文`, async ({ page }) => {
+  await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+  const original = await (await page.request.get('/api/settings')).json();
+  const store = new Store(mkdtempSync(join(tmpdir(), 'novel-recall-browser-')));
+  const targetText = '林舟站在白石城门前，REWRITE_FULL_SOURCE_BEGIN。\n\nREWRITE_FULL_SOURCE_END，钟声响起。';
+  const distantText = '林舟曾在远处留下半枚铜钱。\n\nDISTANT_RECALL_FULL_TEXT，暗号是月落城西。';
+  let backup: Buffer;
+  try {
+    const project = store.createProject({ title: `E2E 写作原文召回 ${width}`, mode: 'rewrite' });
+    for (let index = 0; index < 8; index++) {
+      const title = index === 0 ? '遥远的约定' : index === 7 ? '改写目标' : `中间场景${index}`;
+      const text = index === 0 ? distantText : index === 7 ? targetText : `林舟路过中间场景${index}。`;
+      const saved = store.saveChapter(project.mainBranchId, { baseRevisionId: store.getBranch(project.mainBranchId).revisionId, title, text });
+      store.applyExtraction(project.mainBranchId, saved.branch.revisionId, saved.state.chapters.at(-1)!.id, { summary: `摘要：${title}`, entities: [], relations: [], foreshadows: [] }, true);
+    }
+    backup = gzipSync(JSON.stringify({ format: 'ai-novel-backup', version: 1, project: store.exportProject(project.id), sources: [] }));
+  } finally { store.close(); }
+  try {
+    const templates = defaultPromptTemplates();
+    templates.presets.writing = [{ id: 'recall-minimal', name: '省略原文的自定义提示词', useGeneral: false, writingOutputMode: 'text', blocks: [{ id: 'request', name: '本次要求', role: 'user', enabled: true, content: '{{instruction}}' }] }];
+    templates.selected.writing = 'recall-minimal';
+    const settings = { ...original, providers: [...original.providers.filter((provider: any) => provider.id !== 'recall-e2e'), { id: 'recall-e2e', name: '召回验收本地连接', protocol: 'openai-chat', baseUrl: mockUrl }], writingProviderId: 'recall-e2e', writingModel: 'recall-writer', extractionProviderId: 'recall-e2e', extractionModel: 'recall-extractor', recallProviderId: 'recall-e2e', recallModel: 'recall-selector', promptTemplates: templates, taskSettings: { ...original.taskSettings, writing: { recentChapterCount: 1 }, recall: { maxChapters: 1 } } };
+    expect((await page.request.put('/api/settings', { data: settings })).ok()).toBeTruthy();
+    const restored = await page.request.post('/api/restore', { multipart: { file: { name: 'recall.ai-novel.json.gz', mimeType: 'application/gzip', buffer: backup! } } });
+    expect(restored.ok()).toBeTruthy(); const project = await restored.json();
+    await page.goto('/'); await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+    await page.getByRole('button', { name: '继续创作', exact: true }).click();
+    const modal = page.getByRole('dialog'); await expect(modal.getByLabel('创作方式', { exact: true })).toHaveValue('rewrite');
+    await modal.getByLabel('章节标题（可选）', { exact: true }).fill('改写后');
+    await modal.getByLabel('这一次，你想写什么？', { exact: true }).fill('参考遥远的约定，改变本章的相遇方式。');
+    const response = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/generate'));
+    await modal.getByRole('button', { name: '开始生成', exact: true }).click(); const job = await (await response).json();
+    await expect.poll(async () => (await (await page.request.get(`/api/jobs?projectId=${project.id}`)).json()).find((value: any) => value.id === job.id)?.status).toBe('completed');
+    const outputs = await (await page.request.get(`/api/jobs/${job.id}/outputs`)).json();
+    expect(outputs.find((output: any) => output.stage === 'recall')).toMatchObject({ status: 'applied' });
+    const detail = await (await page.request.get(`/api/jobs/${job.id}/outputs/${outputs.find((output: any) => output.stage === 'writing').id}`)).json();
+    const body = JSON.parse(detail.output.request.body); const prompt = body.messages.map((message: any) => message.content).join('\n');
+    expect(prompt).toContain(targetText); expect(prompt).toContain(distantText); expect(detail.output.request.model).toBe('recall-writer');
+    const recall = await (await page.request.get(`/api/jobs/${job.id}/outputs/${outputs.find((output: any) => output.stage === 'recall').id}`)).json();
+    expect(recall.output.request.model).toBe('recall-selector');
+    expect((await (await page.request.get(`/api/branches/${project.mainBranchId}`)).json()).state.chapters).toHaveLength(8);
+    await expect(page.getByRole('button', { name: '继续创作', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: '继续创作', exact: true }).click();
+    await expect(modal.getByLabel('创作方式', { exact: true })).toHaveValue('continuation');
+    await expect(modal.getByLabel('新故事线名称', { exact: true })).toHaveCount(0);
+    await modal.getByLabel('章节标题（可选）', { exact: true }).fill('沿改写分支续写');
+    await modal.getByLabel('这一次，你想写什么？', { exact: true }).fill('沿当前故事线继续推进下一章。');
+    const nextResponse = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/generate'));
+    await modal.getByRole('button', { name: '开始生成', exact: true }).click();
+    const accepted = await nextResponse; expect(accepted.request().postDataJSON()).toMatchObject({ mode: 'continuation' });
+    expect(accepted.request().postDataJSON()).not.toHaveProperty('chapterId');
+    const nextJob = await accepted.json(); expect(nextJob.branchId).toBe(job.branchId);
+    await expect.poll(async () => (await (await page.request.get(`/api/jobs?projectId=${project.id}`)).json()).find((value: any) => value.id === nextJob.id)?.status).toBe('completed');
+    await expect(page.getByRole('button', { name: '继续创作', exact: true })).toBeEnabled();
+    expect((await (await page.request.get(`/api/branches/${job.branchId}`)).json()).state.chapters).toHaveLength(9);
+    expect((await (await page.request.get(`/api/projects/${project.id}`)).json()).branches).toHaveLength(2);
+    await page.reload();
+    await page.getByRole('button', { name: `打开作品 ${project.title}`, exact: true }).click();
+    await page.getByRole('button', { name: '继续创作', exact: true }).click();
+    await expect(modal.getByLabel('创作方式', { exact: true })).toHaveValue('continuation');
+    await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+    await chooseBranch(page, project.mainBranchId);
+    await page.getByRole('button', { name: '继续创作', exact: true }).click();
+    await expect(modal.getByLabel('创作方式', { exact: true })).toHaveValue('rewrite');
+    await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+    await chooseBranch(page, job.branchId);
+    await page.getByRole('button', { name: '继续创作', exact: true }).click();
+    await expect(modal.getByLabel('创作方式', { exact: true })).toHaveValue('continuation');
+    await modal.getByLabel('创作方式', { exact: true }).selectOption('rewrite');
+    await expect(modal.getByLabel('新故事线名称', { exact: true })).toBeVisible();
+    await modal.getByRole('button', { name: '关闭对话框', exact: true }).click();
+  } finally { expect((await page.request.put('/api/settings', { data: original })).ok()).toBeTruthy(); }
+});
+
 test('顶部继续创作在手机和桌面始终可见，阅读视图直接续写且不预建空章', async ({ page }, testInfo) => {
   const previous = await (await page.request.get('/api/settings')).json();
   const providerId = 'toolbar-local-provider';
@@ -574,14 +648,14 @@ test('独立设置页面切换分类保留草稿，保存检查隐藏字段，�
     await expect(models).toBeVisible();
     await expect(prompts).toBeHidden();
     const taskTabs = settings.getByRole('tablist', { name: '任务模型分页', exact: true });
-    await expect(taskTabs.getByRole('tab')).toHaveCount(3);
+    await expect(taskTabs.getByRole('tab')).toHaveCount(4);
     await expect(models.getByRole('tabpanel')).toHaveCount(1);
     await expect(taskTabs.getByRole('tab', { selected: true })).toHaveText('正文写作');
     await taskTabs.getByRole('tab', { name: '正文写作', exact: true }).press('ArrowRight');
     await expect(taskTabs.getByRole('tab', { name: '摘要压缩', exact: true })).toBeFocused();
     await expect(models.getByRole('tabpanel', { name: '摘要压缩', exact: true })).toBeVisible();
     await taskTabs.getByRole('tab', { selected: true }).press('End');
-    await expect(models.getByRole('tabpanel', { name: '资料提取', exact: true })).toBeVisible();
+    await expect(models.getByRole('tabpanel', { name: '原文召回', exact: true })).toBeVisible();
     await taskTabs.getByRole('tab', { selected: true }).press('Home');
     await expect(models.getByRole('tabpanel', { name: '正文写作', exact: true })).toBeVisible();
     await models.getByLabel('正文写作模型名称', { exact: true }).fill('e2e-draft-writing');

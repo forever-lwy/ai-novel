@@ -59,7 +59,7 @@ describe('provider connections and task model assignments', () => {
     expect(read.statusCode).toBe(200);
     expect(read.json()).not.toHaveProperty('taskTokenLimit');
     expect(ctx.settings.get()).not.toHaveProperty('taskTokenLimit');
-    expect(read.json()).toMatchObject({ writingProviderId: 'upstream', planningProviderId: 'upstream', extractionProviderId: 'upstream', writingModel: 'writer', planningModel: 'planner', extractionModel: 'extractor', providers: [{ hasKey: true }], modelParameters: modelRoles.map((role, index) => ({ role, providerId: 'upstream', model: ['writer', 'planner', 'extractor'][index], maxOutputTokens: 64000, contextTokens: 512000 })) });
+    expect(read.json()).toMatchObject({ writingProviderId: 'upstream', planningProviderId: 'upstream', extractionProviderId: 'upstream', writingModel: 'writer', planningModel: 'planner', extractionModel: 'extractor', providers: [{ hasKey: true }], modelParameters: (['writing', 'planning', 'extraction'] as const).map((role, index) => ({ role, providerId: 'upstream', model: ['writer', 'planner', 'extractor'][index], maxOutputTokens: 64000, contextTokens: 512000 })) });
     expect(read.json().providers[0]).not.toHaveProperty('maxOutputTokens');
     const saved = await ctx.app.inject({ method: 'PUT', url: '/api/settings', cookies: ctx.cookies, payload: { ...read.json(), taskTokenLimit: 2480 } });
     expect(saved.statusCode).toBe(200);
@@ -125,7 +125,7 @@ describe('provider connections and task model assignments', () => {
     const read = await ctx.app.inject({ url: '/api/settings', cookies: ctx.cookies });
     expect(read.statusCode).toBe(200); expect(read.body).not.toContain('shared-profile-private-key');
     const value = read.json() as Settings;
-    expect(value.modelParameters).toHaveLength(6);
+    expect(value.modelParameters).toHaveLength(modelRoles.length * 2);
     expect(value.modelParameters?.filter(profile => profile.model === 'historical-model').map(profile => profile.role)).toEqual([...modelRoles]);
     expect(value.modelParameters?.find(profile => profile.role === 'planning' && profile.model === 'shared')).toMatchObject({ maxOutputTokens: 6144, temperature: 0, stopSequences: ['END'] });
     const extraction = value.modelParameters!.find(profile => profile.role === 'extraction' && profile.model === 'shared')!;
@@ -135,7 +135,7 @@ describe('provider connections and task model assignments', () => {
     expect(saved.statusCode).toBe(200); expect(saved.body).not.toContain('shared-profile-private-key');
     expect(JSON.parse(ctx.settings.meta('settings')!).modelParameters.every((profile: { role?: string }) => profile.role)).toBe(true);
     expect(ctx.settings.get().providers[0].apiKey).toBe('shared-profile-private-key');
-    expect(ctx.settings.get().modelParameters!.filter(profile => profile.model === 'shared').map(profile => [profile.role, profile.temperature, profile.maxOutputTokens])).toEqual([['writing', 0, 6144], ['planning', 0.8, 6144], ['extraction', undefined, 2048]]);
+    expect(modelRoles.map(role => { const profile = ctx.settings.get().modelParameters!.find(profile => profile.model === 'shared' && profile.role === role)!; return [role, profile.temperature, profile.maxOutputTokens]; })).toEqual([['writing', 0, 6144], ['planning', 0.8, 6144], ['extraction', undefined, 2048], ['recall', 0, 6144]]);
   });
 
   it('rejects missing providers, empty or malformed task models and duplicate connections without mutation', async () => {

@@ -13,7 +13,7 @@ import type { ExtractionResult, Job, ModelRequestSnapshot, Settings, WritingEven
 const stores: Store[] = []; const engines: StoryEngine[] = [];
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
 afterEach(async () => { for (const ctx of apps.splice(0)) await ctx.app.close(); for (const engine of engines.splice(0)) await engine.close(); for (const store of stores.splice(0)) store.close(); });
-const settings = (): Settings => ({ providers: [{ id: 'mock', name: '模拟', protocol: 'openai-chat', baseUrl: 'http://unused.invalid', model: 'writer', maxOutputTokens: 1024, contextTokens: 64000 }], writingProviderId: 'mock', planningProviderId: 'mock', extractionProviderId: 'mock' });
+const settings = (): Settings => ({ providers: [{ id: 'mock', name: '模拟', protocol: 'openai-chat', baseUrl: 'http://unused.invalid', model: 'writer', maxOutputTokens: 1024, contextTokens: 64000 }], writingProviderId: 'mock', planningProviderId: 'mock', extractionProviderId: 'mock', taskSettings: { ...defaultTaskSettings(), recall: { maxChapters: 0 } } });
 const extraction = (): ExtractionResult => ({ summary: '旅人来到桥边。', entities: [], relations: [], foreshadows: [] });
 const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { resolve, promise }; };
 async function until<T>(read: () => T, valid: (value: T) => boolean): Promise<T> { const deadline = Date.now() + 3000; for (;;) { const value = read(); if (valid(value)) return value; if (Date.now() > deadline) throw new Error('模拟任务等待超时'); await new Promise(resolve => setTimeout(resolve, 5)); } }
@@ -29,7 +29,7 @@ describe('streaming prose, detached extraction and regeneration', () => {
 
   it.each([0, 1, 5])('uses configured tool rounds and %s recent complete chapters in the actual writing request', async recentChapterCount => {
     const models = mockModels(); const config = settings();
-    config.taskSettings = { ...defaultTaskSettings(), writing: { maxToolRounds: 31, recentChapterCount } };
+    config.taskSettings = { ...defaultTaskSettings(), recall: { maxChapters: 0 }, writing: { maxToolRounds: 31, recentChapterCount } };
     const ctx = harness(models, config);
     const chapters = [];
     for (let index = 1; index <= 6; index++) {

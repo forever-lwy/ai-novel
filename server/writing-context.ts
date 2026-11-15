@@ -12,6 +12,9 @@ export interface WritingContextInput {
   lookupAliases?: Record<string, string>;
 }
 
+/** Full texts stay on the server until selection; keys survive backup ID remapping. */
+export interface RecallChapter { key: string; collection: 'story' | 'original'; path: string; title: string; summary: string; text: string; included: boolean }
+
 const mainRole = /(?:^|[，。；：:\s]|是|为|担任)(?:本书|故事|本作|作品)?(?:的)?(?:男主角|女主角|主人公|主角|男主|女主)(?=$|[，。；：:\s])/;
 const isMainCharacter = (entity: Entity) => entity.kind === 'character' && (entity.isMain === true || (entity.isMain !== false && (mainRole.test(entity.description) || entity.facts.filter(fact => ['identity', 'role', '身份', '定位'].includes(fact.attribute ?? '')).some(fact => mainRole.test(fact.text)))));
 const isMajorEvent = (attribute?: string) => ['major_event', '重大经历', '关键经历', '重大事件', '关键事件'].includes((attribute ?? '').normalize('NFKC').trim().toLocaleLowerCase().split(':')[0]);
@@ -81,7 +84,7 @@ function lineSnippet(line: string, hit: number, limit = 1000) {
 }
 
 /** All reads are captured now so later revisions cannot add future knowledge to this request. */
-export function buildWritingContext(input: WritingContextInput): { text: string; tools: ModelTool[]; variables: Record<string, string> } {
+export function buildWritingContext(input: WritingContextInput): { text: string; tools: ModelTool[]; variables: Record<string, string>; recallChapters: RecallChapter[] } {
   const state = structuredClone(input.state);
   const chapterTexts = new Map(state.chapters.map(chapter => [chapter.id, input.chapterText(chapter.id)]));
   const activeEntities = state.entities.filter(entity => !entity.mergedInto);
@@ -149,6 +152,18 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
   const recentCount = input.recentChapterCount ?? 3;
   const recent = (recentCount > 0 ? state.chapters.slice(-recentCount) : []).map(chapter => ({ chapterId: chapter.id, title: chapter.title, text: chapterTexts.get(chapter.id) ?? '' }));
   const latest = state.chapters.at(-1);
+  const includedTexts = new Set(recent.map(chapter => textKey(chapter.text)));
+  const recallChapters: RecallChapter[] = [];
+  const seenTexts = new Set<string>();
+  const chapterMetadata = new Map(corpora.flatMap(corpus => corpus.state.chapters.map(chapter => [`${corpus.collection}/${chapter.id}`, chapter] as const)));
+  for (const file of files) {
+    if (!file.text.trim()) continue;
+    const key = textKey(file.text);
+    if (seenTexts.has(key)) continue;
+    seenTexts.add(key);
+    const chapter = chapterMetadata.get(`${file.collection}/${file.chapterId}`);
+    recallChapters.push({ key, collection: file.collection, path: file.path, title: file.title, summary: chapter?.summary ?? '', text: file.text, included: includedTexts.has(key) });
+  }
   const context = {
     continuationAnchor: latest ? { chapterId: latest.id, title: latest.title, ending: (chapterTexts.get(latest.id) ?? '').slice(-1500), instruction: '从这段已保存正文的结尾之后继续，不按章节编号寻找起点或重写旧情节。' } : null,
     premise: state.premise ?? input.premise ?? '',
@@ -265,7 +280,7 @@ export function buildWritingContext(input: WritingContextInput): { text: string;
   const storyMaterialsText = formatWritingMaterials(readableMaterials);
   const recentChaptersText = formatRecentChapters(recentCompleteChapters);
   const continuationAnchorText = formatContinuationAnchor(anchor);
-  return { text: `本次写作的必要资料（完整保留）：\n${JSON.stringify(context)}`, tools, variables: {
+  return { text: `本次写作的必要资料（完整保留）：\n${JSON.stringify(context)}`, tools, recallChapters, variables: {
     continuationAnchor: JSON.stringify(context.continuationAnchor),
     storyMaterials: JSON.stringify(storyMaterials),
     worldview: context.worldview, locked: context.locked,

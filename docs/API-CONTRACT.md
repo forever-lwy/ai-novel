@@ -1,6 +1,6 @@
 # 第一阶段内部接口约定
 
-所有接口 /api，cookie session。JSON 错误 {error:string}。时间 ISO。共享类型 shared/types.ts。提示词契约更新于 2026-10-26。
+所有接口 /api，cookie session。JSON 错误 {error:string}。时间 ISO。共享类型 shared/types.ts。提示词与写作上下文契约更新于 2026-11-15。
 
 工作台统一使用完整作者资料。`view=author`、`view=reader` 作为旧客户端参数继续接受，均不改变返回资料和操作权限；省略参数效果相同。阅读视图仅在客户端隐藏思维链与工具调用过程，不过滤资料、图片、任务或 RPG 选项。资料查询上的旧 `chapterId` 参数不再限定阅读进度；正文实体浮窗通过独立的章节资料接口读取章末资料，不改变工作台其他页面范围。章节操作、图片关联和分支起点的 `chapterId` 仍按原规则校验。所有接口继续校验登录、来源和适用的作品／故事线／版本边界。
 
@@ -13,7 +13,7 @@
 
 - `GET /projects/:id/settings -> {revision,overrides,global,effective}`：读取作品覆盖、当前全局值及合并后的生效配置。供应商仅来自全局，返回沿用密钥和 URL 凭据脱敏；作品不存在返回 404。旧作品无记录时返回 `revision:"0",overrides:{}`，读取不创建副本。
 - `PUT /projects/:id/settings {revision,overrides}`：完整替换本作品的覆盖，返回同上。`revision` 必须与上次读取一致，冲突返回 409；空 `overrides:{}` 恢复全部继承，省略某组恢复该组继承。请求体最多 8 MiB。接口校验任务、模型参数、提示词和生图设置，拒绝供应商连接、地址、密钥等额外配置字段；不会写入全局设置。
-- `overrides.tasks?:{writing?,planning?,extraction?}`：每项为 `{providerId,model,modelParameters}`，参数条目使用现有 `ModelParameterProfile`，`role` 必须与任务一致；`writing` 项可包含 `writing:{maxToolRounds?,recentChapterCount}`，`extraction` 项另须包含 `extraction:{outputMode?,autoRetry,maxRetries,retryDelayMs}`。覆盖按整个任务生效，包括曾用模型的参数及相应任务设置；参数的省略值保持省略，空供应商／模型表示该作品暂不配置。旧作品写作覆盖缺少 `writing` 时继续继承当前全局写作设置，新保存的写作覆盖包含这组设置；备份与恢复沿用同一格式。
+- `overrides.tasks?:{writing?,planning?,extraction?,recall?}`：每项为 `{providerId,model,modelParameters}`，参数条目使用现有 `ModelParameterProfile`，`role` 必须与任务一致；`writing` 项可包含 `writing:{maxToolRounds?,recentChapterCount}`，`extraction` 项另须包含 `extraction:{outputMode?,autoRetry,maxRetries,retryDelayMs}`，`recall` 项包含 `recall:{maxChapters}`（缺省补 5）。覆盖按整个任务生效，包括曾用模型的参数及相应任务设置；参数的省略值保持省略，空供应商／模型表示该作品暂不配置，唯有 recall 的空值明确使用本作品生效的写作模型及参数。旧作品写作覆盖缺少 `writing` 时继续继承当前全局写作设置，新保存的写作覆盖包含这组设置；备份与恢复沿用同一格式。
 - `overrides.promptTemplates?` 沿用完整 `PromptTemplateSettings` 的格式与限制，通用及四类任务目录作为一组；`overrides.imageSettings?` 沿用完整生图设置格式，包含优化模型、画风、参数、参考图与自动插画开关。未提供的组每次读取最新全局值，不把首次读取的全局值冻结到作品。
 - `POST /settings/test` 额外接受可选 `projectId`，带该字段时使用该作品生效的任务模型参数，供应商凭据仍从全局获取；省略保持原行为。`POST /settings/prompt-preview` 保持只读示例预览，作品页面传入当前有效的提示词与提取／插画选项；可选 `imageSettings` 接收当前有效的全局草稿或作品覆盖绘图设置，复用严格的生图设置 Schema，拒绝凭据等额外字段。预览复用实际绘图设置构建逻辑，不保存配置、不创建任务、不调用模型；旧客户端未传时继续读取全局设置。
 - 写作／RPG、导入与重新提取、自动命名、标题修复、AI 分章规则、摘要压缩、生图提示词优化及手动／自动生图均按所属作品读取配置。设置保存不重发请求、不改正文版本；已发出的请求及历史记录保留原配置。RPG 已保存的工具对话沿用原消息与提示词，原会话模型一致性校验继续生效。
@@ -28,6 +28,12 @@
 - 删除已应用提取的完整请求时，可在内部 `extraction_evidence` 保留关联及规范化提取结果，用于旧资料兼容；其中没有原始请求、响应或诊断。完整备份 v1 新增可选 `extractionEvidence`，按作品导出、校验并重映射版本／章节标识，旧备份缺省为空；删除作品时一并删除。保留版本和正文依赖闭包确保清理后备份仍可恢复。
 
 ## 原作参考与文本查询工具
+
+- 原文召回使用独立 `ModelRole='recall'`、可选 `Settings.recallProviderId/recallModel` 和对应任务模型参数；未选供应商时使用有效写作配置，已选择但失效的供应商不会静默回退。旧设置省略新增字段时兼容默认读取，旧 PUT 省略召回模型及任务设置时保留已有值。
+- `taskSettings.recall.maxChapters` 为 0–100 的整数，默认 5，0 关闭额外召回。每次新章写作（含改写／重新生成和 RPG 新章）先用本次已捕获的上下文、作者要求及全范围候选目录执行一次召回，返回 `{chapterKeys:string[]}`；校验数量、重复项和捕获目录白名单。候选来自当前故事与固定原作参考，包括绑定的已确认导入目录。相同正文按内容去重，最近已带入的全文与当前改写章排除在额外候选之外；无候选时不请求模型。没有摘要的候选仅提供标题和开头 300 字符，完整正文由服务端在选择后读取。
+- 改写目标章全文由运行时确保附带，选段改写保留整章前后文但仅替换选段；不依赖作者预设是否包含 `sourceText/writingTarget`，也不受最近章数／召回开关影响。已在编排消息中完整提供的目标原文不重复附加；纯原创重新生成仍保留原有不注入被否定后文的规则。
+- 成功召回的完整原文通过运行时用户材料加入实际写作消息，不能因自定义预设省略资料变量而遗漏；原作与当前故事仍分别标注。召回和写作各自预检输入及完整输出预算，不截短原文，失败／超限停止，不自动请求下一阶段或重试。内部 `payload.writingRecall={baseRevisionId,maxChapters,chapterKeys}` 保存成功选择，键由正文内容生成、恢复 ID 重映射不改变；同一任务重试／重启／备份恢复复用选择，RPG 已保存的同章工具对话不再次召回。
+- 召回输出新增 `stage='recall'`，沿用请求／响应诊断、脱敏和用量统计；记录只读，导入或应用被拒绝。召回过程不创建故事版本、不提取原作资料、不修改旧正文，停止或版本变化后不得开始写作或应用迟到结果。
 
 续写请求以 `continuationAnchor={chapterId,title,ending,instruction}` 标记最后保存的正文结尾，同时提供最近完整正文；自定义预设省略上下文块时，运行规则仍带入该起点。内部章节数量和索引不映射到章节编号变量；旧 `chapterNumber` 展开为“待写章节／当前章节”，新建章节缺省标题为“新章节”，EPUB 缺题名时为“未命名章节”。原文标题里的真实编号和原文段落／行号保留。
 
@@ -129,6 +135,8 @@
 
 ## 文字与作品接口
 
+- 工作台“继续创作”的默认 `mode` 按当前故事线选择：作品类型为 rewrite 时，只有已有正文的原文主线默认 rewrite，派生线默认 continuation，空作品默认 original；已有 RPG 体验配置仍默认 rpg。客户端每次打开写作窗口重新判断，刷新／重开／切线不沿用原文主线的改写默认；作者仍可手动覆盖，服务端继续按显式传入的 `GenerateInput.mode` 执行。
+
 - `Revision.restoredFromRevisionId?` 记录回退实际恢复的历史版本，完整审计父链仍保留；章末快照沿恢复来源读取，确保回退后的分支和资料维护使用所恢复的历史状态。完整备份重映射该关联，来源必须属于正常父链中的历史版本，非法或循环来源拒绝恢复。
 
 - 认证接口见上文“登录与安全边界”，初始密码由服务器环境提供；改密与会话撤销不进入作品备份。
@@ -185,7 +193,7 @@
 - 写作与 RPG 新增固定入口 `search_extensions({query?,kind?,offset?})`、`load_extension({id})`、`read_skill_resource({id,path,offset?,limit?})`、`run_extension({id,argumentsJson})`。首轮最多 40 项简短目录，检索每页 20 项；加载工具后才允许调用，参数字符串解析后按工具 Schema 校验，返回结果按凭据脱敏。技能每次最多读取 16000 字符，未读的附件内容不注入请求。配置指纹改变会阻止旧调用，RPG 的 `extensionLoads` 随 ModelToolContinuation 保留。四协议及两种结果工具通道共用入口；过程与正文分开保存，预算涵盖逐轮实际内容。扩展与其他写作工具共用 `taskSettings.writing.maxToolRounds`；未设置时普通写作启用扩展默认 16 轮，RPG 默认 24 轮。
 - 扩展接口均沿用登录、同源、流量和请求体保护；最多 4 个并发扩展操作。保存配置会取消当前扩展操作，外部已经产生的副作用不保证撤销。全局配置不随单作品备份，历史诊断仍可包含已加载说明与工具结果。完整数据目录迁移连同加密密钥保留配置。
 - 生产模型出站默认只允许 HTTPS 全球公网地址，检查 DNS 结果并将实际连接绑定到已检查地址；设置 `OUTBOUND_ALLOWED_ORIGINS` 后仅允许名单中来源，可明确允许指定来源的 HTTP／私网网关，链路本地及已知云元数据地址仍禁止，所有模式拒绝 URL 查询凭据及重定向。
-- `Settings.taskSettings` 为 `{writing?:{maxToolRounds?:number,recentChapterCount:number},extraction:{outputMode:prompt|structured|tool,autoRetry:boolean,maxRetries:number,retryDelayMs:number}}`。写作默认 `{recentChapterCount:3}`；`maxToolRounds` 为 1–100 的整数，省略时按任务使用原默认值，`recentChapterCount` 为 0–100 的整数。拒绝额外字段、字符串数字、小数及越界值。旧 PUT 省略整个 `taskSettings` 或其中 `writing` 时保留已有写作配置；显式提交 `writing` 且省略 `maxToolRounds` 恢复自动轮数。原 `planning` 开关接受为旧格式但忽略且不返回。提取默认 prompt、自动重试关闭，最多额外 2 次、间隔 5000ms；次数 0–10，间隔 0–300000ms。旧 PUT 省略整个设置保留已有提取配置，省略 `outputMode` 保留原模式，其余字段及未知值仍校验。
+- `Settings.taskSettings` 为 `{writing?:{maxToolRounds?:number,recentChapterCount:number},recall?:{maxChapters:number},extraction:{outputMode:prompt|structured|tool,autoRetry:boolean,maxRetries:number,retryDelayMs:number}}`。写作默认 `{recentChapterCount:3}`；`maxToolRounds` 为 1–100 的整数，省略时按任务使用原默认值，`recentChapterCount` 为 0–100 的整数。拒绝额外字段、字符串数字、小数及越界值。旧 PUT 省略整个 `taskSettings` 或其中 `writing` 时保留已有写作配置；显式提交 `writing` 且省略 `maxToolRounds` 恢复自动轮数。原 `planning` 开关接受为旧格式但忽略且不返回。提取默认 prompt、自动重试关闭，最多额外 2 次、间隔 5000ms；次数 0–10，间隔 0–300000ms。旧 PUT 省略整个设置保留已有提取配置，省略 `outputMode` 保留原模式，其余字段及未知值仍校验。
 - `extraction.outputMode`：prompt 只要求文本 JSON；structured 发送原生 JSON Schema（Chat 的 response_format、Responses 的 text.format、Gemini 的 responseJsonSchema、Claude 的 output_config.format）；tool 提供唯一的 submit_extraction，参数包含 summary/entities/relations/foreshadows，只接收一次同名调用并结束，不执行操作、不回传工具结果、不再生成确认文本。Claude 采用 auto 工具选择以保留思考，其他协议限定工具名称；所有协议都检查实际调用。结构及工具定义计入上下文预算，流式／非流式共用已有证据、关联、版本检查及显式配置的提取重试；失败保留参数文本、原始响应与用量，不自动切换模式。nameStatus/isMain/attribute/dueChapter 可空字段的 null 归为未填写，其他必填值仍校验。
 - 自动重试按提取任务的章节／片段计数，导入与独立 extract 共用；失败次数持久化，成功片段的资料、进度及计数清理同事务提交。网络、超时、HTTP 5xx／408／429、输出格式与证据校验失败按设置重试，其他 HTTP 4xx、配置／预算错误、存储错误、停止与版本变化不重试。等待期间 status=running，message 显示次数；每次输出留档、用量累计，耗尽后 failed，人工 resume/retry 重置失败次数。重启或恢复备份转暂停，仍需手动操作；不重发正文、规划、压缩、连接测试或生图请求。
 - 历史规划兼容：旧非压缩 plan 队列在启动及备份恢复时取消，记录与模型输出保留且不能应用；继续／重试或导入新规划输出拒绝。outline.fine 不再自动注入写作，历史快照与备份保留。PUT outline 仅编辑 worldview/locked，fine 可省略；旧客户端携带现有 fine 时保留它，试图修改规划返回 410。

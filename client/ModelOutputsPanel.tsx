@@ -7,7 +7,7 @@ import { VisualOutputEditor } from './VisualOutputEditor';
 import { humanIssuePath, parseVisualOutput, unwrapVisualText } from './output-form';
 import { RequestDiagnostics } from './RequestDiagnostics';
 
-const stageNames: Record<OutputStage, string> = { planning: '历史规划', compression: '摘要压缩', writing: '正文生成', 'chapter-title': '章节自动命名', extraction: '资料提取', 'image-placement': '匹配 CG 位置' };
+const stageNames: Record<OutputStage, string> = { planning: '历史规划', compression: '摘要压缩', writing: '正文生成', 'chapter-title': '章节自动命名', extraction: '资料提取', 'image-placement': '匹配 CG 位置', recall: '写作原文召回' };
 const outputStatusNames: Record<ModelOutputRecord['status'], string> = { received: '已收到', invalid: '校验未通过', applied: '已应用' };
 
 function downloadText(text: string, filename: string) {

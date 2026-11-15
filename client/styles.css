@@ -301,7 +301,7 @@
 .settings-page .provider-card>.row>.eyebrow{overflow-wrap:anywhere}
 .settings-page .settings-task-card{padding:20px;gap:16px}
 .settings-page .settings-task-grid{gap:20px}
-.settings-model-tabs{position:sticky;top:var(--settings-header-height);z-index:3;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;padding:10px 0;border-bottom:1px solid var(--line);background:var(--paper)}
+.settings-model-tabs{position:sticky;top:var(--settings-header-height);z-index:3;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;padding:10px 0;border-bottom:1px solid var(--line);background:var(--paper)}
 .settings-model-tabs>button{min-height:42px;padding:10px 8px;border-radius:7px;font-size:calc(12px * var(--ui-scale, 1));color:var(--muted)}
 .settings-model-tabs>button:hover:not(:disabled){background:var(--surface-hover);color:var(--green)}
 .settings-model-tabs>button[aria-selected=true]{background:var(--accent-soft);color:var(--green);font-weight:600}

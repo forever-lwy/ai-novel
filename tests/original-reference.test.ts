@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { Store } from '../server/store.js';
 import { StoryEngine, type TextModels } from '../server/engine.js';
+import { defaultTaskSettings } from '../shared/task-settings.js';
 import type { Entity, ExtractionResult, Job, ModelRequest, Settings, StoryReference } from '../shared/types.js';
 
 const stores: Store[] = [], engines: StoryEngine[] = [];
@@ -34,7 +35,7 @@ function source(store: Store, projectId: string, branchId: string, sourceId: str
   store.db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?)').run(job.id, branchId, projectId, job.status, JSON.stringify(job));
   store.db.prepare('INSERT INTO job_import_chapters VALUES(?,?,?,?)').run(job.id, 0, chapters[0].title, chapters[0].text);
 }
-const settings = (): Settings => ({ providers: [{ id: 'fixture', name: '本地模拟', protocol: 'openai-chat', baseUrl: 'http://unused.invalid', model: 'writer', contextTokens: 64000, maxOutputTokens: 1000 }], writingProviderId: 'fixture', planningProviderId: 'fixture', extractionProviderId: 'fixture' });
+const settings = (): Settings => ({ providers: [{ id: 'fixture', name: '本地模拟', protocol: 'openai-chat', baseUrl: 'http://unused.invalid', model: 'writer', contextTokens: 64000, maxOutputTokens: 1000 }], writingProviderId: 'fixture', planningProviderId: 'fixture', extractionProviderId: 'fixture', taskSettings: { ...defaultTaskSettings(), recall: { maxChapters: 0 } } });
 function engineFor(store: Store, requests: ModelRequest[] = []) {
   const models: TextModels = { generateText: vi.fn(async (_config, request) => ({ text: '体验线新增正文。', inputTokens: 10, outputTokens: 5 })), generateStructured: vi.fn(async (_config, request, validate) => { requests.push(request); return { value: validate(emptyExtraction()), inputTokens: 1, outputTokens: 1 }; }) as TextModels['generateStructured'] };
   const engine = new StoryEngine(store, settings, models); engines.push(engine); return engine;

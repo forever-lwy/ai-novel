@@ -78,10 +78,10 @@ it('uses each selected model profile for connection tests and common defaults fo
     expect(response.json().ok).toBe(true);
   }
   expect(requests.map(body => [body.model, body.max_tokens, body.temperature])).toEqual([['test-model', 1024, 0.3], ['second-model', 8192, 0], ['new-model', 32000, 1]]);
-  expect(ctx.settings.get().modelParameters).toHaveLength(4);
+  expect(ctx.settings.get().modelParameters).toHaveLength(modelRoles.length + 1);
 });
 
-it('connection tests separate three roles using the same supplier and model and retain legacy role inference', async () => {
+it('connection tests separate task roles using the same supplier and model and retain legacy role inference', async () => {
   const ctx = await context(); const requests: any[] = [];
   const url = await endpoint((body, response) => { requests.push(body); response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }] })); });
   const value = settings({ protocol: 'openai-chat', baseUrl: url });
@@ -93,7 +93,7 @@ it('connection tests separate three roles using the same supplier and model and 
   }
   value.extractionModel = 'extract-only'; ctx.settings.save(value);
   expect((await ctx.app.inject({ method: 'POST', url: '/api/settings/test', cookies: { session: ctx.session }, payload: { providerId: 'model', model: 'extract-only' } })).json().ok).toBe(true);
-  expect(requests.map(body => [body.model, body.max_tokens, body.temperature])).toEqual([['test-model', 1024, 0], ['test-model', 2048, 0.5], ['test-model', 3072, 1], ['test-model', 1024, 0], ['extract-only', 8192, 0.2]]);
+  expect(requests.map(body => [body.model, body.max_tokens, body.temperature])).toEqual([...modelRoles.map((_role, index) => ['test-model', 1024 * (index + 1), index / 2]), ['test-model', 1024, 0], ['extract-only', 8192, 0.2]]);
 });
 
 it('connection tests use the saved output cap and expose sanitized diagnostics even for an empty HTTP 500', async () => {

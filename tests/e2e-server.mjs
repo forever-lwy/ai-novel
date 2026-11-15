@@ -121,6 +121,15 @@ const modelServer = createServer(async (req, res) => {
     const taskMessages = archivedMessages?.length ? archivedMessages : body.messages || [];
     const system = taskMessages.filter(message => message.role === 'system').map(message => message.content).join('\n');
     const prompt = taskMessages.filter(message => message.role === 'user').map(message => message.content).join('\n');
+    if (system.includes('# 写作原文召回')) {
+      const candidates = JSON.parse(prompt.split('# 可额外召回的原文章节目录\n')[1]);
+      const limit = Number(system.match(/最多 (\d+) 章/)?.[1] || 0);
+      const selected = candidates.filter(chapter => chapter.title.includes('遥远')).slice(0, limit);
+      const text = JSON.stringify({ chapterKeys: selected.map(chapter => chapter.key) });
+      modelRequests++; modelRequestsByModel[body.model] = (modelRequestsByModel[body.model] || 0) + 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: text }, finish_reason: 'stop' }], usage: { prompt_tokens: 50, completion_tokens: 10 } })); return;
+    }
     if (/^e2e-image-prompts?/.test(body.model || '') || /生图提示词优化|IMAGE_PROMPT_OPTIMIZATION/.test(system)) {
       promptOptimizationRequests++; lastPromptOptimizationRequest = { model: body.model, system, prompt };
       if (body.model === 'e2e-image-prompt-failure') { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'Deliberate prompt optimization failure' })); return; }

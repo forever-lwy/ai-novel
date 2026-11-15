@@ -46,7 +46,7 @@ function withoutUrlCredentials(baseUrl: string) {
 }
 type StoredProviderConnection = ProviderConnection & { baseUrlEncrypted?: string };
 type StoredSettings = Omit<Settings, 'providers'> & { providers: StoredProviderConnection[] };
-export const defaultSettings = (): Settings => ({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '', writingModel: '', planningModel: '', extractionModel: '', modelParameters: [], promptTemplates: normalizePromptTemplates(), imageSettings: normalizeImageSettings(), taskSettings: normalizeTaskSettings() });
+export const defaultSettings = (): Settings => ({ providers: [], writingProviderId: '', planningProviderId: '', extractionProviderId: '', recallProviderId: '', writingModel: '', planningModel: '', extractionModel: '', recallModel: '', modelParameters: [], promptTemplates: normalizePromptTemplates(), imageSettings: normalizeImageSettings(), taskSettings: normalizeTaskSettings() });
 export function normalizeSettings(settings: Settings): Settings {
   return { ...normalizeModelSettings(settings), promptTemplates: normalizePromptTemplates(settings.promptTemplates), imageSettings: normalizeImageSettings(settings.imageSettings), taskSettings: normalizeTaskSettings(settings.taskSettings) };
 }

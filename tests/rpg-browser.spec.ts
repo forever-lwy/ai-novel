@@ -232,6 +232,7 @@ test('从早期章节穿越，AI 读取原作后续摘要、未来物品及指�
   expect(JSON.stringify(fileRead.result)).not.toContain('旧灯');
   expect(JSON.stringify(activities.find((value: { name: string }) => value.name === 'read_entity').result)).toContain('照亮星门');
   const outputs = await (await page.request.get(`/api/jobs/${writing.id}/outputs?view=author`)).json();
+  expect(outputs.filter((output: { stage: string }) => output.stage === 'recall')).toHaveLength(1);
   const request = await (await page.request.get(`/api/jobs/${writing.id}/outputs/${outputs[0].id}?view=author`)).json();
   expect(request.output.request.body).toContain('原作');
   expect(request.output.request.body).toContain('星钥');
@@ -243,6 +244,8 @@ test('从早期章节穿越，AI 读取原作后续摘要、未来物品及指�
   await expect(choice).toHaveCount(0);
   await waitReady(page, experienceId, 2);
   await expect.poll(() => visibleProse(page)).toContain('你按自己的选择回应守门人');
+  const resumedOutputs = await (await page.request.get(`/api/jobs/${writing.id}/outputs?view=author`)).json();
+  expect(resumedOutputs.filter((output: { stage: string }) => output.stage === 'recall')).toHaveLength(1);
   expect((await branch(page, project.mainBranchId)).state.chapters.map(chapter => chapter.id)).toEqual(original.state.chapters.map(chapter => chapter.id));
 });
 
@@ -360,6 +363,12 @@ test('章末选择已消费但POST回包丢失，只读恢复新任务且不再�
   const afterStats = await (await page.request.get(`${mockUrl.replace(/\/v1$/, '')}/__e2e/stats`)).json();
   const namingRequests = afterStats.chapterTitleRequests - beforeStats.chapterTitleRequests;
   expect(namingRequests).toBe(2);
-  expect(afterStats.modelRequestsByModel['e2e-rpg-budget'] - (beforeStats.modelRequestsByModel['e2e-rpg-budget'] || 0) - namingRequests).toBe(3);
+  const generationJobs = (await jobs(page, project.id)).filter(job => job.branchId === rpgBranchId && job.kind === 'generate');
+  const recallCounts = await Promise.all(generationJobs.map(async job => {
+    const outputs = await (await page.request.get(`/api/jobs/${job.id}/outputs?view=author`)).json();
+    return outputs.filter((output: { stage: string }) => output.stage === 'recall').length;
+  }));
+  expect(recallCounts).toEqual([1, 1]);
+  expect(afterStats.modelRequestsByModel['e2e-rpg-budget'] - (beforeStats.modelRequestsByModel['e2e-rpg-budget'] || 0) - namingRequests - recallCounts.reduce((sum, count) => sum + count, 0)).toBe(3);
   await page.screenshot({ path: testInfo.outputPath('rpg-chapter-lost-post-response-recovered.png'), animations: 'disabled' });
 });

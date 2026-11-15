@@ -1,13 +1,13 @@
 import { z } from 'zod';
 import { modelRoles } from '../shared/model-settings.js';
 import type { ProjectSettingsOverrides } from '../shared/types.js';
-import { parseTaskSettings, writingTaskSettingsSchema } from '../shared/task-settings.js';
+import { parseTaskSettings, recallTaskSettingsSchema, writingTaskSettingsSchema } from '../shared/task-settings.js';
 import { validatePromptTemplates } from '../shared/prompt-templates.js';
 
 export function parseProjectSettingsOverrides(value: unknown): ProjectSettingsOverrides {
   const task = z.object({ providerId: z.string().max(100), model: modelNameSchema, modelParameters: z.array(modelProfileSchema).max(3000) }).strict();
   const parsed = z.object({
-    tasks: z.object({ writing: task.extend({ writing: writingTaskSettingsSchema.optional() }).optional(), planning: task.optional(), extraction: task.extend({ extraction: z.unknown().optional() }).optional() }).strict().optional(),
+    tasks: z.object({ writing: task.extend({ writing: writingTaskSettingsSchema.optional() }).optional(), planning: task.optional(), extraction: task.extend({ extraction: z.unknown().optional() }).optional(), recall: task.extend({ recall: recallTaskSettingsSchema.optional() }).optional() }).strict().optional(),
     promptTemplates: z.unknown().optional(), imageSettings: imageSettingsSchema.optional(),
   }).strict().parse(value);
   const result: ProjectSettingsOverrides = {};
@@ -27,6 +27,7 @@ export function parseProjectSettingsOverrides(value: unknown): ProjectSettingsOv
       }
       result.tasks[role] = { providerId: selected.providerId, model: selected.model, modelParameters: selected.modelParameters };
       if (role === 'writing' && parsed.tasks.writing?.writing) result.tasks[role]!.writing = parsed.tasks.writing.writing;
+      if (role === 'recall') result.tasks[role]!.recall = parsed.tasks.recall?.recall ?? { maxChapters: 5 };
       if (role === 'extraction') {
         const extraction = parsed.tasks.extraction?.extraction;
         if (extraction === undefined) throw new Error('资料提取覆盖需包含输出模式和重试设置。');
@@ -66,4 +67,4 @@ export const imageSettingsSchema = z.object({
   outputFormat: z.enum(['png', 'jpeg', 'webp']).optional(), outputCompression: z.number().int().min(0).max(100).optional(), background: z.enum(['auto', 'opaque', 'transparent']).optional(), inputFidelity: z.enum(['low', 'high']).optional(), moderation: z.enum(['auto', 'low']).optional(),
   negativePrompt: z.string().max(32000).optional(), steps: z.number().int().min(1).max(100).optional(), guidanceScale: z.number().min(0).max(20).optional(), width: z.number().int().min(16).max(8192).optional(), height: z.number().int().min(16).max(8192).optional(), promptUpsampling: z.boolean().optional(), disableSafetyChecker: z.boolean().optional(),
 }).strict();
-export const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional(), promptTemplates: z.unknown().optional(), imageSettings: imageSettingsSchema.optional(), taskSettings: z.unknown().optional() });
+export const settingsSchema = z.object({ providers: z.array(providerSchema).max(30), writingProviderId: z.string(), planningProviderId: z.string(), extractionProviderId: z.string(), recallProviderId: z.string().optional(), writingModel: modelNameSchema.optional(), planningModel: modelNameSchema.optional(), extractionModel: modelNameSchema.optional(), recallModel: modelNameSchema.optional(), modelParameters: z.array(modelProfileSchema).max(3000).optional(), promptTemplates: z.unknown().optional(), imageSettings: imageSettingsSchema.optional(), taskSettings: z.unknown().optional() });
